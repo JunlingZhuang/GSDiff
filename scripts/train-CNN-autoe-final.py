@@ -25,7 +25,7 @@ batch_size = 16
 device = 'cuda:0' # Modify it yourself
 
 '''create output_dir'''
-output_dir = 'outputs/structure-78-12/'
+output_dir = 'outputs/boun-cnn-ae/'
 os.makedirs(output_dir, exist_ok=False)
 
 

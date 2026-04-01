@@ -24,7 +24,7 @@ batch_size = 4
 device = 'cuda:0' # Modify it yourself
 
 '''create output_dir'''
-output_dir = 'outputs/structure-56-36-interval1000/'
+output_dir = 'outputs/boun-edge/'
 os.makedirs(output_dir, exist_ok=False)
 '''record description'''
 description = ''''''

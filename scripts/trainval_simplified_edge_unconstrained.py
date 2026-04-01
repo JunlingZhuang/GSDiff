@@ -22,7 +22,7 @@ batch_size = 8  # 8
 device = 'cuda:0'
 
 '''create output_dir'''
-output_dir = 'outputs/structure-3/'
+output_dir = 'outputs/unconst-edge-selfsup/'
 os.makedirs(output_dir, exist_ok=False)
 
 '''Neural Network'''

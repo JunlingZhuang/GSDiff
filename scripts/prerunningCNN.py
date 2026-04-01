@@ -26,7 +26,7 @@ device = 'cuda:0' # Modify it yourself
 
 '''Neural Network'''
 pretrained_encoder = BoundaryModel().to(device)
-pretrained_encoder.load_state_dict(torch.load('outputs/structure-78-12/model_stage0_best_006700.pt', map_location=device))
+pretrained_encoder.load_state_dict(torch.load('outputs/boun-cnn-ae/model_stage0_best_006700.pt', map_location=device))
 print('Pre-trained boundary CNN parameters：', sum(p.numel() for p in pretrained_encoder.parameters()))
 for param in pretrained_encoder.parameters():
     param.requires_grad = False

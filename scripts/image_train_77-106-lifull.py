@@ -609,7 +609,7 @@ while step < total_steps:
         # print(semantics_all_samples_val)
 
         # model 2 loading
-        model_path_2 = 'outputs/structure-56-16-interval1000-lifull/' + 'model014000.pt' # 凑合一个就行，这个训完了还得换个更好的边缘模型
+        model_path_2 = 'outputs/shared-edge-base-interval1000-lifull/' + 'model014000.pt' # 凑合一个就行，这个训完了还得换个更好的边缘模型
         model_2 = EdgeModel().to(device)
         model_2.load_state_dict(torch.load(model_path_2, map_location="cpu"))
         model_2.to(device)

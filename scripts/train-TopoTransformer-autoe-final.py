@@ -24,11 +24,11 @@ batch_size = 256
 device = 'cuda:0' # Modify it yourself
 
 '''create output_dir'''
-output_dir = 'outputs/structure-57-16/'
+output_dir = 'outputs/topo-ae/'
 os.makedirs(output_dir, exist_ok=False)
 
 '''Neural Network'''
-model_path = 'outputs/structure-57-13/model011000.pt'
+model_path = 'outputs/topo-ae-ckpt/model011000.pt'
 model = TopoGraphModel().to(device)
 model.load_state_dict(torch.load(model_path, map_location=device))
 print('total params:', sum(p.numel() for p in model.parameters()))

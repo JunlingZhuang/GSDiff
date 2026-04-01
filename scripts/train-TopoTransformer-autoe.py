@@ -22,7 +22,7 @@ batch_size = 2048
 device = 'cuda:0'
 
 '''create output_dir'''
-output_dir = 'outputs/structure-57-13/'
+output_dir = 'outputs/topo-ae-ckpt/'
 os.makedirs(output_dir, exist_ok=False)
 
 

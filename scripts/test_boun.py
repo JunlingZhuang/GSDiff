@@ -155,7 +155,7 @@ for batch_count in tqdm(range(batch_numbers)):
 
 
 # Loading the trained edge model
-model_path_EdgeModel = 'outputs/structure-56-36-interval1000/model_stage2_best_065000.pt'
+model_path_EdgeModel = 'outputs/boun-edge/model_stage2_best_065000.pt'
 model_EdgeModel = BoundEdgeModel().to(device)
 model_EdgeModel.load_state_dict(torch.load(model_path_EdgeModel, map_location=device))
 for param in model_EdgeModel.parameters():
@@ -163,9 +163,9 @@ for param in model_EdgeModel.parameters():
 
 # DDPM
 test_metrics = []
-model_path_CDDPMs = ['outputs/structure-81-106-3/' + fn for fn in os.listdir('outputs/structure-81-106-3') if 'model' in fn and '.pt' in fn]
+model_path_CDDPMs = ['outputs/boun-node-ddpm/' + fn for fn in os.listdir('outputs/boun-node-ddpm') if 'model' in fn and '.pt' in fn]
 for model_path_CDDPM in model_path_CDDPMs:
-    if int(model_path_CDDPM[5 + len('outputs/structure-81-106-3/'):8 + len('outputs/structure-81-106-3/')]) % 1000 == 100: # model1000000.pt
+    if int(model_path_CDDPM[5 + len('outputs/boun-node-ddpm/'):8 + len('outputs/boun-node-ddpm/')]) % 1000 == 100: # model1000000.pt
         model_CDDPM = BoundHeterHouseModel().to(device)
         model_CDDPM.load_state_dict(torch.load(model_path_CDDPM, map_location=device))
         for param in model_CDDPM.parameters():

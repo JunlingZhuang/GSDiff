@@ -169,7 +169,7 @@ def map_to_sxtnary(tensor):
 # assert 0
 
 '''create output_dir'''
-output_dir = 'outputs/structure-81-106-3/'
+output_dir = 'outputs/boun-node-ddpm/'
 os.makedirs(output_dir, exist_ok=False)
 
 '''Diffusion Settings'''
@@ -292,7 +292,7 @@ for batch_count in tqdm(range(batch_numbers)):
 
 # '''Neural Network'''
 # pretrained_encoder = BoundaryModel().to(device)
-# pretrained_encoder.load_state_dict(torch.load('outputs/structure-78-12/model_stage0_best_006700.pt', map_location=device))
+# pretrained_encoder.load_state_dict(torch.load('outputs/boun-cnn-ae/model_stage0_best_006700.pt', map_location=device))
 # print('Pre-trained boundary CNN parameters：', sum(p.numel() for p in pretrained_encoder.parameters()))
 # for param in pretrained_encoder.parameters():
 #     param.requires_grad = False
@@ -653,7 +653,7 @@ while step < total_steps:
         # print(semantics_all_samples_val)
 
         # model 2 loading
-        model_path_2 = 'outputs/structure-56-16/' + 'model_stage2_best_010300.pt'
+        model_path_2 = 'outputs/shared-edge-base/' + 'model_stage2_best_010300.pt'
         model_2 = EdgeModel().to(device)
         model_2.load_state_dict(torch.load(model_path_2, map_location="cpu"))
         model_2.to(device)

@@ -22,7 +22,7 @@ batch_size = 8  # 8
 device = 'cuda:0'
 
 '''create output_dir'''
-output_dir = 'outputs/structure-56-16-interval1000/'
+output_dir = 'outputs/shared-edge-base-interval1000/'
 os.makedirs(output_dir, exist_ok=False)
 
 

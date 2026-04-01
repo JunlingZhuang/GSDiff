@@ -1,1 +1,20 @@
 datasets
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
+.venv/
+.uv-cache/
+
+# Pretrained model weights
+scripts/outputs/
+
+# Archives
+*.tar
+*.zip
+
+# Claude Code local settings
+.claude/settings.local.json

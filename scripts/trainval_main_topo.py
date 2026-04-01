@@ -167,7 +167,7 @@ def map_to_sxtnary(tensor):
 
 
 '''create output_dir'''
-output_dir = 'outputs/structure-80-106-2/'
+output_dir = 'outputs/topo-node-ddpm/'
 os.makedirs(output_dir, exist_ok=False)
 
 '''Diffusion Settings'''
@@ -290,7 +290,7 @@ for batch_count in tqdm(range(batch_numbers)):
 
 '''Neural Network'''
 pretrained_encoder = TopoGraphModel().to(device)
-pretrained_encoder.load_state_dict(torch.load('outputs/structure-57-16/model_stage0_best_006000.pt', map_location=device))
+pretrained_encoder.load_state_dict(torch.load('outputs/topo-ae/model_stage0_best_006000.pt', map_location=device))
 print('The number of parameters of the pre-trained graph embedding network：', sum(p.numel() for p in pretrained_encoder.parameters()))
 for param in pretrained_encoder.parameters():
     param.requires_grad = False
@@ -638,7 +638,7 @@ Note that there is padding, which is masked to all 0.'''
         # print(semantics_all_samples_val)
 
         # model 2 loading
-        model_path_2 = 'outputs/structure-56-16/' + 'model_stage2_best_010300.pt'
+        model_path_2 = 'outputs/shared-edge-base/' + 'model_stage2_best_010300.pt'
         model_2 = EdgeModel().to(device)
         model_2.load_state_dict(torch.load(model_path_2, map_location="cpu"))
         model_2.to(device)

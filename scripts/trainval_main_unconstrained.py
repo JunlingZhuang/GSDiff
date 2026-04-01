@@ -165,7 +165,7 @@ def map_to_sxtnary(tensor):
 
 
 '''create output_dir'''
-output_dir = 'outputs/structure-1/'
+output_dir = 'outputs/unconst-node-ddpm/'
 os.makedirs(output_dir, exist_ok=False)
 '''record description'''
 description = ''' '''
@@ -596,7 +596,7 @@ while step < total_steps:
         # print(semantics_all_samples_val)
 
         # model 2 loading
-        model_path_2 = 'outputs/structure-3/' + 'model_stage2_best_010300.pt'
+        model_path_2 = 'outputs/unconst-edge-selfsup/' + 'model_stage2_best_010300.pt'
         model_2 = EdgeModel().to(device)
         model_2.load_state_dict(torch.load(model_path_2, map_location="cpu"))
         model_2.to(device)

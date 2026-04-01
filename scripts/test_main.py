@@ -154,7 +154,7 @@ for batch_count in tqdm(range(batch_numbers)):
 
 '''Neural Network
 Random Self-Supervised Strategy Transformer'''
-model_path_EdgeModel = 'outputs/structure-2/model_stage2_best_061000.pt'
+model_path_EdgeModel = 'outputs/unconst-edge/model_stage2_best_061000.pt'
 model_EdgeModel = EdgeModel().to(device)
 model_EdgeModel.load_state_dict(torch.load(model_path_EdgeModel, map_location=device))
 for param in model_EdgeModel.parameters():
@@ -163,9 +163,9 @@ for param in model_EdgeModel.parameters():
 # DDPM
 # Training with alignment loss
 test_metrics = []
-model_path_CDDPMs = ['outputs/structure-1/' + fn for fn in os.listdir('outputs/structure-1') if 'model' in fn and '.pt' in fn]
+model_path_CDDPMs = ['outputs/unconst-node-ddpm/' + fn for fn in os.listdir('outputs/unconst-node-ddpm') if 'model' in fn and '.pt' in fn]
 for model_path_CDDPM in model_path_CDDPMs:
-    if int(model_path_CDDPM[5 + len('outputs/structure-1/'):8 + len('outputs/structure-1/')]) % 1000 == 100: # model1000000.pt
+    if int(model_path_CDDPM[5 + len('outputs/unconst-node-ddpm/'):8 + len('outputs/unconst-node-ddpm/')]) % 1000 == 100: # model1000000.pt
         model_CDDPM = HeterHouseModel().to(device)
         model_CDDPM.load_state_dict(torch.load(model_path_CDDPM, map_location=device))
         for param in model_CDDPM.parameters():

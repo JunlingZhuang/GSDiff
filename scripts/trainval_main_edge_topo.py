@@ -72,7 +72,7 @@ def truncated_normal(tensor, mu, sigma, lower, upper, dtype, device):
 
 '''Neural Network'''
 pretrained_encoder = TopoGraphModel().to(device)
-pretrained_encoder.load_state_dict(torch.load('outputs/structure-57-16/model_stage0_best_006000.pt', map_location=device))
+pretrained_encoder.load_state_dict(torch.load('outputs/topo-ae/model_stage0_best_006000.pt', map_location=device))
 print('The number of parameters of the pre-trained graph embedding network：', sum(p.numel() for p in pretrained_encoder.parameters()))
 for param in pretrained_encoder.parameters():
     param.requires_grad = False
