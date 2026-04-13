@@ -1,90 +1,216 @@
 # GSDiff
+
 Official implementation of the AAAI 2025 paper: "GSDiff: Synthesizing Vector Floorplans via Geometry-enhanced Structural Graph Generation"
 
-## Data
+## Installation
+
+Requires Python 3.10 and CUDA 11.8+. We recommend [uv](https://docs.astral.sh/uv/) for fast dependency management.
+
+```bash
+# Create virtual environment
+uv venv --python 3.10 .venv
+
+# Activate (choose your platform)
+source .venv/bin/activate        # Linux / macOS
+source .venv/Scripts/activate    # Windows (Git Bash)
+
+# Install PyTorch with CUDA 11.8
+uv pip install torch==2.0.1 torchvision==0.15.2 --index-url https://download.pytorch.org/whl/cu118
+
+# Install remaining dependencies
+uv pip install networkx==3.1 numpy==1.26.0 opencv-python==4.9.0.80 scipy==1.10.1 \
+  scikit-image==0.24.0 scikit-learn==1.4.1.post1 shapely==2.0.6 \
+  tensorboardx==2.6.2.2 tqdm==4.65.0 matplotlib==3.9.2 pytorch-fid==0.3.0 pillow==10.0.1
+```
+
+> **Note:** PyTorch is ~2.4GB. If your default drive is low on space, set `UV_CACHE_DIR` to a path on another drive before installing.
+
+## Data Preparation
+
+### RPLAN Dataset
+
 1. Create folder `datasets/rplandata/Data`.
 2. Download the 80,788 RPLAN dataset (http://staff.ustc.edu.cn/~fuxm/projects/DeepLayout/index.html). It contains a `floorplan_dataset` folder. Place this `floorplan_dataset` folder under `datasets/rplandata/Data`.
-3. Run the following scripts to obtain structural graph data:
-   ```bash
-   python rplan-extract.py
-   python rplan-process1.py
-   python rplan-process2.py
-   python rplan-process3.py
-   python rplan-process4.py
-   ```
-   - After completion, a directory `rplang-v3-withsemantics` (65,763 train + 3,000 val + 3,000 test = 71,763 `.npy` files) will be created under `datasets/rplandata/Data`.
-   - Running `rplan-extract.py` also generates folders (`1-channel-semantics-256`, `3-channel-semantics-256`, `bin_imgs`, `e_imgs`, etc.). You can remove them.
+3. Run the preprocessing pipeline from the `datasets/` directory:
 
-4. Run the following scripts to obtain structural graph data with boundaries:
-   ```bash
-   python rplan-process5.py
-   python rplan-process6.py
-   python rplan-process7.py
-   ```
-   - After completion, 2 directories `rplang-v3-withsemantics-withboundary` and `rplang-v3-withsemantics-withboundary-v2`, will appear under `datasets/rplandata/Data`, each containing 71,763 files.
+```bash
+cd datasets
 
-5. Run the following scripts to obtain topology graphs:
-   ```bash
-   python rplan-process8.py
-   python rplan-process9.py
-   python rplan-process10.py
-   ```
-   - After completion, a `rplang-v3-bubble-diagram` folder will be created under `datasets/rplandata/Data`, containing the same number of files.
+# Extract structural graphs (80,788 → 71,763 valid samples)
+uv run python rplan-extract.py        # original version
+# or
+uv run python rplan-extract-fast.py   # optimized version (~10x faster, same output)
 
-6. Move data from `datasets/rplandata/Data` to `datasets` for train/val/testing:
-   ```bash
-   python move.py
-   ```
+# Process node/semantic data → rplang-v3-withsemantics/
+uv run python rplan-process1.py
+uv run python rplan-process2.py
+uv run python rplan-process3.py
+uv run python rplan-process4.py
 
-Note, when we conducted our experiments, the semantics of bubble diagram GT involved randomness. Due to the terms of the RPLAN dataset, we are not permitted to release any part of it. Therefore, the bubble diagram GT semantics extracted using the provided scripts may differ slightly from our experimental results. However, given the large data scale, the bias should be minor (for rooms with ambiguous categories, both our GT and the GT you extract randomly select one category, which is no statistically significant difference).
-Alternatively, you can use `get_cycle_basis_and_semantic_3_semansimplified` instead of `get_cycle_basis_and_semantic_2_semansimplified` in `rplan-process8/9/10.py` to extract room semantics and train your own topology models. This method is not random, may yield improvements over the metrics reported in the paper.
+# Process boundary data → rplang-v3-withsemantics-withboundary/
+uv run python rplan-process5.py
+uv run python rplan-process6.py
+uv run python rplan-process7.py
 
---------------------------LIFULL---------------------------------------
+# Process topology/bubble diagrams → rplang-v3-bubble-diagram/
+uv run python rplan-process8.py
+uv run python rplan-process9.py
+uv run python rplan-process10.py
 
-If you want to try training/generating on the LIFULL dataset, please create path `datasets/lifulldata` and follow the data request process of Raster-to-Graph (https://github.com/SizheHu/Raster-to-Graph) to place the data under this path `datasets/lifulldata`. 
+# Split into train(65,763) / val(3,000) / test(3,000)
+uv run python move.py
+```
 
-The data contains 10,804 images (Step 1: Access the "LIFULL HOME'S Data") and corresponding annotations (Step 2: Access the Annotations).
+**Which steps do I need?**
+- **Unconstrained generation:** Steps 3-4 (extract + process1-4) + move.py
+- **Topology-constrained:** Above + process8-10
+- **Boundary-constrained:** Above + process5-7
 
+After `rplan-extract.py`, intermediate folders (`1-channel-semantics-256`, `3-channel-semantics-256`, `bin_imgs`, `e_imgs`, etc.) are created under `datasets/rplandata/Data`. You can remove them after all processing is complete.
 
-# Usage
-The test scripts for no constraints, topology constraints, and boundary constraints are all placed under `scripts` (test_xxx.py). 
-Download the corresponding weights and run them via:
-   ```bash
-   python test_xxx.py
-   ```
+> **Note on topology data:** The semantics of bubble diagram GT involve randomness. Due to RPLAN dataset terms, we cannot release any part of it. The bubble diagram GT semantics extracted using the provided scripts may differ slightly from our experimental results. However, given the large data scale, the bias should be minor. Alternatively, you can use `get_cycle_basis_and_semantic_3_semansimplified` instead of `get_cycle_basis_and_semantic_2_semansimplified` in `rplan-process8/9/10.py` for deterministic room semantics extraction.
 
-No constraints: We use the original 3000 results and run them 5 times to get the average.
+### LIFULL Dataset
 
-Topology constraints: We took the intersection of the original 3000 results with the test set numbers of HouseDiffusion and House-GAN++, and got 757. 
-We ran them 5 times and averaged them to get the FID, KID, GED, and statistical analysis of each room type. 
-The sample numbers of 757 are in line 183 of `evalmetric-topoconstrain-ged-roomnumber.py`.
+Create path `datasets/lifulldata` and follow the data request process of [Raster-to-Graph](https://github.com/SizheHu/Raster-to-Graph) to place the data there. The data contains 10,804 images and corresponding annotations.
 
-Boundary constraints: We took the intersection of the original 3000 results with the test set numbers of HouseDiffusion and House-GAN++, and got 378. 
-We ran them 5 times and averaged them to get the FID, KID, GED, and statistical analysis of each room type. 
-The sample number of 378 is on line 9 of `evalmetric-boun-constrain-fid-kid.py`.
+## Pretrained Weights
 
---------------------------LIFULL---------------------------------------
+Download and extract into `scripts/outputs/`:
 
-All training and testing scripts on LIFULL dataset have 'lifull' in the file names. 
+| Model | Link |
+|-------|------|
+| Unconstrained (node + edge) | [Google Drive](https://drive.google.com/file/d/15gM0GtW2GwHmlpz0r-rpvo-k-BlNy_gu/view?usp=sharing) |
+| Topology-constrained (node + edge) | [Google Drive](https://drive.google.com/file/d/1pk7SmvLZ8ON3OUL3SNxPRu73ndVKru0z/view?usp=sharing) |
+| Boundary-constrained (node + edge) | [Google Drive](https://drive.google.com/file/d/1puqxXIW4Y7AeQHFuC76PlYpWQm6MD8PS/view?usp=sharing) |
+| Boundary CNN autoencoder | [Google Drive](https://drive.google.com/file/d/1l6QRpfX5Jtucg3R995HajlwRG8SewUJW/view?usp=sharing) |
+| Topology Transformer autoencoder | [Google Drive](https://drive.google.com/file/d/1tExX8LdrFpJfBQH5y2emC6BltBwf9tHx/view?usp=sharing) |
 
-Like RPLAN dataset, the purpose of each script is stated at the top of the script.
+**LIFULL weights:**
 
+| Model | Link |
+|-------|------|
+| Node | [Google Drive](https://drive.google.com/file/d/1k_q9-vQXbs3PDzLxvz-tQRvO3j0DzlPN/view?usp=sharing) |
+| Edge | [Google Drive](https://drive.google.com/file/d/1XkoMZAMOeBPTteUTVDukgc4BNoEEJSXS/view?usp=sharing) |
 
-# params (place in the 'outputs' folder)
-unconstrained params: https://drive.google.com/file/d/15gM0GtW2GwHmlpz0r-rpvo-k-BlNy_gu/view?usp=sharing
+Expected directory layout after extraction:
 
-topology-constrained params: https://drive.google.com/file/d/1pk7SmvLZ8ON3OUL3SNxPRu73ndVKru0z/view?usp=sharing
+```
+scripts/outputs/
+├── unconst-node-ddpm/    # Unconstrained Stage 1
+├── unconst-edge/         # Unconstrained Stage 2
+├── topo-ae/              # Topology Transformer autoencoder
+├── topo-node-ddpm/       # Topology-constrained Stage 1
+├── topo-edge/            # Topology-constrained Stage 2
+├── boun-cnn-ae/          # Boundary CNN autoencoder
+├── boun-node-ddpm/       # Boundary-constrained Stage 1
+└── boun-edge/            # Boundary-constrained Stage 2
+```
 
-boundary-constrained params: https://drive.google.com/file/d/1puqxXIW4Y7AeQHFuC76PlYpWQm6MD8PS/view?usp=sharing
+See [docs/pretrained-models.md](docs/pretrained-models.md) for detailed I/O specifications per model.
 
-boundary-autoencoder CNN params: https://drive.google.com/file/d/1l6QRpfX5Jtucg3R995HajlwRG8SewUJW/view?usp=sharing
+## Usage
 
-topology-autoencoder Transformer params: https://drive.google.com/file/d/1tExX8LdrFpJfBQH5y2emC6BltBwf9tHx/view?usp=sharing
+### Configuration
 
---------------------------LIFULL---------------------------------------
+Before running any script, update two things at the top of each file:
 
-Training parameters on the LIFULL dataset: 
+1. **`sys.path.append()`** lines — change to your local project path
+2. **`device = 'cuda:0'`** — change to match your GPU
 
-Node: https://drive.google.com/file/d/1k_q9-vQXbs3PDzLxvz-tQRvO3j0DzlPN/view?usp=sharing
+### Testing (Inference)
 
-Edge: https://drive.google.com/file/d/1XkoMZAMOeBPTteUTVDukgc4BNoEEJSXS/view?usp=sharing
+All test scripts run from `scripts/`:
+
+```bash
+cd scripts
+
+# Unconstrained generation (3,000 samples, run 5x for averaging)
+uv run python test_main.py
+
+# Topology-constrained (757 samples)
+uv run python test_topo.py
+
+# Boundary-constrained (378 samples)
+uv run python test_boun.py
+```
+
+**Evaluation details:**
+- **Unconstrained:** Uses the original 3,000 test results, run 5 times to get the average.
+- **Topology-constrained:** Intersection of 3,000 results with HouseDiffusion and House-GAN++ test sets → 757 samples. Sample numbers are in line 183 of `evalmetric-topoconstrain-ged-roomnumber.py`.
+- **Boundary-constrained:** Same intersection → 378 samples. Sample numbers are in line 9 of `evalmetric-boun-constrain-fid-kid.py`.
+
+### Training
+
+```bash
+cd scripts
+
+# Unconstrained
+uv run python trainval_main_unconstrained.py       # Stage 1: node generation
+uv run python trainval_main_edge_unconstrained.py  # Stage 2: edge prediction
+
+# Topology-constrained (train autoencoders first)
+uv run python train-TopoTransformer-autoe.py       # Topology encoder phase 1
+uv run python train-TopoTransformer-autoe-final.py # Topology encoder phase 2
+uv run python trainval_main_topo.py                # Stage 1
+uv run python trainval_main_edge_topo.py           # Stage 2
+
+# Boundary-constrained (train autoencoder first)
+uv run python train-CNN-autoe-final.py             # Boundary CNN encoder
+uv run python trainval_main_boun.py                # Stage 1
+uv run python trainval_main_edge_boun.py           # Stage 2
+```
+
+### Evaluation
+
+Run from project root:
+
+```bash
+uv run python evalmetric-no-constrain-fid-kid.py
+uv run python evalmetric-no-constrain-geometry-topological-metrics.py
+uv run python evalmetric-topoconstrain-ged-roomnumber.py
+uv run python evalmetric-boun-constrain-fid-kid.py
+```
+
+### LIFULL Dataset
+
+All LIFULL training and testing scripts have `lifull` in their file names. The purpose of each script is stated at the top of the file.
+
+## Web App (Demo)
+
+A web-based demo for interactive floorplan generation. No dataset required — uses pretrained models directly.
+
+### Setup
+
+```bash
+# Frontend dependencies (from app/ directory)
+cd app
+npm install
+
+# Backend dependencies (uses the project .venv)
+cd app/backend
+source ../../.venv/Scripts/activate    # Windows (Git Bash)
+# source ../../.venv/bin/activate      # Linux / macOS
+uv pip install fastapi uvicorn
+```
+
+### Running
+
+```bash
+cd app
+
+# Start both frontend + backend together
+npm run dev:all
+
+# Or separately:
+npm run dev        # Frontend only (port 3000)
+npm run backend    # Backend only (port 8000)
+```
+
+Open http://localhost:3000 in your browser.
+
+### Features
+
+- **Unconstrained mode:** Generate random floorplans with one click
+- **Topology mode:** Define room types (4-8 rooms) and adjacency relationships, then generate a matching floorplan
+- Generation takes ~30 seconds per floorplan on a 3090
