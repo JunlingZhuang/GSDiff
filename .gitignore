@@ -11,6 +11,8 @@ __pycache__/
 
 # Pretrained model weights
 scripts/outputs/
+GRAN/snapshot_model/
+GRAN/*.pth
 
 # Archives
 *.tar
