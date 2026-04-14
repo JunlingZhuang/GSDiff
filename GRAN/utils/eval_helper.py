@@ -377,8 +377,11 @@ def orbit_stats_all(graph_ref_list, graph_pred_list):
     orbit_counts_graph = np.sum(orbit_counts, axis=0) / G.number_of_nodes()
     total_counts_pred.append(orbit_counts_graph)
 
-  total_counts_ref = np.array(total_counts_ref)
-  total_counts_pred = np.array(total_counts_pred)
+  total_counts_ref = np.array(total_counts_ref) if total_counts_ref else np.array([])
+  total_counts_pred = np.array(total_counts_pred) if total_counts_pred else np.array([])
+
+  if len(total_counts_ref) == 0 or len(total_counts_pred) == 0:
+    return 0.0
 
   # mmd_dist = compute_mmd(
   #     total_counts_ref,

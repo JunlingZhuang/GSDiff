@@ -13,6 +13,10 @@ __pycache__/
 scripts/outputs/
 GRAN/snapshot_model/
 GRAN/*.pth
+GRAN/exp/
+GRAN/utils/orca/tmp.txt
+GRAN/.venv/
+GRAN/data/*_precompute/
 
 # Archives
 *.tar

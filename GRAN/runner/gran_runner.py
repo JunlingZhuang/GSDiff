@@ -74,8 +74,11 @@ def evaluate(graph_gt, graph_pred, degree_only=True):
     mmd_clustering = 0.0
     mmd_spectral = 0.0
   else:    
-    mmd_4orbits = orbit_stats_all(graph_gt, graph_pred)
-    mmd_clustering = clustering_stats(graph_gt, graph_pred)    
+    try:
+      mmd_4orbits = orbit_stats_all(graph_gt, graph_pred)
+    except:
+      mmd_4orbits = -1.0  # orca extension not compiled
+    mmd_clustering = clustering_stats(graph_gt, graph_pred)
     mmd_spectral = spectral_stats(graph_gt, graph_pred)
     
   return mmd_degree, mmd_clustering, mmd_4orbits, mmd_spectral
