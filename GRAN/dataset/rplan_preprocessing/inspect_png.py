@@ -6,9 +6,9 @@ Channel layout (verified against https://github.com/zzilch/RPLAN-Toolbox):
     Channel 2: instance   - per-room unique instance ID
     Channel 3: inside     - interior mask (255=inside, 0=exterior)
 
-Channel 1 category value IDs:
-      0 MasterRoom       9 Balcony        14 ExteriorWall
-      1 LivingRoom      10 Entrance       15 FrontDoor
+Channel 1 category value IDs (verified against RPLAN-Toolbox):
+      0 LivingRoom       9 Balcony        14 ExteriorWall
+      1 MasterRoom      10 Entrance       15 FrontDoor
       2 Kitchen         11 Storage        16 InteriorWall
       3 Bathroom        12 Wall-in        17 InteriorDoor
       4 DiningRoom      13 External
@@ -41,7 +41,7 @@ import matplotlib.pyplot as plt
 
 
 CATEGORY_NAMES = {
-    0: 'MasterRoom', 1: 'LivingRoom', 2: 'Kitchen', 3: 'Bathroom',
+    0: 'LivingRoom', 1: 'MasterRoom', 2: 'Kitchen', 3: 'Bathroom',
     4: 'DiningRoom', 5: 'ChildRoom', 6: 'StudyRoom', 7: 'SecondRoom',
     8: 'GuestRoom', 9: 'Balcony', 10: 'Entrance', 11: 'Storage',
     12: 'Wall-in', 13: 'External',

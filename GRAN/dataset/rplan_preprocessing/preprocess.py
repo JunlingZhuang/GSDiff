@@ -46,10 +46,12 @@ from matplotlib.patches import Patch
 
 
 # RPLAN category ID -> GRAN class ID (7 classes)
-# 0=Living, 1=Bedroom, 2=Bathroom, 3=Kitchen, 4=Balcony, 5=Storage, 6=External
+# GRAN classes: 0=Living, 1=Bedroom, 2=Bathroom, 3=Kitchen, 4=Balcony,
+#               5=Storage, 6=External
+# RPLAN IDs verified against https://github.com/zzilch/RPLAN-Toolbox
 RPLAN_TO_GRAN_CLASS = {
-    0: 1,   # MasterRoom -> Bedroom
-    1: 0,   # LivingRoom -> Living
+    0: 0,   # LivingRoom -> Living
+    1: 1,   # MasterRoom -> Bedroom
     2: 3,   # Kitchen
     3: 2,   # Bathroom
     4: 0,   # DiningRoom -> Living
@@ -525,7 +527,7 @@ def print_statistics(graphs, dicts):
             raw_counts[int(c)] += 1
     print('\nRaw RPLAN category distribution:')
     raw_names = {
-        0: 'MasterRoom', 1: 'LivingRoom', 2: 'Kitchen', 3: 'Bathroom',
+        0: 'LivingRoom', 1: 'MasterRoom', 2: 'Kitchen', 3: 'Bathroom',
         4: 'DiningRoom', 5: 'ChildRoom', 6: 'StudyRoom', 7: 'SecondRoom',
         8: 'GuestRoom', 9: 'Balcony', 10: 'Entrance', 11: 'Storage',
         12: 'Wall-in',
