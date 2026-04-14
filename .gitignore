@@ -17,6 +17,8 @@ GRAN/exp/
 GRAN/utils/orca/tmp.txt
 GRAN/.venv/
 GRAN/data/*_precompute/
+GRAN/data/rplan/
+GRAN/inspect_out/
 
 # Archives
 *.tar

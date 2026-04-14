@@ -12,6 +12,9 @@ dependencies = [
     "pyyaml",
     "easydict",
     "matplotlib",
+    "opencv-python",
+    "shapely",
+    "scikit-image",
 ]
 
 [project.optional-dependencies]

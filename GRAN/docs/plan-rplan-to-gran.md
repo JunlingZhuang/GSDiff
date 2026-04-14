@@ -2,31 +2,84 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Convert GSDiff's RPLAN bubble diagram data (room adjacency graphs with semantics) into GRAN's training format, enabling GRAN/GRANv2 to train on floorplan topology graphs.
+> **Scope note:** This pipeline is **standalone and lives entirely inside `GRAN/`**. It has no dependency on any other project's preprocessing. Raw RPLAN PNG files are read directly and converted to GRAN's training format in one self-contained pipeline.
 
-**Architecture:** Read .npy bubble diagram files from GSDiff's preprocessed RPLAN data, extract room adjacency graphs as networkx Graph objects with node attributes (room type), and save in GRAN's TU-dataset format (edge list + node labels + graph indicators). Also add a `'rplan'` entry to `create_graphs()` for seamless loading.
+**Goal:** Build a standalone RPLAN-to-GRAN data pipeline that reads raw RPLAN PNG images and produces GRAN training data, **preserving edge type information** (wall vs door) so future GRAN variants can predict edge types without re-processing the raw images again.
 
-**Tech Stack:** Python 3.10, numpy, networkx, GSDiff datasets
+**Architecture:** Single-pass pipeline that reads raw RPLAN PNGs, extracts (1) room polygons with semantic labels, (2) room adjacency, and (3) **edge types** (wall-only vs wall-with-door). Output is saved as a **3-value adjacency matrix** (0=no-adj, 1=wall, 2=door) plus room types. Initial GRAN training uses the binary form (`matrix > 0`) with zero model changes; future v4 (edge type prediction) upgrades to full 3-class without touching the data pipeline again.
+
+**Tech Stack:** Python 3.10, numpy, networkx, opencv-python, shapely, scikit-image
+
+**Why bake in edge types now:** We only want to touch RPLAN raw data once. Building the pipeline without edge types and later re-running it over 80,788 raw images is wasteful. Extracting edge types during the first pass costs <10% extra compute and future-proofs the data.
 
 ---
 
-## Source Data: RPLAN Bubble Diagrams
+## Source Data: Raw RPLAN PNG Images
 
-Location: `D:/Github/GSDiff/datasets/rplang-v3-bubble-diagram/{train,val,test}/*.npy`
+**Location:** `GRAN/data/rplan_raw/*.png` (user places ~80,788 files here before running the pipeline)
 
-Each `.npy` file is a dict containing:
+Each PNG has **4 channels** (loaded via `cv2.imread(path, -1)`):
 
-| Field | Shape | Description |
-|-------|-------|-------------|
-| `centroids` | (N_rooms, 2) | Room center coordinates |
-| `semantics` | (N_rooms,) | Room type label (0-6) |
-| `adjacency_matrix` | (N_rooms, N_rooms) | Binary room adjacency |
-| `polygons` | list of (M_i, 2) | Room boundary polygons |
-| `corner_number` | int | Original corner count |
+| Channel | Content | Pixel value meaning |
+|---------|---------|--------------------|
+| 0 (B) | Room category | 0-12 = room types; 13 = front door; 14-16 = walls/structure |
+| 1 (G) | Room instance ID | 0-N, different rooms of same type get different IDs |
+| 2 (R) | Inside/outside mask | 255 = inside, 0 = outside |
+| 3 (A) | Front door location | Non-zero only at entrance |
 
-Room semantics: 0=Living, 1=Bedroom, 2=Bathroom, 3=Kitchen, 4=Balcony, 5=Storage, 6=ExternalWall
+**Room category mapping** (channel 0, values 0-12 — reduced to 7 classes for GRAN):
+```
+0  Living room        -> GRAN class 0 (Living)
+1  Master bedroom     -> GRAN class 1 (Bedroom)
+2  Kitchen            -> GRAN class 3 (Kitchen)
+3  Bathroom           -> GRAN class 2 (Bathroom)
+4  Dining room        -> GRAN class 0 (merged with Living)
+5  Child room         -> GRAN class 1 (merged with Bedroom)
+6  Study room         -> GRAN class 1 (merged with Bedroom)
+7  Second room        -> GRAN class 1 (merged with Bedroom)
+8  Guest room         -> GRAN class 1 (merged with Bedroom)
+9  Balcony            -> GRAN class 4 (Balcony)
+10 Entrance           -> GRAN class 0 (merged with Living)
+11 Storage            -> GRAN class 5 (Storage)
+12 Wall-in closet     -> GRAN class 5 (merged with Storage)
+13 Front door marker  -> used for entrance detection only
+14-16 Walls/structure -> used for wall mask, NOT a room
+```
 
-Statistics: ~71,763 total (65,763 train / 3,000 val / 3,000 test), 4-8 rooms per floorplan.
+### How edge types are detected from pixels
+
+For each pair of adjacent rooms `(A, B)`:
+
+1. **Find shared boundary**: Use `scipy.ndimage.binary_dilation` on each room mask, intersect them to get the shared wall pixels
+2. **Check for door opening**: A door is a **gap in the wall mask** between two rooms. Specifically:
+   - Sample points along the shared boundary
+   - At each point, check if the pixel in channel 0 is a **wall pixel (14-16)** or a **room pixel (0-12)**
+   - If >threshold% of the boundary is wall → edge type = 1 (wall only)
+   - If some portion is room pixels (meaning the rooms "bleed into" each other at the doorway) → edge type = 2 (door)
+3. **No shared boundary** → no adjacency (edge type 0)
+
+**Heuristic threshold:** If along the shared boundary of length L pixels, ≥ 3 consecutive pixels belong to a room (not wall), consider it a door. Tunable constant `DOOR_GAP_MIN_PX = 3`.
+
+### Room type distribution (after merging)
+
+7 final classes for GRAN:
+
+| GRAN class | Label | Expected frequency |
+|-----------|-------|-------------------|
+| 0 | Living (incl. dining, entrance) | ~20% |
+| 1 | Bedroom (incl. master, child, study, guest, second) | ~40% |
+| 2 | Bathroom | ~15% |
+| 3 | Kitchen | ~12% |
+| 4 | Balcony | ~10% |
+| 5 | Storage (incl. closet) | ~3% |
+| 6 | ExternalWall (reserved, not used for rooms) | 0% |
+
+### Graph statistics (expected after processing all 80,788 images)
+
+- Valid floorplans: ~71,000 (some raw PNGs have parsing errors)
+- Nodes per graph: 4-12 (most 5-8)
+- Edges per graph: 4-14 (most 5-9)
+- Edge type distribution: ~60% wall, ~40% door (doors are roughly between functional areas)
 
 ## Target Data: GRAN TU-Dataset Format
 
