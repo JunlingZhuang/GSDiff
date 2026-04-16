@@ -90,11 +90,79 @@ tests/test_gatv2.py::test_gatv2_empty_edges              PASSED
 
 ---
 
-## Task 2: GRANv2 Model with Node Attribute Head ⏳
+## Task 2: GRANv2 Model with Node Attribute Head ✅
 
-**Status:** Not started
+**Status:** DONE
+**Commit:** `156fe8a`
+**Date:** 2026-04-16
 
-_Pending. Will update when implementation begins._
+### Files created (2 new)
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `model/gran_v2.py` | 437 | `GRANv2` class: attr head + GATv2 option + partial graph `_sampling()` |
+| `tests/test_gran_v2_model.py` | 76 | 4 unit tests |
+
+### Files modified (1)
+
+| File | Change |
+|------|--------|
+| `model/__init__.py` | Added `from model.gatv2 import *` and `from model.gran_v2 import *` |
+
+### What the code does
+
+**`GRANv2`** extends the original `GRANMixtureBernoulli` architecture with:
+
+1. **`output_attr` head** — `MLP(hidden_dim → hidden_dim → num_attr_classes)`
+   - In: node state `(N, H)` from GNN
+   - Out: class logits `(N, A)` where A = num_attr_classes (e.g. 7)
+   - Loss: `nn.CrossEntropyLoss`
+
+2. **Backbone switch** — `use_gatv2` config flag
+   - `True`: `self.decoder = GATv2(...)` (Task 1's PyG-backed implementation)
+   - `False`: `self.decoder = GNN(...)` (original GRU-based)
+
+3. **`_sampling(B, partial_A, partial_attrs, start_idx)`**
+   - Injects known adjacency + attrs into initial state
+   - Autoregressive loop starts from `max(start_idx, n_partial)`
+   - At each step: GNN propagation → edge sampling (theta/alpha) + attr prediction
+   - Returns `(A, node_attrs)` where `node_attrs = argmax(attr_logits)`
+
+4. **`forward()` return values**
+   - Training: `(edge_loss, attr_loss)` tuple
+   - Sampling: `(A_list, attr_list)` tuple
+
+### Test results
+
+```
+tests/test_gran_v2_model.py::test_gran_v2_has_attr_head                  PASSED
+tests/test_gran_v2_model.py::test_gran_v2_sampling_returns_adj_and_attrs PASSED
+tests/test_gran_v2_model.py::test_gran_v2_with_gatv2_backbone            PASSED
+tests/test_gran_v2_model.py::test_gran_v2_with_gru_backbone              PASSED
+4 passed in 1.83s (total 8 with Task 1)
+```
+
+### Architecture diagram
+
+```
+GRANv2.__init__():
+    ┌── output_theta  ← same as original (edge mixture logits)
+    ├── output_alpha  ← same as original (mixture weights)
+    ├── output_attr   ← NEW (node attribute classification)
+    ├── decoder_input ← same (adj row → embedding)
+    ├── decoder       ← GNN or GATv2 (switchable via config)
+    ├── adj_loss_func ← BCE (same)
+    └── attr_loss_func← CrossEntropy (NEW)
+
+GRANv2._sampling():
+    A = zeros(B, N_pad, N_pad)
+    [inject partial_A if given]
+    for ii in range(start_idx, N_pad):
+        node_state = GNN/GATv2(...)
+        edges = bernoulli(theta[alpha])  ← same as original
+        attrs[ii] = argmax(output_attr(node_state[ii]))  ← NEW
+    return (A, attrs)
+```
 
 ---
 
@@ -131,9 +199,11 @@ _Pending. Will update when implementation begins._
 ## Summary of all changes so far
 
 ### New files
-- `GRAN/model/gatv2.py`
-- `GRAN/tests/__init__.py`
-- `GRAN/tests/test_gatv2.py`
+- `GRAN/model/gatv2.py` (Task 1)
+- `GRAN/model/gran_v2.py` (Task 2)
+- `GRAN/tests/__init__.py` (Task 1)
+- `GRAN/tests/test_gatv2.py` (Task 1)
+- `GRAN/tests/test_gran_v2_model.py` (Task 2)
 
 ### Modified files
-(none yet)
+- `GRAN/model/__init__.py` (Task 2 — added imports for gatv2 + gran_v2)
