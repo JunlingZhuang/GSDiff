@@ -166,15 +166,107 @@ GRANv2._sampling():
 
 ---
 
-## Task 3: Partial Graph Completion Tests ⏳
+## Task 3: Partial Graph Completion Tests ✅
 
-**Status:** Not started
+**Status:** DONE
+**Commit:** `2db2fcf`
+**Date:** 2026-04-17
+
+### Files created (1 new)
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `tests/test_partial_graph.py` | ~60 | 3 tests exercising GRANv2's partial graph modes |
+
+### Files modified (0)
+
+This task is TEST-ONLY — the implementation was already in Task 2's `_sampling()`.
+
+### What the tests verify
+
+1. **`test_partial_graph_completion`** — Give 5-node chain graph as prefix,
+   generate to 8-9 nodes. Verify the original chain edges are preserved.
+2. **`test_attribute_only_prediction`** — Give complete 8-node graph with
+   `start_idx=N`. No new edges generated; only attributes predicted.
+3. **`test_unconditional_still_works`** — Without any partial input, behavior
+   matches original GRAN unconditional generation.
+
+### Test results
+
+```
+tests/test_partial_graph.py::test_partial_graph_completion   PASSED
+tests/test_partial_graph.py::test_attribute_only_prediction  PASSED
+tests/test_partial_graph.py::test_unconditional_still_works  PASSED
+3 passed (total 11 with Tasks 1+2)
+```
+
+### Minor fix during testing
+
+`num_nodes_pmf` in input_dict must be a numpy array (the model calls
+`torch.from_numpy()` on it). Updated the tests to wrap PMF lists with
+`np.array()`. No model code changed.
 
 ---
 
-## Task 4: GRANDataV2 Dataset ⏳
+## Task 4: GRANDataV2 Dataset ✅
 
-**Status:** Not started
+**Status:** DONE
+**Commit:** `651c0a7`
+**Date:** 2026-04-17
+
+### Files created (2 new)
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `dataset/gran_data_v2.py` | 430 | `GRANDataV2(GRANData)` subclass with node attribute support |
+| `tests/test_gran_data_v2.py` | 89 | 3 unit tests |
+
+### Files modified (1)
+
+| File | Change |
+|------|--------|
+| `dataset/__init__.py` | Added `from dataset.gran_data_v2 import *` |
+
+### What the code does
+
+**`GRANDataV2`** extends the parent `GRANData` to include node attribute
+labels alongside the adjacency matrices. Key overrides:
+
+1. **`_get_graph_data(G)`** — returns `(adj_list, attr_list)` instead of just
+   `adj_list`. For each canonical ordering (DFS/BFS/k-core/degree/etc) the
+   attrs are reordered in lockstep with the adjacency matrix.
+
+2. **`_load_shard(path)`** — backward-compatible loader:
+   - New pickle format: `(adj_list, attr_list)` tuple
+   - Old pickle format: just `adj_list` → defaults attrs to zeros
+
+3. **`__getitem__(index)`** — adds `'node_attrs'` key to the returned data
+   dict. Shape: `(C, N_max)` int64 numpy array (padded with 0 for virtual
+   nodes beyond the real graph size).
+
+4. **`collate_fn(batch)`** — calls parent `collate_fn` first, then stacks
+   `node_attrs` across the batch into `(B, C, N_max)` int64 tensor.
+
+### Test results
+
+```
+tests/test_gran_data_v2.py::test_getitem_returns_node_attrs    PASSED
+tests/test_gran_data_v2.py::test_attrs_match_original_graph    PASSED
+tests/test_gran_data_v2.py::test_missing_attrs_default_to_zero PASSED
+3 passed (total 14 with Tasks 1-3)
+```
+
+### Known issues / notes
+
+- **networkx 3.1 compatibility**: the parent `dataset/gran_data.py` still
+  calls `nx.to_numpy_matrix` which was removed in networkx 3.0. In v2 we use
+  `getattr(nx, 'to_numpy_array', nx.to_numpy_matrix)` to handle both. The
+  parent file is left untouched per task boundary — may need attention in
+  Task 5 when wiring up training, since `GRANData` itself would break on
+  this networkx version.
+- **Not a subclass of parent's `__init__`**: parent persists only `adj_list`
+  to disk, but v2 needs `(adj_list, attr_list)`. The v2 `__init__` re-does
+  the precompute bookkeeping so the stored pickle matches the new schema.
 
 ---
 
@@ -201,9 +293,20 @@ GRANv2._sampling():
 ### New files
 - `GRAN/model/gatv2.py` (Task 1)
 - `GRAN/model/gran_v2.py` (Task 2)
+- `GRAN/dataset/gran_data_v2.py` (Task 4)
 - `GRAN/tests/__init__.py` (Task 1)
 - `GRAN/tests/test_gatv2.py` (Task 1)
 - `GRAN/tests/test_gran_v2_model.py` (Task 2)
+- `GRAN/tests/test_partial_graph.py` (Task 3)
+- `GRAN/tests/test_gran_data_v2.py` (Task 4)
 
 ### Modified files
 - `GRAN/model/__init__.py` (Task 2 — added imports for gatv2 + gran_v2)
+- `GRAN/dataset/__init__.py` (Task 4 — added import for gran_data_v2)
+
+### Known issues to address before Task 5
+
+- **networkx compatibility**: `dataset/gran_data.py` still uses the removed
+  `nx.to_numpy_matrix`. Needs to be updated before running the full runner
+  (Task 5 will fail otherwise when the parent class materializes adjacency
+  matrices).
