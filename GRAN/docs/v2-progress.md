@@ -434,9 +434,78 @@ tests/test_e2e.py::test_e2e_sample_then_complete PASSED
 
 ---
 
-## Task 7: Extended Inference Modes ⏳
+## Task 7: Extended Inference Modes ✅
 
-**Status:** Not started
+**Status:** DONE
+**Commit:** `eeb6494`
+**Date:** 2026-04-17
+
+### Files modified (1) / created (1)
+
+| File | Change | Purpose |
+|------|--------|---------|
+| `model/gran_v2.py` | +174/-6 lines | Extended `_sampling()` + 2 new wrapper methods |
+| `tests/test_inference_modes.py` | 99 lines (new) | 3 tests for Mode A, Mode B, backward compat |
+
+### What was added
+
+**1. `_sampling()` new kwargs** (backward compatible — all default to None/False):
+- `fixed_edges_next: (B, ≥ ii)` — user-specified connections for the next block
+- `skip_edge_sampling: bool` — when True, use `fixed_edges_next` instead of
+  drawing edges from the mixture-of-Bernoulli
+- `return_attr_logits: bool` — when True, also return per-node attr logits
+  `(B, N_pad, A)` before argmax
+
+Inside the autoregressive loop, a `fixed_edges_consumed` flag ensures the
+first iteration writes user-supplied edges, and subsequent iterations fall
+back to normal Bernoulli sampling.
+
+**2. `expand_graph(partial_A, partial_attrs, num_target_nodes)` — Mode A**
+
+Continue autoregressive generation from a partial graph until `num_target_nodes`.
+
+```python
+A, attrs = model.expand_graph(
+    partial_A=torch.tensor([[...]]),      # (1, 4, 4) known adj
+    partial_attrs=torch.tensor([[0,1,1,3]]),  # Living, Bedroom, Bedroom, Kitchen
+    num_target_nodes=6,
+)
+# A: (1, 6, 6), attrs: (1, 6)
+# First 4 nodes preserved exactly; 2 new nodes generated with edges + attrs.
+```
+
+**3. `predict_attr_with_edges(partial_A, partial_attrs, fixed_edges)` — Mode B**
+
+Given partial graph + user-specified connections for the NEXT node, return
+raw attribute logits for the new node.
+
+```python
+fixed_edges = torch.zeros(1, 5)
+fixed_edges[:, 0] = 1
+fixed_edges[:, 2] = 1   # new node connects to nodes 0 and 2
+
+attr_logits = model.predict_attr_with_edges(partial_A, partial_attrs, fixed_edges)
+# (1, num_attr_classes) raw logits — softmax for distribution, argmax for class
+```
+
+### Test results
+
+```
+tests/test_inference_modes.py::test_expand_graph_from_partial           PASSED
+tests/test_inference_modes.py::test_predict_attr_with_fixed_edges       PASSED
+tests/test_inference_modes.py::test_unconditional_still_works_after_task7 PASSED
+(full suite: 21 passed, 1 skipped)
+```
+
+### Known limitations
+
+- **MVP limitation in Mode B**: the attr prediction reuses the
+  pre-edge-decision `node_state_out` — the GNN has not seen the user-fixed
+  edges before `output_attr` runs. A second GNN pass after edge pinning
+  would improve accuracy but was deferred. Documented inline in `_sampling`
+  and in `predict_attr_with_edges`'s docstring.
+- Mode A and Mode B work with Task 2's model weights — **no retraining
+  required**.
 
 ---
 
@@ -457,6 +526,7 @@ tests/test_e2e.py::test_e2e_sample_then_complete PASSED
 - `GRAN/tests/test_gran_data_v2.py` (Task 4)
 - `GRAN/tests/test_gran_runner_v2.py` (Task 5)
 - `GRAN/tests/test_e2e.py` (Task 6)
+- `GRAN/tests/test_inference_modes.py` (Task 7)
 
 ### Modified files
 - `GRAN/model/__init__.py` (Task 2)
@@ -467,6 +537,10 @@ tests/test_e2e.py::test_e2e_sample_then_complete PASSED
 
 ### Completed
 
-Tasks 1-6 complete. 18 tests passing, 1 skipped (pyemd not installed).
-Next: Task 7 (extended inference modes — `expand_graph()` and
-`predict_attr_with_edges()` API wrappers).
+**All 7 tasks complete.** 21 tests passing, 1 skipped (pyemd not installed).
+
+Next steps (beyond the plan):
+- Run actual RPLAN training: `uv run python run_exp.py -c config/gran_v2_rplan.yaml`
+- Benchmark GATv2 vs original GRU backbone (set `use_gatv2: false` in config)
+- Lift the Mode B GNN-after-edge-pin limitation if attr prediction accuracy
+  matters for your use case
