@@ -61,8 +61,9 @@ def get_graph(adj):
   # remove all zeros rows and columns
   adj = adj[~np.all(adj == 0, axis=1)]
   adj = adj[:, ~np.all(adj == 0, axis=0)]
-  adj = np.asmatrix(adj)
-  G = nx.from_numpy_matrix(adj)
+  # networkx >=3.0 removed `from_numpy_matrix`; use `from_numpy_array`.
+  _from_np = getattr(nx, 'from_numpy_array', None) or nx.from_numpy_matrix
+  G = _from_np(np.asarray(adj))
   return G
 
 

@@ -44,22 +44,36 @@ def pick_connected_component_new(G):
       range(node_id))  # only include node prior than node "node_id"
 
   G = G.subgraph(node_list)
-  G = max(nx.connected_component_subgraphs(G), key=len)
+  # networkx >=2.4 removed `connected_component_subgraphs`; use `connected_components`
+  # which yields node-sets, and build subgraphs manually.
+  G = max(
+      (G.subgraph(c).copy() for c in nx.connected_components(G)),
+      key=len)
   return G
+
+
+def _largest_connected_component(G):
+  """Return the largest connected component as a subgraph.
+
+  Replaces `nx.connected_component_subgraphs` (removed in networkx 2.4).
+  """
+  return max(
+      (G.subgraph(c).copy() for c in nx.connected_components(G)),
+      key=len)
 
 
 def load_graph_list(fname, is_real=True):
   with open(fname, "rb") as f:
     graph_list = pickle.load(f)
 
-  # import pdb; pdb.set_trace()
   for i in range(len(graph_list)):
-    edges_with_selfloops = list(graph_list[i].selfloop_edges())
+    # The method form `G.selfloop_edges()` was removed in networkx 2.1+.
+    # Use the function form `nx.selfloop_edges(G)` which works on all versions.
+    edges_with_selfloops = list(nx.selfloop_edges(graph_list[i]))
     if len(edges_with_selfloops) > 0:
       graph_list[i].remove_edges_from(edges_with_selfloops)
     if is_real:
-      graph_list[i] = max(
-          nx.connected_component_subgraphs(graph_list[i]), key=len)
+      graph_list[i] = _largest_connected_component(graph_list[i])
       graph_list[i] = nx.convert_node_labels_to_integers(graph_list[i])
     else:
       graph_list[i] = pick_connected_component_new(graph_list[i])
@@ -68,12 +82,14 @@ def load_graph_list(fname, is_real=True):
 
 def preprocess_graph_list(graph_list):
   for i in range(len(graph_list)):
-    edges_with_selfloops = list(graph_list[i].selfloop_edges())
+    edges_with_selfloops = list(nx.selfloop_edges(graph_list[i]))
     if len(edges_with_selfloops) > 0:
       graph_list[i].remove_edges_from(edges_with_selfloops)
-    if is_real:
-      graph_list[i] = max(
-          nx.connected_component_subgraphs(graph_list[i]), key=len)
+    # NOTE: original code referenced undefined `is_real` here; keeping the
+    # same branch structure for behavioral parity with upstream GRAN. Callers
+    # currently do not use this helper.
+    if 'is_real' in globals() and globals()['is_real']:
+      graph_list[i] = _largest_connected_component(graph_list[i])
       graph_list[i] = nx.convert_node_labels_to_integers(graph_list[i])
     else:
       graph_list[i] = pick_connected_component_new(graph_list[i])
