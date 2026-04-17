@@ -196,7 +196,9 @@ class GRANv2(nn.Module):
     # ======================================================================
     # Autoregressive sampling with optional partial-graph conditioning
     # ======================================================================
-    def _sampling(self, B, partial_A=None, partial_attrs=None, start_idx=0):
+    def _sampling(self, B, partial_A=None, partial_attrs=None,
+                  fixed_edges_next=None, skip_edge_sampling=False,
+                  return_attr_logits=False, start_idx=0):
         """Generate adjacency + node attrs row-by-row.
 
         Args:
@@ -207,12 +209,30 @@ class GRANv2(nn.Module):
                            predicts the *remaining* rows.
             partial_attrs: optional (B, n_partial) long tensor of known
                            attribute labels for the first n_partial nodes.
+            fixed_edges_next: optional (B, jj_max) float binary tensor. When
+                           ``skip_edge_sampling=True``, this replaces the
+                           Bernoulli draw for the first autoregressive step
+                           after ``start_idx``. Only the first ``jj`` columns
+                           are consumed — extra columns are ignored. Shape is
+                           conventionally (B, n_partial) for the Mode-B path
+                           where the user specifies which of the existing
+                           ``n_partial`` nodes the new node connects to.
+            skip_edge_sampling: when True, the first iteration writes
+                           ``fixed_edges_next`` into A instead of sampling
+                           from the mixture-of-Bernoulli. Subsequent
+                           iterations (if any) fall back to normal sampling.
+            return_attr_logits: when True, also return a per-node attribute
+                           logits tensor of shape (B, N_pad, A). Slots that
+                           were never populated (either padding or never
+                           predicted) contain zeros.
             start_idx:     autoregressive loop starts from max(start_idx,
                            n_partial). Allows skipping ahead (e.g. to resume).
 
         Returns:
             A:          (B, N_pad, N_pad) float     symmetric adjacency
             node_attrs: (B, N_pad) long             predicted attribute class
+            attr_logits (optional): (B, N_pad, A) float, only when
+                        ``return_attr_logits=True``.
 
         Example (B=2, N=20, K=1, A=5):
             A returned shape:          (2, 20, 20)
@@ -236,6 +256,12 @@ class GRANv2(nn.Module):
             # node_attrs: (B, N_pad) long
             A = torch.zeros(B, N_pad, N_pad).to(self.device)
             node_attrs = torch.zeros(B, N_pad, dtype=torch.long).to(self.device)
+            # Optional per-node attr logits cache, populated when the caller
+            # sets return_attr_logits=True. Shape: (B, N_pad, A).
+            attr_logits_all = None
+            if return_attr_logits:
+                attr_logits_all = torch.zeros(
+                    B, N_pad, self.num_attr_classes).to(self.device)
 
             # ---- partial-graph conditioning ------------------------------
             # Write any known rows into A and any known attrs into node_attrs,
@@ -254,6 +280,11 @@ class GRANv2(nn.Module):
             # Round loop_start down to a multiple of S so the loop boundaries
             # remain consistent with the original algorithm.
             loop_start = (loop_start // S) * S
+            # Track whether we've already consumed ``fixed_edges_next``. We
+            # only honour it on the FIRST iteration of the loop; later
+            # iterations fall back to standard Bernoulli sampling. This keeps
+            # Mode B ("predict attr for the next node only") well-defined.
+            fixed_edges_consumed = False
 
             dim_input = self.embedding_dim if self.dimension_reduce else self.max_num_nodes
             # Cache of per-node GNN hidden states, used to speed up repeated
@@ -337,27 +368,148 @@ class GRANv2(nn.Module):
                 prob_alpha = F.softmax(log_alpha.mean(dim=1), -1)
                 alpha = torch.multinomial(prob_alpha, 1).squeeze(dim=1).long()
 
-                prob = []
-                for bb in range(B):
-                    prob += [torch.sigmoid(log_theta[bb, :, :, alpha[bb]])]
-                prob = torch.stack(prob, dim=0)                 # (B, K, jj)
-                A[:, ii:jj, :jj] = torch.bernoulli(prob[:, :jj - ii, :])
+                if skip_edge_sampling and (not fixed_edges_consumed) \
+                        and fixed_edges_next is not None:
+                    # ---- Mode B: user specifies which existing nodes the
+                    # K new nodes connect to. We write those fixed edges
+                    # into A instead of drawing from the mixture-of-Bernoulli.
+                    # fixed_edges_next: (B, >=ii) binary — columns beyond
+                    # index ``ii`` (the new-node rows themselves) are filled
+                    # with zeros so the new nodes don't self-connect.
+                    fe = fixed_edges_next.to(self.device).float()
+                    assert fe.shape[0] == B, \
+                        "fixed_edges_next batch dim must match B"
+                    assert fe.shape[1] >= ii, \
+                        "fixed_edges_next must have >= ii columns (one per existing node)"
+                    # Build a (B, jj) connection row: user-specified for the
+                    # first ``ii`` columns, zero for the K new-node columns.
+                    fe_row = torch.zeros(B, jj).to(self.device)
+                    fe_row[:, :ii] = fe[:, :ii]
+                    # Broadcast the same connection pattern to all K new rows.
+                    A[:, ii:jj, :jj] = fe_row.unsqueeze(1).expand(-1, K, -1)
+                    fixed_edges_consumed = True
+                else:
+                    # ---- Mode A / unconditional: sample edges from the
+                    # mixture of Bernoulli as in the original GRAN.
+                    prob = []
+                    for bb in range(B):
+                        prob += [torch.sigmoid(log_theta[bb, :, :, alpha[bb]])]
+                    prob = torch.stack(prob, dim=0)             # (B, K, jj)
+                    A[:, ii:jj, :jj] = torch.bernoulli(prob[:, :jj - ii, :])
 
                 # ---- attribute prediction for the new nodes --------------
                 # node_state_out[:, ii:jj, :] is (B, K, H); argmax of the
                 # output_attr head gives per-node class ids of shape (B, K).
+                # Limitation: when skip_edge_sampling=True we keep the
+                # pre-edge-decision node_state_out (the GNN has not seen the
+                # user's fixed edges). A second GNN pass would give a more
+                # accurate logit — future work if needed.
                 new_node_feat = node_state_out[:, ii:jj, :]     # (B, K, H)
                 new_attr_logits = self.output_attr(
                     new_node_feat.reshape(-1, H))               # (B*K, A)
                 new_attr_logits = new_attr_logits.view(B, K, -1)
                 new_attrs = new_attr_logits.argmax(dim=-1)      # (B, K) long
                 node_attrs[:, ii:jj] = new_attrs
+                if return_attr_logits:
+                    attr_logits_all[:, ii:jj, :] = new_attr_logits
 
             if self.is_sym:
                 A = torch.tril(A, diagonal=-1)
                 A = A + A.transpose(1, 2)
 
+            if return_attr_logits:
+                return A, node_attrs, attr_logits_all
             return A, node_attrs
+
+    # ======================================================================
+    # Convenience inference APIs (Task 7)
+    # ======================================================================
+    @torch.no_grad()
+    def expand_graph(self, partial_A, partial_attrs, num_target_nodes):
+        """Continue autoregressive generation from a partial graph.
+
+        Mode A of the Task-7 inference APIs. The partial adjacency and
+        attribute labels are pinned, and the model samples the remaining
+        rows / cols autoregressively until ``num_target_nodes`` is reached.
+
+        Args:
+            partial_A:        (B, n_partial, n_partial) float tensor — known
+                              adjacency entries. Must be symmetric if the
+                              model was built with ``is_sym=True``.
+            partial_attrs:    (B, n_partial) long tensor — known attribute
+                              labels, values in ``[0, num_attr_classes)``.
+            num_target_nodes: int, must be ``>= n_partial`` and
+                              ``<= max_num_nodes``. The final graph has
+                              exactly this many nodes.
+
+        Returns:
+            A:     (B, num_target_nodes, num_target_nodes) float adjacency.
+                   The top-left ``n_partial`` block equals ``partial_A``.
+            attrs: (B, num_target_nodes) long tensor; the first ``n_partial``
+                   entries equal ``partial_attrs``.
+        """
+        B = partial_A.shape[0]
+        n_partial = partial_A.shape[1]
+        assert num_target_nodes >= n_partial, \
+            "num_target_nodes must be >= n_partial"
+        assert num_target_nodes <= self.max_num_nodes, \
+            "num_target_nodes must be <= max_num_nodes"
+
+        A, attrs = self._sampling(
+            B,
+            partial_A=partial_A.to(self.device),
+            partial_attrs=partial_attrs.to(self.device),
+            start_idx=n_partial,
+        )
+        return (A[:, :num_target_nodes, :num_target_nodes],
+                attrs[:, :num_target_nodes])
+
+    @torch.no_grad()
+    def predict_attr_with_edges(self, partial_A, partial_attrs, fixed_edges):
+        """Predict the attribute logits of a NEW node whose edges are fixed.
+
+        Mode B of the Task-7 inference APIs. Given a partial graph and a
+        user-specified connection pattern for the next node, the model
+        skips the Bernoulli edge draw and returns the raw attribute logits
+        produced by ``self.output_attr`` for that new node.
+
+        Args:
+            partial_A:     (B, n_partial, n_partial) float adjacency.
+            partial_attrs: (B, n_partial) long attribute labels.
+            fixed_edges:   (B, n_partial) binary float/long tensor — 1 where
+                           the new node connects to an existing node, 0
+                           otherwise.
+
+        Returns:
+            attr_logits: (B, num_attr_classes) float — raw (pre-softmax)
+                         logits for the new node's attribute class. Apply
+                         softmax to obtain a probability distribution.
+        """
+        B = partial_A.shape[0]
+        n_partial = partial_A.shape[1]
+        assert fixed_edges.shape == (B, n_partial), \
+            "fixed_edges must have shape (B, n_partial)"
+        assert n_partial + self.block_size <= self.max_num_nodes, \
+            "partial graph leaves no room for a new node"
+
+        # One autoregressive step with the user-specified edges pinned.
+        # The GNN sees the partial graph (without the new edges) and
+        # predicts the new node's attr from its pre-edge-decision hidden
+        # state — see the limitation note in ``_sampling``.
+        _, _, attr_logits_all = self._sampling(
+            B,
+            partial_A=partial_A.to(self.device),
+            partial_attrs=partial_attrs.to(self.device),
+            fixed_edges_next=fixed_edges.to(self.device).float(),
+            skip_edge_sampling=True,
+            return_attr_logits=True,
+            start_idx=n_partial,
+        )
+        # attr_logits_all is (B, N_pad, A); the new-node row is index
+        # ``n_partial`` (the block_size=1 case) or the first row of a
+        # larger block. We collapse the K-block to a single vector by
+        # taking the first new row.
+        return attr_logits_all[:, n_partial, :]
 
     # ======================================================================
     # Forward dispatch
