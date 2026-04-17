@@ -382,6 +382,11 @@ class GRANv2(nn.Module):
         # Optional v2 inputs
         node_attr_label = input_dict.get('node_attr_label', None)
         node_attr_idx = input_dict.get('node_attr_idx', None)
+        # [v2] node_attrs: (B, C, N) int64 produced by GRANDataV2.collate_fn.
+        # When provided, the model derives per-subgraph-node labels from
+        # ``node_idx_feat`` (see mapping in the training path below) so the
+        # runner doesn't need to compute node_attr_label / node_attr_idx.
+        node_attrs = input_dict.get('node_attrs', None)
         partial_A = input_dict.get('partial_A', None)
         partial_attrs = input_dict.get('partial_attrs', None)
         start_idx = input_dict.get('start_idx', 0)
@@ -404,16 +409,56 @@ class GRANv2(nn.Module):
                 self.num_canonical_order)
 
             # ---- attribute loss -------------------------------------------
-            # When node_attr_idx + node_attr_label are provided, gather the
-            # corresponding node states and run a CE loss. Otherwise return
-            # a zero-loss that is still a valid scalar with a graph so the
-            # optimizer doesn't error out.
+            # Three input shapes are supported, in order of preference:
+            #
+            #   (a) Explicit (node_attr_label, node_attr_idx) pair — legacy
+            #       path where the caller has already flattened labels to
+            #       match node_state.
+            #   (b) ``node_attrs`` of shape (B, C, N) — produced by
+            #       GRANDataV2.collate_fn. We derive per-subgraph-node labels
+            #       by inverting the packing convention used for
+            #       ``node_idx_feat`` in GRANData.collate_fn:
+            #
+            #           node_idx_feat[i] = 0                       -> padding
+            #           node_idx_feat[i] = v, v > 0
+            #               flat   = v - 1
+            #               batch  = flat // (C * N)
+            #               order  = (flat // N) % C
+            #               node_p = flat % N
+            #
+            #       which gives a label of node_attrs[batch, order, node_p]
+            #       per non-padding row of node_state. We then slice out the
+            #       non-padding rows and compute cross-entropy.
+            #   (c) Neither — return a safe zero tied to the compute graph.
             if node_attr_label is not None and node_attr_idx is not None:
+                # (a) explicit labels for specific node_state indices
                 attr_feat = node_state[node_attr_idx]           # (M, H)
                 attr_logits = self.output_attr(attr_feat)       # (M, A)
                 attr_loss = self.attr_loss_func(attr_logits, node_attr_label)
+            elif node_attrs is not None and node_idx_feat is not None:
+                # (b) derive labels from (B, C, N) attrs + node_idx_feat
+                C = self.num_canonical_order
+                N = self.max_num_nodes
+                # node_state has shape (len(node_idx_feat), H). Rows where
+                # node_idx_feat == 0 are the leading zero-padding / new-node
+                # placeholder rows; they have no ground-truth attribute and
+                # must be masked out.
+                valid_mask = node_idx_feat > 0                  # (M,)
+                if valid_mask.any():
+                    flat = (node_idx_feat[valid_mask] - 1).long()  # (M',)
+                    batch_idx = flat // (C * N)
+                    order_idx = (flat // N) % C
+                    node_pos = flat % N
+                    # Gather labels; shape (M',) long in [0, A).
+                    labels = node_attrs[batch_idx, order_idx, node_pos]
+                    attr_feat = node_state[valid_mask]          # (M', H)
+                    attr_logits = self.output_attr(attr_feat)   # (M', A)
+                    attr_loss = self.attr_loss_func(attr_logits, labels)
+                else:
+                    # All rows are padding — unusual, but keep graph-tied.
+                    attr_loss = (node_state.sum() * 0.0)
             else:
-                # Safe zero scalar tied to the graph so .backward() works
+                # (c) Safe zero scalar tied to the graph so .backward() works
                 # even if the caller doesn't wire up attr labels yet.
                 attr_loss = (node_state.sum() * 0.0)
 
