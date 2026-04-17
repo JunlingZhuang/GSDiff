@@ -1,4 +1,111 @@
 ---
+# =============================================================================
+# GRAN v2 training config for GRID dataset
+#
+# Run with:
+#   uv run python run_exp.py -c config/gran_v2_grid.yaml        # train
+#   uv run python run_exp.py -c config/gran_v2_grid.yaml -t     # test
+#
+# The top section below groups the parameters you are most likely to tune.
+# Everything further down is dataset-specific plumbing that rarely changes.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 1. MOST-COMMONLY TUNED TRAINING KNOBS — change these first
+# -----------------------------------------------------------------------------
+train:
+  # --- schedule ------------------------------------------------------------
+  max_epoch: 3000               # how many epochs to run
+  batch_size: 1                 # grid graphs are large; 1 is the parent default
+  num_workers: 0                # DataLoader workers (Windows: keep 0)
+
+  # --- optimizer -----------------------------------------------------------
+  optimizer: Adam               # Adam | SGD
+  lr: 1.0e-4                    # learning rate
+  wd: 0.0                       # weight decay
+  momentum: 0.9                 # only used when optimizer=SGD
+  lr_decay: 0.3                 # multiplicative factor at each milestone
+  lr_decay_epoch: [100000000]   # milestones; default keeps lr constant
+
+  # --- loss weighting (v2-specific) ----------------------------------------
+  lambda_attr: 1.0              # weight of attr CE loss: total = edge + lambda * attr
+
+  # --- checkpoint / resume -------------------------------------------------
+  display_iter: 10              # log loss every N iterations
+  snapshot_epoch: 100           # save checkpoint every N epochs
+  valid_epoch: 50               # (reserved) validation cadence
+  shuffle: true
+  is_resume: false
+  resume_dir:                   # exp/GRANv2/your_exp_folder
+  resume_model: model_snapshot_0005000.pth
+  resume_epoch: 5000
+
+# -----------------------------------------------------------------------------
+# 2. MODEL ARCHITECTURE — change to experiment with capacity / backbone
+# -----------------------------------------------------------------------------
+model:
+  name: GRANv2                  # GRANv2 or GRANMixtureBernoulli (original)
+
+  # --- backbone switch (v2-specific) ---------------------------------------
+  use_gatv2: true               # true = PyG GATv2Conv; false = original GRU-GNN
+  gatv2_num_heads: 4            # only used when use_gatv2=true
+
+  # --- attribute head (v2-specific) ----------------------------------------
+  num_attr_classes: 5           # size of the node-type classifier
+
+  # --- capacity ------------------------------------------------------------
+  hidden_dim: 128               # GNN hidden dim
+  embedding_dim: 128            # projection width before GNN (when dimension_reduce=true)
+  num_GNN_layers: 7             # how many message-passing layers
+  num_GNN_prop: 1               # propagation steps per layer (original GNN only)
+
+  # --- graph structural choices (rarely change) ----------------------------
+  max_num_nodes: 361            # max nodes per graph in this dataset (grid: 361)
+  num_mix_component: 20         # mixture-of-Bernoulli size for edge head
+  is_sym: true                  # symmetric adjacency (undirected graphs)
+  block_size: 1                 # K: how many new nodes per autoregressive step
+  sample_stride: 1              # S: stride between autoregressive steps
+  num_canonical_order: 1        # how many node orderings to average over
+  dimension_reduce: true        # project adj rows down to embedding_dim first
+  has_attention: true           # original GNN only
+  edge_weight: 1.0              # BCE positive-class weight for edges
+
+# -----------------------------------------------------------------------------
+# 3. DATASET — swap `name` or `loader_name` for a different corpus
+# -----------------------------------------------------------------------------
+dataset:
+  loader_name: GRANDataV2       # v2 loader includes node_attrs in each sample
+  name: grid                    # grid | lobster | DD | FIRSTMM_DB | RPLAN
+  data_path: data/
+  node_order: DFS               # DFS | BFS | k_core | degree_decent | degree_accent
+  train_ratio: 0.8
+  dev_ratio: 0.2
+  num_subgraph_batch: 50        # subgraphs sampled per graph per mini-batch
+  num_fwd_pass: 1
+  has_node_feat: false
+  is_save_split: false
+  is_sample_subgraph: true
+  is_overwrite_precompute: false
+
+# -----------------------------------------------------------------------------
+# 4. TEST / INFERENCE
+# -----------------------------------------------------------------------------
+test:
+  batch_size: 20
+  num_workers: 0
+  num_test_gen: 20              # how many graphs to sample at test time
+  is_vis: true                  # save graph visualizations
+  is_single_plot: false         # one big PNG (true) vs per-sample PNGs (false)
+  is_test_ER: false             # compare against Erdos-Renyi baseline
+  num_vis: 20                   # how many generated graphs to visualize
+  vis_num_row: 5                # rows when is_single_plot=true
+  better_vis: true
+  test_model_dir: snapshot_model
+  test_model_name: gran_v2_grid.pth
+
+# -----------------------------------------------------------------------------
+# 5. RUNTIME — rarely changed
+# -----------------------------------------------------------------------------
 exp_name: GRANv2
 exp_dir: exp/GRANv2
 runner: GranRunnerV2
@@ -7,65 +114,3 @@ use_gpu: true
 device: cuda:0
 gpus: [0]
 seed: 1234
-dataset:
-  loader_name: GRANDataV2
-  name: grid
-  data_path: data/
-  node_order: DFS # k_core/BFS/degree_decent
-  train_ratio: 0.8
-  dev_ratio: 0.2
-  num_subgraph_batch: 50 # number of subgraphs per mini-batch
-  num_fwd_pass: 1
-  has_node_feat: false
-  is_save_split: false
-  is_sample_subgraph: true # set to true if you want to sample subgraphs
-  is_overwrite_precompute: false
-model:
-  name: GRANv2
-  num_mix_component: 20
-  is_sym: true
-  block_size: 1
-  sample_stride: 1
-  max_num_nodes: 361
-  hidden_dim: 128
-  embedding_dim: 128
-  num_GNN_layers: 7
-  num_GNN_prop: 1
-  num_canonical_order: 1
-  dimension_reduce: true
-  has_attention: true
-  edge_weight: 1.0e+0
-  num_attr_classes: 5
-  use_gatv2: true
-  gatv2_num_heads: 4
-train:
-  optimizer: Adam
-  lr_decay: 0.3
-  lr_decay_epoch: [100000000] # no decay
-  num_workers: 0
-  max_epoch: 3000
-  batch_size: 1
-  display_iter: 10
-  snapshot_epoch: 100
-  valid_epoch: 50
-  lr: 1.0e-4
-  wd: 0.0e-4
-  momentum: 0.9
-  shuffle: true
-  is_resume: false
-  resume_epoch: 5000
-  resume_dir: # exp/GRANv2/your_exp_folder
-  resume_model: model_snapshot_0005000.pth
-  lambda_attr: 1.0
-test:
-  batch_size: 20
-  num_workers: 0
-  num_test_gen: 20 # number of generated samples
-  is_vis: true
-  is_single_plot: false # visualize `num_vis` samples in a single image
-  is_test_ER: false # test Erdos-Renyi baseline
-  num_vis: 20
-  vis_num_row: 5 # visualize `num_vis` samples in `vis_num_row` rows
-  better_vis: true
-  test_model_dir: snapshot_model
-  test_model_name: gran_v2_grid.pth

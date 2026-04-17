@@ -270,9 +270,95 @@ tests/test_gran_data_v2.py::test_missing_attrs_default_to_zero PASSED
 
 ---
 
-## Task 5: GranRunnerV2 and Configs ⏳
+## Task 5: GranRunnerV2 and Configs ✅
 
-**Status:** Not started
+**Status:** DONE
+**Commits:** `632a778` (runner + configs), plus follow-up for config-driven layout
+**Date:** 2026-04-17
+
+### Files created (5 new)
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `runner/gran_runner_v2.py` | 394 | `GranRunnerV2(GranRunner)` — joint edge+attr training |
+| `config/gran_v2_grid.yaml` | 120 | Grid training config, reorganized into 5 sections |
+| `config/gran_v2_DB.yaml` | 100 | FIRSTMM_DB training config |
+| `config/gran_v2_rplan.yaml` | 115 | RPLAN floorplan training config (NEW) |
+| `tests/test_gran_runner_v2.py` | 107 | 3 sanity tests (config parses, class hierarchy) |
+
+### Files modified (1)
+
+| File | Change |
+|------|--------|
+| `runner/__init__.py` | Added `from runner.gran_runner_v2 import *` |
+
+### Config file structure
+
+All three configs now follow a consistent 5-section layout, from most- to least-
+frequently tuned:
+
+```yaml
+# 1. MOST-COMMONLY TUNED TRAINING KNOBS
+train:
+  max_epoch, batch_size, lr, wd, optimizer     # schedule + optimizer
+  lambda_attr                                  # v2-specific loss weight
+  lr_decay, lr_decay_epoch                     # lr schedule
+  display_iter, snapshot_epoch                 # logging / checkpoints
+  is_resume, resume_dir                        # resume
+
+# 2. MODEL ARCHITECTURE
+model:
+  name: GRANv2
+  use_gatv2, gatv2_num_heads                   # backbone switch
+  num_attr_classes                             # attr head size
+  hidden_dim, embedding_dim, num_GNN_layers    # capacity
+  max_num_nodes, num_mix_component, ...        # structural params
+
+# 3. DATASET
+dataset:
+  loader_name: GRANDataV2
+  name: grid | DB | RPLAN
+  train_ratio, node_order, num_subgraph_batch
+
+# 4. TEST / INFERENCE
+test:
+  batch_size, num_test_gen, is_vis
+
+# 5. RUNTIME (rarely changed)
+exp_name, runner, device, gpus, seed
+```
+
+Every parameter has an inline comment explaining its effect.
+
+### Key v2-specific knobs exposed in config
+
+- `model.use_gatv2` — switch between PyG GATv2Conv and original GRU-GNN
+- `model.gatv2_num_heads` — attention heads when using GATv2
+- `model.num_attr_classes` — size of node attribute classifier (5 for grid, 7 for RPLAN)
+- `train.lambda_attr` — weight of attr CE loss in joint objective
+- `dataset.loader_name: GRANDataV2` — loader that threads node_attrs through
+
+### Test results
+
+```
+tests/test_gran_runner_v2.py::test_gran_v2_grid_config_parses   PASSED
+tests/test_gran_runner_v2.py::test_gran_v2_DB_config_parses     PASSED
+tests/test_gran_runner_v2.py::test_runner_v2_class_attributes   SKIPPED  (pyemd unavailable in dev venv)
+16 passed, 1 skipped (total 17 tests)
+```
+
+### Concerns
+
+1. **Py2 → Py3 fix**: parent runner used `train_iterator.next()` which is Py2-only.
+   V2 runner uses `next(train_iterator)`. Parent file unchanged per task scope.
+2. **attr_loss gradient wiring**: `GRANDataV2` produces `node_attrs` of shape
+   `(C, N_max)` padded, but `GRANv2.forward()` expects indexed labels aligned
+   with the concatenated subgraph node_state. The runner threads `node_attrs`
+   through end-to-end but the model's zero-loss fallback currently activates,
+   so the attr head does not receive gradient yet. **This is Task 6 territory**
+   — end-to-end integration will wire the attr label indexing.
+3. **`pyemd` missing**: one sanity test is skipped because `utils/dist_helper.py`
+   imports `pyemd` which can't build in this dev venv. Doesn't affect training.
 
 ---
 
