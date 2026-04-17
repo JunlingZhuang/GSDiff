@@ -362,9 +362,75 @@ tests/test_gran_runner_v2.py::test_runner_v2_class_attributes   SKIPPED  (pyemd 
 
 ---
 
-## Task 6: End-to-End Integration Test ⏳
+## Task 6: End-to-End Integration Test ✅
 
-**Status:** Not started
+**Status:** DONE
+**Commit:** `c244c43`
+**Date:** 2026-04-17
+
+### Files created (1 new)
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `tests/test_e2e.py` | 217 | 2 integration tests + 2 helpers |
+
+### Files modified (1)
+
+| File | Change |
+|------|--------|
+| `model/gran_v2.py` | +50/-5 lines — **fix attr_loss wiring** for the `(B, C, N)` `node_attrs` produced by `GRANDataV2` |
+
+### What the E2E tests validate
+
+1. **`test_e2e_train_step`** — Simulates one full training step on a synthetic
+   9-node grid graph with `G.nodes[i]['attr']` set. Chain: `GRANDataV2` →
+   `collate_fn` → batch dict → `GRANv2.forward()` → `(edge_loss, attr_loss)` →
+   backward → optimizer. Asserts losses are finite AND that `attr_loss` is
+   non-zero (catches the previous zero-fallback bug).
+
+2. **`test_e2e_sample_then_complete`** — Unconditional sample → take first
+   half as partial graph → re-sample with partial graph conditioning.
+   Validates shapes and value ranges across two generation modes.
+
+### Attr-loss wiring fix (critical bug fix)
+
+**Bug**: before Task 6, `GRANv2.forward()` training path only recognized the
+legacy `(node_attr_label, node_attr_idx)` format. When `GRANDataV2` produced
+`node_attrs` of shape `(B, C, N_max)` instead, the model's fallback branch
+returned `attr_loss = 0.0`, which silently killed gradient flow into
+`output_attr`. Task 5's runner threaded everything through correctly, but
+the attr head was never trained.
+
+**Fix**: added a new branch in `forward()` training path that derives
+per-subgraph-node labels from the `(B, C, N)` layout using the packing
+convention from `GRANData.collate_fn`:
+
+```
+node_idx_feat[i] = batch_idx * C * N + order_idx * N + node_pos + 1
+                   (0 = padding row)
+```
+
+Decoding:
+- `flat = v - 1`
+- `batch = flat // (C * N)`
+- `order = (flat // N) % C`
+- `pos = flat % N`
+- `label = node_attrs[batch, order, pos]`
+
+Then runs `output_attr(node_state[valid_mask])` and CE against `labels`.
+
+**Verification**:
+- `attr_loss ≈ 1.47` on a freshly-initialized 4-class model (close to
+  `ln(4) ≈ 1.386` uniform-prior baseline — model hasn't learned anything yet)
+- `attr_head.weight` values change after `optimizer.step()` (gradient flows)
+
+### Test results
+
+```
+tests/test_e2e.py::test_e2e_train_step          PASSED
+tests/test_e2e.py::test_e2e_sample_then_complete PASSED
+(full suite: 18 passed, 1 skipped)
+```
 
 ---
 
@@ -378,21 +444,29 @@ tests/test_gran_runner_v2.py::test_runner_v2_class_attributes   SKIPPED  (pyemd 
 
 ### New files
 - `GRAN/model/gatv2.py` (Task 1)
-- `GRAN/model/gran_v2.py` (Task 2)
+- `GRAN/model/gran_v2.py` (Task 2, fixed attr_loss wiring in Task 6)
 - `GRAN/dataset/gran_data_v2.py` (Task 4)
+- `GRAN/runner/gran_runner_v2.py` (Task 5)
+- `GRAN/config/gran_v2_grid.yaml` (Task 5)
+- `GRAN/config/gran_v2_DB.yaml` (Task 5)
+- `GRAN/config/gran_v2_rplan.yaml` (Task 5)
 - `GRAN/tests/__init__.py` (Task 1)
 - `GRAN/tests/test_gatv2.py` (Task 1)
 - `GRAN/tests/test_gran_v2_model.py` (Task 2)
 - `GRAN/tests/test_partial_graph.py` (Task 3)
 - `GRAN/tests/test_gran_data_v2.py` (Task 4)
+- `GRAN/tests/test_gran_runner_v2.py` (Task 5)
+- `GRAN/tests/test_e2e.py` (Task 6)
 
 ### Modified files
-- `GRAN/model/__init__.py` (Task 2 — added imports for gatv2 + gran_v2)
-- `GRAN/dataset/__init__.py` (Task 4 — added import for gran_data_v2)
+- `GRAN/model/__init__.py` (Task 2)
+- `GRAN/dataset/__init__.py` (Task 4)
+- `GRAN/runner/__init__.py` (Task 5)
+- `GRAN/dataset/gran_data.py`, `GRAN/runner/gran_runner.py`, `GRAN/utils/data_helper.py`
+  (networkx 3.x compat fixes before Task 5)
 
-### Known issues to address before Task 5
+### Completed
 
-- **networkx compatibility**: `dataset/gran_data.py` still uses the removed
-  `nx.to_numpy_matrix`. Needs to be updated before running the full runner
-  (Task 5 will fail otherwise when the parent class materializes adjacency
-  matrices).
+Tasks 1-6 complete. 18 tests passing, 1 skipped (pyemd not installed).
+Next: Task 7 (extended inference modes — `expand_graph()` and
+`predict_attr_with_edges()` API wrappers).
