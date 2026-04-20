@@ -150,14 +150,33 @@ class GranRunnerV2(GranRunner):
             resume_epoch = self.train_conf.resume_epoch
 
         # ---- training loop --------------------------------------------------
+        # [v2] Progress reporting style: one tqdm bar for epochs, one summary
+        # line per epoch with mean edge/attr/total losses. Per-iteration logs
+        # still go to TensorBoard for detailed inspection but are NOT spammed
+        # to the console.
         iter_count = 0
         results = defaultdict(list)
-        for epoch in range(resume_epoch, self.train_conf.max_epoch):
+        total_epochs = self.train_conf.max_epoch - resume_epoch
+
+        epoch_bar = tqdm(
+            range(resume_epoch, self.train_conf.max_epoch),
+            total=total_epochs,
+            desc='train',
+            unit='epoch',
+        )
+
+        for epoch in epoch_bar:
             model.train()
             lr_scheduler.step()
             train_iterator = train_loader.__iter__()
 
-            for inner_iter in range(len(train_loader) // self.num_gpus):
+            # Per-epoch running sums so we can log a single summary line.
+            epoch_edge_sum = 0.0
+            epoch_attr_sum = 0.0
+            epoch_iters = 0
+
+            n_inner = len(train_loader) // self.num_gpus
+            for inner_iter in range(n_inner):
                 optimizer.zero_grad()
 
                 batch_data = []
@@ -212,7 +231,7 @@ class GranRunnerV2(GranRunner):
                 avg_edge_loss = avg_edge_loss / float(self.dataset_conf.num_fwd_pass)
                 avg_attr_loss = avg_attr_loss / float(self.dataset_conf.num_fwd_pass)
 
-                # [v2] log edge + attr losses separately (and their sum)
+                # [v2] record losses to TensorBoard every iter (no console spam)
                 edge_loss_val = float(avg_edge_loss.data.cpu().numpy()) \
                     if torch.is_tensor(avg_edge_loss) else float(avg_edge_loss)
                 attr_loss_val = float(avg_attr_loss.data.cpu().numpy()) \
@@ -227,21 +246,45 @@ class GranRunnerV2(GranRunner):
                 results['attr_loss'] += [attr_loss_val]
                 results['train_step'] += [iter_count]
 
-                if iter_count % self.train_conf.display_iter == 0 or iter_count == 1:
-                    logger.info(
-                        "Edge / Attr / Total Loss @ epoch {:04d} iter {:08d} = {:.4f} / {:.4f} / {:.4f}".format(
-                            epoch + 1, iter_count,
-                            edge_loss_val, attr_loss_val, total_loss_val))
+                # [v2] update epoch-level running sums
+                epoch_edge_sum += edge_loss_val
+                epoch_attr_sum += attr_loss_val
+                epoch_iters += 1
+
+                # [v2] live-update tqdm postfix (no extra log lines)
+                epoch_bar.set_postfix(
+                    edge=f'{edge_loss_val:.4f}',
+                    attr=f'{attr_loss_val:.4f}',
+                    total=f'{total_loss_val:.4f}',
+                )
+
+            # [v2] one summary line per epoch, ML-style
+            if epoch_iters > 0:
+                mean_edge = epoch_edge_sum / epoch_iters
+                mean_attr = epoch_attr_sum / epoch_iters
+                mean_total = mean_edge + self.lambda_attr * mean_attr
+                self.writer.add_scalar('epoch/edge_loss', mean_edge, epoch + 1)
+                self.writer.add_scalar('epoch/attr_loss', mean_attr, epoch + 1)
+                self.writer.add_scalar('epoch/total_loss', mean_total, epoch + 1)
+                logger.info(
+                    "epoch {:04d}/{:04d} | iters {} | "
+                    "edge {:.4f} | attr {:.4f} | total {:.4f} | "
+                    "lr {:.2e}".format(
+                        epoch + 1, self.train_conf.max_epoch, epoch_iters,
+                        mean_edge, mean_attr, mean_total,
+                        optimizer.param_groups[0]['lr']))
 
             # snapshot model (same signature as parent's call)
             if (epoch + 1) % self.train_conf.snapshot_epoch == 0:
-                logger.info("Saving Snapshot @ epoch {:04d}".format(epoch + 1))
+                logger.info("saving snapshot @ epoch {:04d}".format(epoch + 1))
                 snapshot(
                     model.module if self.use_gpu else model,
                     optimizer,
                     self.config,
                     epoch + 1,
                     scheduler=lr_scheduler)
+
+        epoch_bar.close()
 
         pickle.dump(results, open(os.path.join(self.config.save_dir, 'train_stats.p'), 'wb'))
         self.writer.close()
