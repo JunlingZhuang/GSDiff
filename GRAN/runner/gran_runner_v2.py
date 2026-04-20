@@ -67,6 +67,13 @@ class GranRunnerV2(GranRunner):
     """
 
     def __init__(self, config):
+        """Initialize from an EasyDict config (same schema as GranRunner).
+
+        v2-specific field:
+            config.train.lambda_attr -- weight of the attribute CE loss in
+                                         total_loss = edge_loss + lambda * attr_loss.
+                                         Defaults to 1.0 if unset.
+        """
         super().__init__(config)
         # lambda_attr: weight of the node-attribute CrossEntropy loss in the
         # joint objective. Configured via config.train.lambda_attr;

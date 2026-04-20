@@ -54,6 +54,16 @@ class GATv2Layer(nn.Module):
 
     def __init__(self, in_dim, out_dim, edge_feat_dim, num_heads=4,
                  negative_slope=0.2, dropout=0.0):
+        """Wrap a torch_geometric ``GATv2Conv`` with the GRAN-style signature.
+
+        Args:
+            in_dim:        input node feature dim
+            out_dim:       output node feature dim (must be divisible by num_heads)
+            edge_feat_dim: per-edge feature dim; pass 0 for no edge features
+            num_heads:     number of attention heads (H)
+            negative_slope: LeakyReLU slope inside GATv2
+            dropout:       attention weight dropout during training
+        """
         super().__init__()
         self.num_heads = num_heads
         self.out_dim = out_dim
@@ -143,6 +153,19 @@ class GATv2(nn.Module):
                  num_layer=1, has_residual=True, dropout=0.0,
                  has_graph_output=False, output_hidden_dim=128,
                  graph_output_dim=None):
+        """Build a stack of L ``GATv2Layer`` blocks.
+
+        Args:
+            node_state_dim:    input == output width of each layer
+            edge_feat_dim:     per-edge feature dim; 0 for none
+            num_heads:         attention heads per layer
+            num_layer:         L, number of stacked GATv2 layers
+            has_residual:      add residual connections between layers
+            dropout:           attention dropout
+            has_graph_output:  when True, adds a graph-level pooling head
+            output_hidden_dim: hidden size of the graph-output attention MLP
+            graph_output_dim:  graph-output width (required iff has_graph_output)
+        """
         super().__init__()
         self.num_layer = num_layer
         self.has_residual = has_residual

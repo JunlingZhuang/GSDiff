@@ -1,5 +1,9 @@
 # GRAN v2: Node Attributes + Partial Graph Completion + GATv2 Upgrade
 
+> **Status: ✅ COMPLETE (all 7 tasks shipped).** See `docs/v2-progress.md` for
+> per-task commits, file changes, and test results. This plan doc is kept as
+> the historical spec.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Extend GRAN to support node attribute prediction, partial graph conditional completion, and upgrade the GNN backbone from GRU+sigmoid-attention to GATv2 multi-head attention.

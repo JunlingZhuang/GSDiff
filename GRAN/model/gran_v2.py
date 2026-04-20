@@ -51,6 +51,21 @@ class GRANv2(nn.Module):
     """GRAN Mixture-of-Bernoulli model + attribute head + GATv2 option."""
 
     def __init__(self, config):
+        """Build the model from an EasyDict config.
+
+        Relevant config fields:
+            config.device                   -- torch device string
+            config.model.max_num_nodes      -- N (padded graph size)
+            config.model.hidden_dim         -- H (GNN hidden dim)
+            config.model.embedding_dim      -- input projection width
+            config.model.num_GNN_layers     -- depth of the GNN
+            config.model.num_mix_component  -- L (mixture-of-Bernoulli size)
+            config.model.num_attr_classes   -- A (node-attribute classes)  [v2]
+            config.model.use_gatv2          -- bool, pick backbone         [v2]
+            config.model.gatv2_num_heads    -- heads when use_gatv2=True   [v2]
+            config.model.block_size         -- K, nodes per autoregressive step
+            config.model.sample_stride      -- S, stride between steps
+        """
         super().__init__()
         self.config = config
         self.device = config.device
