@@ -1,69 +1,65 @@
 ---
 # =============================================================================
-# GRAN v2 training config for RPLAN floorplan bubble diagrams
-# (7 room types, 4-8 nodes per graph, ~70k graphs)
+# GRAN v2 training config for RPLAN floorplan bubble diagrams (40k graphs).
 #
-# Prerequisite: run the preprocessing pipeline to produce data/rplan/graphs.p:
-#   uv run python dataset/rplan_preprocessing/preprocess.py \\
-#       --raw_dir D:/Github/GSDiff/datasets/rplandata/Data/floorplan_dataset \\
-#       --out_dir data/rplan
+# Tuned for:
+#   - 40,000 preprocessed RPLAN graphs (4-8 nodes each, 7 attr classes)
+#   - RTX 3090 (24 GB VRAM)
+#   - joint edge + attr training with validation tracking
 #
-# Run training / testing:
-#   uv run python run_exp.py -c config/gran_v2_rplan.yaml        # train
-#   uv run python run_exp.py -c config/gran_v2_rplan.yaml -t     # test
+# Train / test:
+#   uv run python run_exp.py -c config/gran_v2_rplan.yaml          # train
+#   uv run python run_exp.py -c config/gran_v2_rplan.yaml -t       # test
 # =============================================================================
 
 # -----------------------------------------------------------------------------
 # 1. MOST-COMMONLY TUNED TRAINING KNOBS
 # -----------------------------------------------------------------------------
 train:
-  # RPLAN graphs are tiny (4-8 nodes), so each mini-batch has lots of graphs
-  # and training per epoch is fast. Expect convergence in hundreds of epochs.
-  max_epoch: 500                # small graphs converge fast; 500 is a safe default
-  batch_size: 32                # much larger than grid/DB because graphs are small
+  max_epoch: 300                # with 40k graphs, ~300 epochs is enough
+  batch_size: 64                # bigger batch: smoother loss, better GPU utilization
   num_workers: 0                # Windows-friendly
 
   optimizer: Adam
-  lr: 1.0e-4
-  wd: 0.0
+  lr: 2.0e-4                    # slightly higher to match larger batch size
+  wd: 1.0e-5                    # small weight decay to help generalization
   momentum: 0.9
   lr_decay: 0.3
-  lr_decay_epoch: [300, 400]    # decay lr at epoch 300 and 400 (before end)
+  lr_decay_epoch: [5, 15]    # earlier decays -- plateau kicked in around epoch 10 at lr=1e-4
 
-  lambda_attr: 1.0              # attr loss weight — tune this if attr acc is poor
+  lambda_attr: 0.5              # attr learns fast -- down-weight so edge head dominates later
 
   display_iter: 50              # RPLAN trains fast, log less often
-  snapshot_epoch: 50
-  valid_epoch: 25
+  snapshot_epoch: 25            # save every 25 epochs (12 checkpoints total)
+  valid_epoch: 5                # compute val loss every 5 epochs to see overfit early
   shuffle: true
   is_resume: false
   resume_dir:
-  resume_model: model_snapshot_0000500.pth
-  resume_epoch: 500
+  resume_model: model_snapshot_0000300.pth
+  resume_epoch: 300
 
 # -----------------------------------------------------------------------------
-# 2. MODEL ARCHITECTURE
+# 2. MODEL ARCHITECTURE — bumped capacity to exploit 40k data
 # -----------------------------------------------------------------------------
 model:
   name: GRANv2
 
   # Backbone switch
   use_gatv2: true               # try `false` to compare against GRU baseline
-  gatv2_num_heads: 4
+  gatv2_num_heads: 8            # more heads -- captures multiple local patterns
 
   # Node attributes: 7 classes matching the GSDiff room taxonomy
   #   0 Living, 1 Bedroom, 2 Bathroom, 3 Kitchen, 4 Balcony, 5 Storage, 6 External
   num_attr_classes: 7
 
-  # Smaller than grid/DB because RPLAN graphs are tiny
-  hidden_dim: 128
-  embedding_dim: 128
-  num_GNN_layers: 4             # fewer layers — info propagates across small graphs fast
+  # Doubled capacity: 40k data can support a bigger model without overfitting
+  hidden_dim: 256               # was 128
+  embedding_dim: 256            # was 128
+  num_GNN_layers: 6             # was 4 -- deeper message passing
   num_GNN_prop: 1
 
-  # RPLAN has at most ~8 rooms. Padding to 16 gives headroom for unusual floorplans.
   max_num_nodes: 16
-  num_mix_component: 20
+  num_mix_component: 30         # was 20 -- more mixture modes = richer edge dist
   is_sym: true
   block_size: 1                 # 1 node at a time
   sample_stride: 1
@@ -78,24 +74,33 @@ model:
 dataset:
   loader_name: GRANDataV2       # v2 loader to include node_attrs
   name: RPLAN                   # must match a branch in utils/data_helper.create_graphs()
-  data_path: data/rplan/        # where graphs.p lives
+  data_path: data/              # create_graphs('RPLAN') reads <data_path>/rplan/graphs.p
   node_order: DFS
-  train_ratio: 0.9              # more training data since RPLAN has 70k graphs
+
+  # Cap the number of graphs actually used (0 or unset = use all available).
+  # Useful for quick experiments without re-running preprocessor.
+  # train_ratio / dev_ratio apply within this capped subset.
+  #   e.g. total_graphs=10000 + train_ratio=0.9 + dev_ratio=0.05
+  #        -> 9000 train, 500 dev, 500 test
+  total_graphs: 20000
+
+  train_ratio: 0.9              # within `total_graphs` (or all if unset)
   dev_ratio: 0.05
-  num_subgraph_batch: 8         # RPLAN graphs have ~8 nodes so 8 subgraphs is reasonable
+                                # remaining 1 - train - dev = test fraction
+  num_subgraph_batch: 8
   num_fwd_pass: 1
   has_node_feat: false
   is_save_split: false
   is_sample_subgraph: true
-  is_overwrite_precompute: false
+  is_overwrite_precompute: true   # set true after dataset size changes; false to reuse cache
 
 # -----------------------------------------------------------------------------
 # 4. TEST / INFERENCE
 # -----------------------------------------------------------------------------
 test:
-  batch_size: 100               # RPLAN test samples are small; batch heavily
+  batch_size: 100
   num_workers: 0
-  num_test_gen: 1000            # we have plenty of RPLAN test data
+  num_test_gen: 1000
   is_vis: true
   is_single_plot: false
   is_test_ER: false

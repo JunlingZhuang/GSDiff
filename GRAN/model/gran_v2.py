@@ -413,8 +413,19 @@ class GRANv2(nn.Module):
                     A[:, ii:jj, :jj] = torch.bernoulli(prob[:, :jj - ii, :])
 
                 # ---- attribute prediction for the new nodes --------------
-                # node_state_out[:, ii:jj, :] is (B, K, H); argmax of the
-                # output_attr head gives per-node class ids of shape (B, K).
+                # node_state_out[:, ii:jj, :] is (B, K, H); convert to class
+                # logits via output_attr, then SAMPLE from the softmax
+                # distribution (multinomial). Argmax would collapse diversity
+                # — e.g. the most frequent class (Bedroom ~38% in RPLAN) would
+                # end up dominating every new node.
+                #
+                # attr_sampling_temperature (config.model.attr_temperature)
+                # scales logits before softmax:
+                #   < 1.0  -> sharper  (closer to argmax)
+                #   = 1.0  -> default, pure model distribution
+                #   > 1.0  -> flatter  (more diverse)
+                # Default 1.0 means "trust the model distribution".
+                #
                 # Limitation: when skip_edge_sampling=True we keep the
                 # pre-edge-decision node_state_out (the GNN has not seen the
                 # user's fixed edges). A second GNN pass would give a more
@@ -423,7 +434,16 @@ class GRANv2(nn.Module):
                 new_attr_logits = self.output_attr(
                     new_node_feat.reshape(-1, H))               # (B*K, A)
                 new_attr_logits = new_attr_logits.view(B, K, -1)
-                new_attrs = new_attr_logits.argmax(dim=-1)      # (B, K) long
+
+                temp = float(
+                    getattr(self.config.model, 'attr_temperature', 1.0) or 1.0)
+                scaled_logits = new_attr_logits / temp
+                probs = F.softmax(scaled_logits, dim=-1)        # (B, K, A)
+                # multinomial works on 2D, so flatten batch/time dims
+                flat_probs = probs.view(-1, probs.shape[-1])    # (B*K, A)
+                flat_samples = torch.multinomial(flat_probs, 1).squeeze(-1)
+                new_attrs = flat_samples.view(B, K)             # (B, K) long
+
                 node_attrs[:, ii:jj] = new_attrs
                 if return_attr_logits:
                     attr_logits_all[:, ii:jj, :] = new_attr_logits

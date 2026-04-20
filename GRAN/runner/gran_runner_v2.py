@@ -73,12 +73,64 @@ class GranRunnerV2(GranRunner):
             config.train.lambda_attr -- weight of the attribute CE loss in
                                          total_loss = edge_loss + lambda * attr_loss.
                                          Defaults to 1.0 if unset.
+
+        [v2] Fix parent's split bug: original GranRunner sets
+            graphs_dev = graphs[:num_dev]
+        which is a SUBSET of graphs_train, not a held-out validation set.
+        We re-slice into three DISJOINT partitions:
+            train: [0,               num_train)
+            dev:   [num_train,       num_train + num_dev)
+            test:  [num_train + num_dev, num_graphs)
         """
         super().__init__(config)
         # lambda_attr: weight of the node-attribute CrossEntropy loss in the
         # joint objective. Configured via config.train.lambda_attr;
         # default 1.0 so it matches the edge loss by default.
         self.lambda_attr = getattr(config.train, 'lambda_attr', 1.0)
+
+        # [v2] Separate train / val SummaryWriters.
+        # Writing to train/ and val/ subdirs with SHARED tag names
+        # (edge_loss, attr_loss, total_loss) makes TensorBoard overlay both
+        # series onto the same chart. The parent's self.writer still exists
+        # (it points at the run root) so per-iteration iter-level scalars
+        # continue to work unchanged.
+        import os as _os
+        from tensorboardX import SummaryWriter as _SW
+        self.train_writer = _SW(log_dir=_os.path.join(config.save_dir, 'train'))
+        self.val_writer = _SW(log_dir=_os.path.join(config.save_dir, 'val'))
+
+        # [v2] optional cap on how many graphs to actually use, before
+        # splitting. Makes epochs faster for quick experiments without
+        # re-running the preprocessor. `train_ratio` / `dev_ratio` apply as
+        # usual within this capped subset.
+        #   dataset.total_graphs = 10000  -> use first 10k graphs; train = 9k, dev = 500
+        #   dataset.total_graphs unset/0  -> use all graphs (current behavior)
+        total_cap = getattr(config.dataset, 'total_graphs', 0) or 0
+        if total_cap > 0 and total_cap < len(self.graphs):
+            logger.info(
+                "capping dataset: {} -> {} graphs (dataset.total_graphs)".format(
+                    len(self.graphs), total_cap))
+            self.graphs = self.graphs[:total_cap]
+            self.num_graphs = len(self.graphs)
+            # Rebuild the node-count PMF that GRANv2 sampling uses.
+            import numpy as _np
+            pmf = _np.bincount([len(g.nodes) for g in self.graphs])[1:]
+            if pmf.sum() > 0:
+                self.num_nodes_pmf_train = pmf / pmf.sum()
+                self.max_num_nodes = len(pmf)
+
+        # [v2] re-slice to disjoint train/dev/test
+        num_train = int(self.num_graphs * self.train_ratio)
+        num_dev = int(self.num_graphs * self.dev_ratio)
+        self.graphs_train = self.graphs[:num_train]
+        self.graphs_dev = self.graphs[num_train:num_train + num_dev]
+        self.graphs_test = self.graphs[num_train + num_dev:]
+        self.num_train = len(self.graphs_train)
+        self.num_dev = len(self.graphs_dev)
+        self.num_test_gt = len(self.graphs_test)
+        logger.info(
+            "v2 disjoint split: train={} / dev={} / test={}".format(
+                self.num_train, self.num_dev, self.num_test_gt))
 
     # ======================================================================
     # Training
@@ -108,6 +160,22 @@ class GranRunnerV2(GranRunner):
             num_workers=self.train_conf.num_workers,
             collate_fn=train_dataset.collate_fn,
             drop_last=False)
+
+        # [v2] validation loader -- uses the held-out dev graphs. Only used
+        # every `train.valid_epoch` epochs; forward-only (no backward / no
+        # precompute overwrite so it doesn't clobber train shards).
+        val_loader = None
+        if len(self.graphs_dev) > 0:
+            # Build a dev-tagged config that does NOT re-run precompute.
+            val_dataset = eval(self.dataset_conf.loader_name)(
+                self.config, self.graphs_dev, tag='dev')
+            val_loader = torch.utils.data.DataLoader(
+                val_dataset,
+                batch_size=self.train_conf.batch_size,
+                shuffle=False,
+                num_workers=self.train_conf.num_workers,
+                collate_fn=val_dataset.collate_fn,
+                drop_last=False)
 
         # [v2] pick up GRANv2 via config.model.name
         model = eval(self.model_conf.name)(self.config)
@@ -157,6 +225,12 @@ class GranRunnerV2(GranRunner):
         iter_count = 0
         results = defaultdict(list)
         total_epochs = self.train_conf.max_epoch - resume_epoch
+
+        # [v2] track best model by val loss; saved to model_best.pth and
+        # overwritten each time val_total hits a new minimum.
+        best_val_total = float('inf')
+        best_val_epoch = -1
+        best_model_path = os.path.join(self.config.save_dir, 'model_best.pth')
 
         epoch_bar = tqdm(
             range(resume_epoch, self.train_conf.max_epoch),
@@ -259,20 +333,73 @@ class GranRunnerV2(GranRunner):
                 )
 
             # [v2] one summary line per epoch, ML-style
+            val_edge = val_attr = val_total = None
             if epoch_iters > 0:
                 mean_edge = epoch_edge_sum / epoch_iters
                 mean_attr = epoch_attr_sum / epoch_iters
                 mean_total = mean_edge + self.lambda_attr * mean_attr
-                self.writer.add_scalar('epoch/edge_loss', mean_edge, epoch + 1)
-                self.writer.add_scalar('epoch/attr_loss', mean_attr, epoch + 1)
-                self.writer.add_scalar('epoch/total_loss', mean_total, epoch + 1)
-                logger.info(
-                    "epoch {:04d}/{:04d} | iters {} | "
-                    "edge {:.4f} | attr {:.4f} | total {:.4f} | "
-                    "lr {:.2e}".format(
-                        epoch + 1, self.train_conf.max_epoch, epoch_iters,
-                        mean_edge, mean_attr, mean_total,
-                        optimizer.param_groups[0]['lr']))
+                # [v2] write to the TRAIN sub-writer using shared tag names so
+                # TensorBoard overlays train + val on one chart.
+                self.train_writer.add_scalar('edge_loss', mean_edge, epoch + 1)
+                self.train_writer.add_scalar('attr_loss', mean_attr, epoch + 1)
+                self.train_writer.add_scalar('total_loss', mean_total, epoch + 1)
+
+                # [v2] validation step every `valid_epoch` epochs
+                if (val_loader is not None
+                        and (epoch + 1) % self.train_conf.valid_epoch == 0):
+                    val_edge, val_attr, val_total = self._validate(
+                        model, val_loader)
+                    # SAME tag names -> appear as second line on the same chart
+                    self.val_writer.add_scalar('edge_loss', val_edge, epoch + 1)
+                    self.val_writer.add_scalar('attr_loss', val_attr, epoch + 1)
+                    self.val_writer.add_scalar('total_loss', val_total, epoch + 1)
+                    results['val_edge_loss'] += [val_edge]
+                    results['val_attr_loss'] += [val_attr]
+                    results['val_total_loss'] += [val_total]
+                    results['val_epoch'] += [epoch + 1]
+
+                    # [v2] save best model so far (by val_total)
+                    if val_total < best_val_total:
+                        best_val_total = val_total
+                        best_val_epoch = epoch + 1
+                        torch.save(
+                            {
+                                'model': (model.module if self.use_gpu
+                                          else model).state_dict(),
+                                'optimizer': optimizer.state_dict(),
+                                'scheduler': lr_scheduler.state_dict(),
+                                'step': epoch + 1,
+                                'val_edge': val_edge,
+                                'val_attr': val_attr,
+                                'val_total': val_total,
+                            },
+                            best_model_path,
+                        )
+                        logger.info(
+                            "** new best val_total={:.4f} @ epoch {:04d}, "
+                            "saved to {}".format(
+                                val_total, epoch + 1, 'model_best.pth'))
+
+                # Per-epoch summary. One line normally, two aligned lines when
+                # we also just computed validation losses.
+                cur_lr = optimizer.param_groups[0]['lr']
+                if val_edge is not None:
+                    logger.info(
+                        "ep {ep:04d}/{total_ep:04d}  lr={lr:.2e}  "
+                        "train: edge={te:.4f}  attr={ta:.4f}  total={tt:.4f}\n"
+                        "                        "
+                        "  val: edge={ve:.4f}  attr={va:.4f}  total={vt:.4f}".format(
+                            ep=epoch + 1, total_ep=self.train_conf.max_epoch,
+                            lr=cur_lr,
+                            te=mean_edge, ta=mean_attr, tt=mean_total,
+                            ve=val_edge, va=val_attr, vt=val_total))
+                else:
+                    logger.info(
+                        "ep {ep:04d}/{total_ep:04d}  lr={lr:.2e}  "
+                        "train: edge={te:.4f}  attr={ta:.4f}  total={tt:.4f}".format(
+                            ep=epoch + 1, total_ep=self.train_conf.max_epoch,
+                            lr=cur_lr,
+                            te=mean_edge, ta=mean_attr, tt=mean_total))
 
             # snapshot model (same signature as parent's call)
             if (epoch + 1) % self.train_conf.snapshot_epoch == 0:
@@ -288,8 +415,249 @@ class GranRunnerV2(GranRunner):
 
         pickle.dump(results, open(os.path.join(self.config.save_dir, 'train_stats.p'), 'wb'))
         self.writer.close()
+        self.train_writer.close()
+        self.val_writer.close()
+
+        # [v2] final summary
+        if best_val_epoch > 0:
+            logger.info(
+                "training done. best val_total={:.4f} @ epoch {:04d} "
+                "(saved as model_best.pth)".format(
+                    best_val_total, best_val_epoch))
+        else:
+            logger.info("training done. (no validation recorded)")
 
         return 1
+
+    # ======================================================================
+    # Validation helper
+    # ======================================================================
+    def _validate(self, model, val_loader):
+        """Run forward-only loss computation on the dev set.
+
+        Args:
+            model:      the (possibly DataParallel-wrapped) GRANv2 model
+            val_loader: DataLoader over the dev-tagged GRANDataV2
+
+        Returns:
+            (val_edge, val_attr, val_total) mean losses as plain Python floats.
+            val_total = val_edge + lambda_attr * val_attr.
+        """
+        model.eval()
+        sum_edge = 0.0
+        sum_attr = 0.0
+        n_batches = 0
+
+        with torch.no_grad():
+            val_iter = val_loader.__iter__()
+            n_inner = len(val_loader) // self.num_gpus
+            for _ in range(n_inner):
+                batch_data = []
+                if self.use_gpu:
+                    for _ in self.gpus:
+                        batch_data.append(next(val_iter))
+                for ff in range(self.dataset_conf.num_fwd_pass):
+                    batch_fwd = []
+                    if self.use_gpu:
+                        for dd, gpu_id in enumerate(self.gpus):
+                            data = {}
+                            data['adj'] = batch_data[dd][ff]['adj'].to(gpu_id, non_blocking=True)
+                            data['edges'] = batch_data[dd][ff]['edges'].to(gpu_id, non_blocking=True)
+                            data['node_idx_gnn'] = batch_data[dd][ff]['node_idx_gnn'].to(gpu_id, non_blocking=True)
+                            data['node_idx_feat'] = batch_data[dd][ff]['node_idx_feat'].to(gpu_id, non_blocking=True)
+                            data['label'] = batch_data[dd][ff]['label'].to(gpu_id, non_blocking=True)
+                            data['att_idx'] = batch_data[dd][ff]['att_idx'].to(gpu_id, non_blocking=True)
+                            data['subgraph_idx'] = batch_data[dd][ff]['subgraph_idx'].to(gpu_id, non_blocking=True)
+                            data['subgraph_idx_base'] = batch_data[dd][ff]['subgraph_idx_base'].to(gpu_id, non_blocking=True)
+                            if 'node_attrs' in batch_data[dd][ff]:
+                                data['node_attrs'] = batch_data[dd][ff]['node_attrs'].to(gpu_id, non_blocking=True)
+                            batch_fwd.append((data,))
+
+                    if batch_fwd:
+                        result = model(*batch_fwd)
+                        if isinstance(result, tuple) and len(result) == 2:
+                            edge_loss = result[0].mean()
+                            attr_loss = result[1].mean()
+                        else:
+                            edge_loss = result.mean()
+                            attr_loss = edge_loss.new_zeros(())
+                        sum_edge += float(edge_loss.data.cpu().numpy())
+                        sum_attr += float(attr_loss.data.cpu().numpy())
+                        n_batches += 1
+
+        model.train()
+        if n_batches == 0:
+            return 0.0, 0.0, 0.0
+        mean_edge = sum_edge / n_batches
+        mean_attr = sum_attr / n_batches
+        mean_total = mean_edge + self.lambda_attr * mean_attr
+        return mean_edge, mean_attr, mean_total
+
+    # ======================================================================
+    # Visualization helper
+    # ======================================================================
+    # Match the GRAN room class palette used in the preprocessor so
+    # training visualizations and generated visualizations are directly
+    # comparable.
+    _ATTR_NAMES = ('Living', 'Bedroom', 'Bathroom', 'Kitchen',
+                   'Balcony', 'Storage', 'External')
+    _ATTR_COLORS = {
+        0: '#EE4D4D',  # Living
+        1: '#C67FFF',  # Bedroom
+        2: '#5EBADA',  # Bathroom
+        3: '#FFB84D',  # Kitchen
+        4: '#6BDF6B',  # Balcony
+        5: '#B5896B',  # Storage
+        6: '#808080',  # External
+    }
+
+    def _draw_grid(self, graphs, out_path, title='', ncols=5):
+        """Render a grid of graphs in one PNG.
+
+        Each cell uses _ATTR_COLORS to colour nodes by their 'attr' class.
+        There is NO pairing with any other grid — each graph is independent.
+
+        Args:
+            graphs:   iterable of networkx.Graph
+            out_path: where to save the PNG
+            title:    figure-level title
+            ncols:    number of columns in the grid (rows inferred)
+        """
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Patch
+
+        graphs = list(graphs)
+        n = len(graphs)
+        if n == 0:
+            return
+        nrows = int(np.ceil(n / ncols))
+
+        fig, axes = plt.subplots(nrows, ncols,
+                                 figsize=(ncols * 2.6, nrows * 2.6))
+        # Always make axes iterable as flat list
+        if nrows == 1 and ncols == 1:
+            axes = [axes]
+        else:
+            axes = np.asarray(axes).reshape(-1)
+
+        present = set()
+
+        for idx, ax in enumerate(axes):
+            if idx >= n:
+                ax.axis('off')
+                continue
+
+            G = graphs[idx]
+            if G.number_of_nodes() == 0:
+                ax.text(0.5, 0.5, '(empty)', ha='center', va='center')
+                ax.set_title(f'#{idx}', fontsize=8)
+                ax.set_xticks([]); ax.set_yticks([])
+                continue
+
+            pos = nx.spring_layout(G, seed=42, k=0.8)
+
+            for u, v in G.edges():
+                x1, y1 = pos[u]; x2, y2 = pos[v]
+                ax.plot([x1, x2], [y1, y2], color='#888',
+                        linewidth=1.1, zorder=1)
+            for nd in G.nodes():
+                cls = int(G.nodes[nd].get('attr', 0))
+                present.add(cls)
+                color = self._ATTR_COLORS.get(cls, '#888')
+                x, y = pos[nd]
+                ax.add_patch(plt.Circle((x, y), 0.14, facecolor=color,
+                                        edgecolor='black', linewidth=0.8,
+                                        zorder=2, alpha=0.95))
+                # keep per-node label only when graph is small enough
+                if G.number_of_nodes() <= 10:
+                    label = self._ATTR_NAMES[cls][:3] if 0 <= cls < len(self._ATTR_NAMES) else '?'
+                    ax.text(x, y, label, ha='center', va='center',
+                            fontsize=6, fontweight='bold', zorder=3)
+
+            ax.set_xlim(-1.2, 1.2); ax.set_ylim(-1.2, 1.2)
+            ax.set_aspect('equal')
+            ax.set_xticks([]); ax.set_yticks([])
+            ax.set_title(f'#{idx} ({G.number_of_nodes()}n {G.number_of_edges()}e)',
+                         fontsize=8)
+
+        handles = [Patch(facecolor=self._ATTR_COLORS.get(c, '#888'),
+                         label=self._ATTR_NAMES[c] if c < len(self._ATTR_NAMES) else f'cls{c}')
+                   for c in sorted(present)]
+        if handles:
+            fig.legend(handles=handles, loc='lower center',
+                       ncol=len(handles), fontsize=9,
+                       bbox_to_anchor=(0.5, -0.02))
+
+        fig.suptitle(title, fontsize=12, y=0.995)
+        plt.tight_layout(rect=(0, 0.03, 1, 0.98))
+        plt.savefig(out_path, dpi=110, bbox_inches='tight')
+        plt.close(fig)
+
+    def _draw_attr_bubble(self, G, out_path, title=''):
+        """Render a single graph as a bubble diagram colored by node 'attr'.
+
+        Nodes without an 'attr' entry default to class 0 (gray).
+        Edges are plotted as plain lines.
+
+        Args:
+            G:          networkx.Graph; nodes may have 'attr' (int) attribute
+            out_path:   where to save the PNG
+            title:      figure title
+        """
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Patch
+
+        if G.number_of_nodes() == 0:
+            return
+
+        # spring layout for a clean "bubble" look -- reproducible via nx seed
+        pos = nx.spring_layout(G, seed=42, k=0.8)
+
+        fig, ax = plt.subplots(figsize=(5, 5))
+
+        # edges
+        for u, v in G.edges():
+            x1, y1 = pos[u]
+            x2, y2 = pos[v]
+            ax.plot([x1, x2], [y1, y2],
+                    color='#888', linewidth=1.5, zorder=1)
+
+        # nodes as colored circles with the class name inside
+        for n in G.nodes():
+            cls = int(G.nodes[n].get('attr', 0))
+            color = self._ATTR_COLORS.get(cls, '#888')
+            label = self._ATTR_NAMES[cls][:3] if 0 <= cls < len(self._ATTR_NAMES) else '?'
+            x, y = pos[n]
+            circ = plt.Circle((x, y), 0.12,
+                              facecolor=color, edgecolor='black',
+                              linewidth=1.2, zorder=2, alpha=0.95)
+            ax.add_patch(circ)
+            ax.text(x, y, label,
+                    ha='center', va='center',
+                    fontsize=8, fontweight='bold', zorder=3)
+
+        # legend (only the classes actually present in this graph)
+        present = sorted({int(G.nodes[n].get('attr', 0)) for n in G.nodes()})
+        handles = [Patch(facecolor=self._ATTR_COLORS.get(c, '#888'),
+                         label=self._ATTR_NAMES[c] if c < len(self._ATTR_NAMES) else f'cls{c}')
+                   for c in present]
+        ax.legend(handles=handles, loc='upper right', fontsize=7, framealpha=0.9)
+
+        ax.set_xlim(-1.2, 1.2)
+        ax.set_ylim(-1.2, 1.2)
+        ax.set_aspect('equal')
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_title(f'{title} | {G.number_of_nodes()} nodes, {G.number_of_edges()} edges',
+                     fontsize=10)
+
+        plt.tight_layout()
+        plt.savefig(out_path, dpi=110, bbox_inches='tight')
+        plt.close(fig)
 
     # ======================================================================
     # Testing
@@ -335,8 +703,12 @@ class GranRunnerV2(GranRunner):
             num_nodes_pred = []
             num_test_batch = int(np.ceil(self.num_test_gen / self.test_conf.batch_size))
 
+            # Progress is reported in graphs (not batches) so the user can see
+            # real throughput when num_test_gen is large.
+            gen_bar = tqdm(total=self.num_test_gen, desc='generating',
+                           unit='graph')
             gen_run_time = []
-            for ii in tqdm(range(num_test_batch)):
+            for ii in range(num_test_batch):
                 with torch.no_grad():
                     start_time = time.time()
                     input_dict = {}
@@ -355,6 +727,8 @@ class GranRunnerV2(GranRunner):
                     num_nodes_pred += [aa.shape[0] for aa in A_tmp]
                     if attr_tmp is not None:
                         attr_pred += [aa.data.cpu().numpy() for aa in attr_tmp]
+                    gen_bar.update(len(A_tmp))
+            gen_bar.close()
 
             logger.info('Average test time per mini-batch = {}'.format(
                 np.mean(gen_run_time)))
@@ -363,74 +737,120 @@ class GranRunnerV2(GranRunner):
             # [v2] keep attr_lists as np.ndarray list aligned with graphs_gen
             attr_lists = attr_pred if len(attr_pred) > 0 else None
 
-        # ---- visualization (unchanged from parent) -------------------------
+        # ---- visualization (v2: two grids, gen and reference) -------------
+        # No one-to-one correspondence between gen and reference in
+        # unconditional generation, so we render two separate overview grids
+        # (not paired). Reference comes from the TEST set (unseen by model).
         if self.is_vis:
-            num_col = self.vis_num_row
-            num_row = int(np.ceil(self.num_vis / num_col))
-            test_epoch = self.test_conf.test_model_name
-            test_epoch = test_epoch[test_epoch.rfind('_') + 1:test_epoch.find('.pth')]
-            save_name = os.path.join(
-                self.config.save_dir,
-                '{}_gen_graphs_epoch_{}_block_{}_stride_{}.png'.format(
-                    self.config.test.test_model_name[:-4], test_epoch,
-                    self.block_size, self.stride))
+            vis_dir = os.path.join(self.config.save_dir, 'vis')
+            os.makedirs(vis_dir, exist_ok=True)
 
-            graphs_pred_vis = [copy.deepcopy(gg) for gg in graphs_gen[:self.num_vis]]
+            # Attach generated attr labels onto the networkx graphs for plotting
+            for ii, gg in enumerate(graphs_gen[:self.num_vis]):
+                n = gg.number_of_nodes()
+                if attr_lists is not None and ii < len(attr_lists):
+                    attrs_i = attr_lists[ii][:n]
+                    for nd in gg.nodes():
+                        if nd < len(attrs_i):
+                            gg.nodes[nd]['attr'] = int(attrs_i[nd])
 
-            if self.better_vis:
-                for gg in graphs_pred_vis:
-                    gg.remove_nodes_from(list(nx.isolates(gg)))
+            ref_graphs = (self.graphs_test
+                          if len(self.graphs_test) > 0
+                          else self.graphs_train)
+            n_vis = min(self.num_vis, len(graphs_gen), len(ref_graphs))
 
-            vis_graphs = []
-            for gg in graphs_pred_vis:
-                CGs = [gg.subgraph(c) for c in nx.connected_components(gg)]
-                CGs = sorted(CGs, key=lambda x: x.number_of_nodes(), reverse=True)
-                vis_graphs += [CGs[0]]
+            gen_grid_path = os.path.join(vis_dir, 'gen_grid.png')
+            ref_grid_path = os.path.join(vis_dir, 'ref_grid.png')
 
-            if self.is_single_plot:
-                draw_graph_list(vis_graphs, num_row, num_col,
-                                fname=save_name, layout='spring')
-            else:
-                draw_graph_list_separate(vis_graphs, fname=save_name[:-4],
-                                         is_single=True, layout='spring')
+            try:
+                self._draw_grid(
+                    graphs_gen[:n_vis], gen_grid_path,
+                    title='Generated samples (from model)',
+                    ncols=self.vis_num_row)
+                self._draw_grid(
+                    ref_graphs[:n_vis], ref_grid_path,
+                    title='Real samples (from held-out test set)',
+                    ncols=self.vis_num_row)
+                logger.info(
+                    f'saved gen_grid.png + ref_grid.png -> {vis_dir}')
+            except Exception as e:
+                logger.warning(f'visualization failed: {e}')
 
-            save_name = os.path.join(self.config.save_dir, 'train_graphs.png')
-
-            if self.is_single_plot:
-                draw_graph_list(self.graphs_train[:self.num_vis], num_row, num_col,
-                                fname=save_name, layout='spring')
-            else:
-                draw_graph_list_separate(self.graphs_train[:self.num_vis],
-                                         fname=save_name[:-4], is_single=True,
-                                         layout='spring')
-
-        # ---- evaluation (unchanged from parent) ----------------------------
+        # ---- evaluation ---------------------------------------------------
+        # Each MMD metric is wrapped individually so one bad metric (e.g.
+        # orbit_stats_all with no orca extension) does not kill the rest.
+        # The error is logged with full traceback via logger.exception.
         if self.config.dataset.name in ['lobster']:
             acc = eval_acc_lobster_graph(graphs_gen)
             logger.info('Validity accuracy of generated graphs = {}'.format(acc))
 
         num_nodes_gen = [len(aa) for aa in graphs_gen]
 
-        num_nodes_dev = [len(gg.nodes) for gg in self.graphs_dev]
-        mmd_degree_dev, mmd_clustering_dev, mmd_4orbits_dev, mmd_spectral_dev = evaluate(
-            self.graphs_dev, graphs_gen, degree_only=False)
-        mmd_num_nodes_dev = compute_mmd(
-            [np.bincount(num_nodes_dev)], [np.bincount(num_nodes_gen)],
-            kernel=gaussian_emd)
+        def _safe_mmd(name, fn):
+            """Run an MMD computation; log before + after so users see
+            progress for the (slow) pair-wise MMD stages."""
+            import time as _time
+            logger.info(f'  [MMD] computing "{name}"...')
+            t0 = _time.time()
+            try:
+                val = fn()
+                logger.info(f'  [MMD] "{name}" = {val:.4f} '
+                            f'(took {_time.time() - t0:.1f}s)')
+                return val
+            except Exception:
+                logger.exception(f'  [MMD] "{name}" failed:')
+                return float('nan')
+
+        def _safe_evaluate(tag, ref_graphs, gen_graphs):
+            """Safe variant of evaluate(); returns (deg, cluster, orbit, spec),
+            each value NaN if the underlying computation raised."""
+            from utils.eval_helper import (degree_stats, clustering_stats,
+                                           orbit_stats_all, spectral_stats)
+            logger.info(f'[MMD] stage: {tag} '
+                        f'(ref {len(ref_graphs)} vs gen {len(gen_graphs)})')
+            deg = _safe_mmd(f'{tag}/degree',
+                            lambda: degree_stats(ref_graphs, gen_graphs))
+            clust = _safe_mmd(f'{tag}/clustering',
+                              lambda: clustering_stats(ref_graphs, gen_graphs))
+            orb = _safe_mmd(f'{tag}/4-orbits (needs orca)',
+                            lambda: orbit_stats_all(ref_graphs, gen_graphs))
+            spec = _safe_mmd(f'{tag}/spectral',
+                             lambda: spectral_stats(ref_graphs, gen_graphs))
+            return deg, clust, orb, spec
+
+        # Skip DEV MMD entirely when dev set is empty (dev_ratio=0) — users
+        # often set dev_ratio=0 and care only about the test-set report.
+        if len(self.graphs_dev) > 0:
+            num_nodes_dev = [len(gg.nodes) for gg in self.graphs_dev]
+            mmd_degree_dev, mmd_clustering_dev, mmd_4orbits_dev, mmd_spectral_dev = \
+                _safe_evaluate('DEV', self.graphs_dev, graphs_gen)
+            mmd_num_nodes_dev = _safe_mmd(
+                'DEV/#nodes',
+                lambda: compute_mmd(
+                    [np.bincount(num_nodes_dev)], [np.bincount(num_nodes_gen)],
+                    kernel=gaussian_emd))
+        else:
+            logger.info('DEV set is empty; skipping DEV MMD')
+            mmd_degree_dev = mmd_clustering_dev = float('nan')
+            mmd_4orbits_dev = mmd_spectral_dev = mmd_num_nodes_dev = float('nan')
 
         num_nodes_test = [len(gg.nodes) for gg in self.graphs_test]
-        mmd_degree_test, mmd_clustering_test, mmd_4orbits_test, mmd_spectral_test = evaluate(
-            self.graphs_test, graphs_gen, degree_only=False)
-        mmd_num_nodes_test = compute_mmd(
-            [np.bincount(num_nodes_test)], [np.bincount(num_nodes_gen)],
-            kernel=gaussian_emd)
+        mmd_degree_test, mmd_clustering_test, mmd_4orbits_test, mmd_spectral_test = \
+            _safe_evaluate('TEST', self.graphs_test, graphs_gen)
+        mmd_num_nodes_test = _safe_mmd(
+            'TEST/#nodes',
+            lambda: compute_mmd(
+                [np.bincount(num_nodes_test)], [np.bincount(num_nodes_gen)],
+                kernel=gaussian_emd))
 
         logger.info(
-            "Validation MMD scores of #nodes/degree/clustering/4orbits/spectral are = {}/{}/{}/{}/{}".format(
+            "MMD vs DEV  | #nodes={:.4f} | degree={:.4f} | "
+            "clustering={:.4f} | 4orbits={:.4f} | spectral={:.4f}".format(
                 mmd_num_nodes_dev, mmd_degree_dev, mmd_clustering_dev,
                 mmd_4orbits_dev, mmd_spectral_dev))
         logger.info(
-            "Test MMD scores of #nodes/degree/clustering/4orbits/spectral are = {}/{}/{}/{}/{}".format(
+            "MMD vs TEST | #nodes={:.4f} | degree={:.4f} | "
+            "clustering={:.4f} | 4orbits={:.4f} | spectral={:.4f}".format(
                 mmd_num_nodes_test, mmd_degree_test, mmd_clustering_test,
                 mmd_4orbits_test, mmd_spectral_test))
 

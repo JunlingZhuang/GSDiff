@@ -221,6 +221,28 @@ def create_graphs(graph_type, data_dir='data', noise=10.0, seed=1234):
         name='FIRSTMM_DB',
         node_attributes=False,
         graph_labels=True)
+  elif graph_type == 'RPLAN':
+    # RPLAN bubble-diagram graphs preprocessed by
+    # dataset/rplan_preprocessing/preprocess.py. Loaded directly from a
+    # pickle of networkx.Graph objects with per-node 'attr' (room class
+    # 0..6) and per-edge 'edge_type' (1=wall, 2=door).
+    pickle_path = os.path.join(data_dir, 'rplan', 'graphs.p')
+    if not os.path.exists(pickle_path):
+      raise FileNotFoundError(
+          f"RPLAN pickle not found at {pickle_path}. Run:\n"
+          f"  python dataset/rplan_preprocessing/preprocess.py "
+          f"--raw_dir <rplan_png_dir> --out_dir data/rplan")
+    with open(pickle_path, 'rb') as f:
+      graphs = pickle.load(f)
+    # Drop isolated / tiny graphs; ensure integer labels + no self-loops.
+    cleaned = []
+    for G in graphs:
+      G.remove_edges_from(nx.selfloop_edges(G))
+      if G.number_of_nodes() < 2:
+        continue
+      G = nx.convert_node_labels_to_integers(G)
+      cleaned.append(G)
+    graphs = cleaned
 
   num_nodes = [gg.number_of_nodes() for gg in graphs]
   num_edges = [gg.number_of_edges() for gg in graphs]
