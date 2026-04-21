@@ -137,6 +137,26 @@ class GRANv2(nn.Module):
             )
             nn.init.normal_(self.degree_embedding.weight, mean=0.0, std=0.1)
 
+        # ---- v2 structural fix (Path 1): ordering-id embedding -------------
+        # When ``num_canonical_order > 1`` the dataset emits each graph under
+        # several canonical orderings (DFS + BFS + k-core). Without an explicit
+        # "which ordering am I seeing right now" signal, the model learns a
+        # mixture distribution over orderings and that mixture matches NO
+        # single ordering at sampling time. This embedding table (one row per
+        # ordering id 0..C-1) is added to every node's initial feature BEFORE
+        # GNN propagation, giving the model a direct ordering signal.
+        # Gated by ``config.model.use_ordering_id`` (default False) so old
+        # checkpoints still load cleanly; at sampling time we always pin
+        # ordering id 0 (the first ordering, e.g. DFS).
+        self.use_ordering_id = getattr(
+            config.model, 'use_ordering_id', False)
+        if self.use_ordering_id:
+            self.ordering_embedding = nn.Embedding(
+                num_embeddings=max(1, self.num_canonical_order),
+                embedding_dim=config.model.embedding_dim,
+            )
+            nn.init.normal_(self.ordering_embedding.weight, mean=0.0, std=0.1)
+
         # ---- dimension-reduction input embed (unchanged) ------------------
         # Adjacency-row inputs have width N (max_num_nodes). When
         # dimension_reduce=True we project them down to embedding_dim first
@@ -220,6 +240,23 @@ class GRANv2(nn.Module):
                 min=0, max=self.max_num_nodes - 1).long()
             deg_emb = self.degree_embedding(inv_ranks.view(-1))  # (B*C*N, H)
             node_feat = node_feat + deg_emb
+
+        # ---- v2 structural fix (Path 1): add ordering-id embedding --------
+        # Every "real" node in ``node_feat`` lives in slot
+        #   flat = batch * C * N + order * N + pos
+        # so we can recover the ordering index directly from the slot. This
+        # keeps the dataset untouched (no new field needed in collate_fn).
+        # We add the ordering embedding BEFORE the leading zero-padding row
+        # is prepended so the row index used below (after the +1 shift in
+        # node_idx_feat) is consistent.
+        if self.use_ordering_id:
+            # Per-slot ordering ids, shape (B*C*N,) long.
+            # flat index = b*C*N + c*N + n -> c = (flat // N) % C.
+            flat = torch.arange(
+                B * C * N_max, device=node_feat.device, dtype=torch.long)
+            order_idx = (flat // N_max) % max(1, C)              # (B*C*N,)
+            ord_emb = self.ordering_embedding(order_idx)         # (B*C*N, H)
+            node_feat = node_feat + ord_emb
 
         # Prepend a zero row as feature for the newly-generated nodes.
         node_feat = F.pad(node_feat, (0, 0, 1, 0), 'constant', value=0.0)
@@ -371,6 +408,17 @@ class GRANv2(nn.Module):
                 # node_state_in shape: (B, jj, H)
                 node_state_in = F.pad(
                     node_state[:, :ii, :], (0, 0, 0, K), 'constant', value=0.0)
+
+                # ---- v2 structural fix (Path 1): add ordering-id embed ----
+                # At sampling time there's no "real" ordering — we just pin
+                # ordering id 0 (the first canonical ordering used during
+                # training, e.g. DFS). The same vector is broadcast to every
+                # node in the (B, jj) grid.
+                if self.use_ordering_id:
+                    ord_idx = torch.zeros(
+                        B, jj, device=self.device, dtype=torch.long)
+                    ord_emb = self.ordering_embedding(ord_idx)   # (B, jj, H)
+                    node_state_in = node_state_in + ord_emb
 
                 # ---- v2 structural fix: add degree-rank embedding ---------
                 # At step ``ii`` only the first ``ii`` rows of A are finalised,
@@ -655,10 +703,18 @@ class GRANv2(nn.Module):
                 att_idx=att_idx)
 
             # Edge (mixture-of-Bernoulli) loss.
+            #
+            # sum_order_log_prob=True uses `sum log P(pi_c)` across canonical
+            # orderings (the ORIGINAL GRAN paper loss). With multi-ordering
+            # (num_canonical_order > 1), the default logsumexp formulation
+            # produces technically-valid-but-confusing negative values
+            # (due to per-edge normalization inside the logsumexp). The
+            # `sum` variant keeps loss non-negative and mirrors the paper.
             edge_loss = mixture_bernoulli_loss(
                 label, log_theta, log_alpha,
                 self.adj_loss_func, subgraph_idx, subgraph_idx_base,
-                self.num_canonical_order)
+                self.num_canonical_order,
+                sum_order_log_prob=True)
 
             # ---- attribute loss -------------------------------------------
             # Three input shapes are supported, in order of preference:
