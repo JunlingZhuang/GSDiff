@@ -1,0 +1,130 @@
+---
+# =============================================================================
+# GRAN v2 ablation config: DEGREE FEATURE ONLY (single canonical ordering).
+#
+# Purpose:
+#   `gran_v2_rplan_struct.yaml` (multi-ordering + degree embedding) generated
+#   badly-degraded graphs (tiny, no Living Room, TEST/degree MMD 100x worse
+#   than baseline). Hypothesis: multi-ordering training without an ordering-id
+#   conditioning signal teaches the model a "mixture of orderings" that no
+#   single sampling pass matches.
+#
+# This config ISOLATES the degree-rank feature (the other half of the
+# structural fix) by turning OFF multi-ordering. If results are now
+# reasonable, the bug is multi-ordering. If still bad, degree embedding
+# is also broken.
+#
+# Also: reverts sum_order_log_prob (it only matters when num_canonical_order
+# > 1; single ordering means edge loss is the vanilla mixture-Bernoulli NLL
+# again, i.e. positive and directly comparable with baseline).
+#
+# Run:
+#   D:/Github/GSDiff/.venv/Scripts/python.exe run_exp.py \
+#       -c config/gran_v2_rplan_degonly.yaml
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 1. TRAINING
+# -----------------------------------------------------------------------------
+train:
+  max_epoch: 50                 # short run: just need to see if gen looks sane
+  batch_size: 64
+  num_workers: 0
+
+  optimizer: Adam
+  lr: 2.0e-4
+  wd: 1.0e-5
+  momentum: 0.9
+  lr_decay: 0.3
+  lr_decay_epoch: [15, 35]
+
+  lambda_attr: 0.5
+
+  display_iter: 50
+  snapshot_epoch: 10
+  valid_epoch: 5
+  shuffle: true
+  is_resume: false
+  resume_dir:
+  resume_model: model_snapshot_0000050.pth
+  resume_epoch: 50
+
+# -----------------------------------------------------------------------------
+# 2. MODEL
+# -----------------------------------------------------------------------------
+model:
+  name: GRANv2
+
+  use_gatv2: true
+  gatv2_num_heads: 8
+
+  num_attr_classes: 7
+
+  hidden_dim: 256
+  embedding_dim: 256
+  num_GNN_layers: 6
+  num_GNN_prop: 1
+
+  max_num_nodes: 16
+  num_mix_component: 30
+  is_sym: true
+  block_size: 1
+  sample_stride: 1
+
+  # ---- ABLATION: single ordering, degree feature ON ---------------------
+  num_canonical_order: 1        # <<< back to single ordering (vs struct=3)
+  use_degree_feature: true      # <<< keep degree-rank structural feature
+  # -----------------------------------------------------------------------
+
+  dimension_reduce: true
+  has_attention: true
+  edge_weight: 1.0
+
+# -----------------------------------------------------------------------------
+# 3. DATASET
+# -----------------------------------------------------------------------------
+dataset:
+  loader_name: GRANDataV2
+  name: RPLAN
+  data_path: data/
+
+  node_order: DFS               # <<< single ordering (vs struct='DFS+BFS+k_core')
+
+  total_graphs: 20000
+
+  train_ratio: 0.9
+  dev_ratio: 0.05
+  num_subgraph_batch: 8
+  num_fwd_pass: 1
+  has_node_feat: false
+  is_save_split: false
+  is_sample_subgraph: true
+  is_overwrite_precompute: true  # new ordering -> must rebuild precompute
+
+# -----------------------------------------------------------------------------
+# 4. TEST
+# -----------------------------------------------------------------------------
+test:
+  batch_size: 100
+  num_workers: 0
+  num_test_gen: 1000
+  is_vis: true
+  is_single_plot: false
+  is_test_ER: false
+  num_vis: 20
+  vis_num_row: 5
+  better_vis: true
+  test_model_dir: snapshot_model
+  test_model_name: gran_v2_rplan_degonly.pth
+
+# -----------------------------------------------------------------------------
+# 5. RUNTIME
+# -----------------------------------------------------------------------------
+exp_name: GRANv2_rplan_degonly
+exp_dir: exp/GRANv2_rplan_degonly   # separate dir so it doesn't mix with other ablations
+runner: GranRunnerV2
+use_horovod: false
+use_gpu: true
+device: cuda:0
+gpus: [0]
+seed: 1234
