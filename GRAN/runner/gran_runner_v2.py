@@ -325,11 +325,18 @@ class GranRunnerV2(GranRunner):
                 epoch_attr_sum += attr_loss_val
                 epoch_iters += 1
 
-                # [v2] live-update tqdm postfix (no extra log lines)
+                # [v2] live-update tqdm postfix with the RUNNING EPOCH MEAN
+                # (same convention as HuggingFace Trainer / Keras). Showing
+                # the per-batch instantaneous value makes the bar look noisy
+                # even when training is healthy. The running mean is smooth,
+                # has no lag, and matches the final epoch-summary INFO line.
+                running_edge = epoch_edge_sum / epoch_iters
+                running_attr = epoch_attr_sum / epoch_iters
+                running_total = running_edge + self.lambda_attr * running_attr
                 epoch_bar.set_postfix(
-                    edge=f'{edge_loss_val:.4f}',
-                    attr=f'{attr_loss_val:.4f}',
-                    total=f'{total_loss_val:.4f}',
+                    edge=f'{running_edge:.4f}',
+                    attr=f'{running_attr:.4f}',
+                    total=f'{running_total:.4f}',
                 )
 
             # [v2] one summary line per epoch, ML-style
@@ -418,6 +425,12 @@ class GranRunnerV2(GranRunner):
         self.train_writer.close()
         self.val_writer.close()
 
+        # [v2] Emit structured training history as JSON and CSV for easy
+        # machine parsing (by dashboards, downstream analysis tools, or LLMs
+        # reading the experiment directory). `train_stats.p` is still saved
+        # above for backward compatibility.
+        self._dump_training_history(results, best_val_total, best_val_epoch)
+
         # [v2] final summary
         if best_val_epoch > 0:
             logger.info(
@@ -428,6 +441,268 @@ class GranRunnerV2(GranRunner):
             logger.info("training done. (no validation recorded)")
 
         return 1
+
+    # ======================================================================
+    # Structured logging helpers
+    # ======================================================================
+    def _dump_training_history(self, results, best_val_total, best_val_epoch):
+        """Emit training history as JSON and CSV.
+
+        JSON structure:
+          {
+            "run_id": str,
+            "config_summary": { ...key hyperparameters },
+            "best": { "val_total": float, "epoch": int },
+            "per_iter": [{ "step": int, "edge_loss": f, "attr_loss": f, ... }],
+            "per_epoch_val": [{ "epoch": int, "val_edge": f, ... }]
+          }
+        """
+        import csv
+        import json
+
+        save_dir = self.config.save_dir
+
+        # Condensed config for quick lookup by readers
+        config_summary = {
+            'run_id': getattr(self.config, 'run_id', None),
+            'dataset_name': self.config.dataset.name,
+            'total_graphs': getattr(self.config.dataset, 'total_graphs', 0),
+            'train_ratio': self.config.dataset.train_ratio,
+            'dev_ratio': self.config.dataset.dev_ratio,
+            'node_order': self.config.dataset.node_order,
+            'model_name': self.config.model.name,
+            'hidden_dim': self.config.model.hidden_dim,
+            'num_GNN_layers': self.config.model.num_GNN_layers,
+            'num_mix_component': self.config.model.num_mix_component,
+            'num_attr_classes': self.config.model.num_attr_classes,
+            'num_canonical_order': self.config.model.num_canonical_order,
+            'use_gatv2': getattr(self.config.model, 'use_gatv2', False),
+            'use_degree_feature': getattr(
+                self.config.model, 'use_degree_feature', False),
+            'attr_temperature': getattr(
+                self.config.model, 'attr_temperature', 1.0),
+            'lr': self.config.train.lr,
+            'batch_size': self.config.train.batch_size,
+            'max_epoch': self.config.train.max_epoch,
+            'lambda_attr': getattr(self.config.train, 'lambda_attr', 1.0),
+            'lr_decay_epoch': list(self.config.train.lr_decay_epoch),
+            'lr_decay': self.config.train.lr_decay,
+        }
+
+        # Per-iteration series (aligned lists: train_step, edge_loss, ...)
+        per_iter = []
+        steps = results.get('train_step', [])
+        edge_losses = results.get('edge_loss', [])
+        attr_losses = results.get('attr_loss', [])
+        total_losses = results.get('train_loss', [])
+        n_iters = min(len(steps), len(edge_losses), len(attr_losses),
+                      len(total_losses))
+        for i in range(n_iters):
+            per_iter.append({
+                'step': int(steps[i]),
+                'edge_loss': float(edge_losses[i]),
+                'attr_loss': float(attr_losses[i]),
+                'total_loss': float(total_losses[i]),
+            })
+
+        # Per-epoch val points
+        val_epochs = results.get('val_epoch', [])
+        val_edges = results.get('val_edge_loss', [])
+        val_attrs = results.get('val_attr_loss', [])
+        val_totals = results.get('val_total_loss', [])
+        per_epoch_val = []
+        for i in range(min(len(val_epochs), len(val_edges))):
+            per_epoch_val.append({
+                'epoch': int(val_epochs[i]),
+                'val_edge_loss': float(val_edges[i]),
+                'val_attr_loss': float(val_attrs[i]),
+                'val_total_loss': float(val_totals[i]),
+            })
+
+        history = {
+            'run_id': config_summary['run_id'],
+            'config_summary': config_summary,
+            'best': {
+                'val_total': float(best_val_total)
+                             if best_val_total != float('inf') else None,
+                'epoch': int(best_val_epoch) if best_val_epoch > 0 else None,
+            },
+            'per_iter': per_iter,
+            'per_epoch_val': per_epoch_val,
+        }
+
+        # JSON (full structure)
+        with open(os.path.join(save_dir, 'training_history.json'),
+                  'w', encoding='utf-8') as f:
+            json.dump(history, f, indent=2, ensure_ascii=False)
+
+        # CSV for iter-level (for quick plotting with pandas/excel)
+        with open(os.path.join(save_dir, 'training_history_iter.csv'),
+                  'w', encoding='utf-8', newline='') as f:
+            w = csv.DictWriter(
+                f, fieldnames=['step', 'edge_loss', 'attr_loss', 'total_loss'])
+            w.writeheader()
+            w.writerows(per_iter)
+
+        # CSV for val-level
+        with open(os.path.join(save_dir, 'training_history_val.csv'),
+                  'w', encoding='utf-8', newline='') as f:
+            w = csv.DictWriter(
+                f, fieldnames=['epoch', 'val_edge_loss', 'val_attr_loss',
+                               'val_total_loss'])
+            w.writeheader()
+            w.writerows(per_epoch_val)
+
+        logger.info(
+            'saved structured training history: training_history.json + '
+            'training_history_iter.csv + training_history_val.csv')
+
+    def _dump_test_results(self, graphs_gen, attr_lists, gen_run_time,
+                           mmd_dev, mmd_test):
+        """Write machine-readable test results to the run dir.
+
+        Produces:
+          * test_results.json — full config summary + MMD + stats + class histogram
+          * test_mmd.csv     — flat table (set, metric, value) for quick plotting
+          * test_attrs.csv   — per-graph node attribute sequence for inspection
+
+        Everything lands in ``self.config.save_dir`` which, in test mode,
+        is the checkpoint's original run dir (so each snapshot has its
+        own ``test_results.json`` alongside it).
+        """
+        import csv
+        import json
+        from collections import Counter
+
+        save_dir = self.config.save_dir
+
+        # --- dataset + config summary ------------------------------------
+        config_summary = {
+            'run_id': getattr(self.config, 'run_id', None),
+            'test_model_dir': self.config.test.test_model_dir,
+            'test_model_name': self.config.test.test_model_name,
+            'num_test_gen': self.config.test.num_test_gen,
+            'dataset_name': self.config.dataset.name,
+            'total_graphs': getattr(self.config.dataset, 'total_graphs', 0),
+            'train_ratio': self.config.dataset.train_ratio,
+            'dev_ratio': self.config.dataset.dev_ratio,
+            'node_order': self.config.dataset.node_order,
+            'num_canonical_order': self.config.model.num_canonical_order,
+            'use_gatv2': getattr(self.config.model, 'use_gatv2', False),
+            'use_degree_feature': getattr(
+                self.config.model, 'use_degree_feature', False),
+            'hidden_dim': self.config.model.hidden_dim,
+            'num_GNN_layers': self.config.model.num_GNN_layers,
+        }
+
+        # --- per-generated-graph stats -----------------------------------
+        gen_stats = []
+        attr_counter = Counter()
+        for idx, G in enumerate(graphs_gen):
+            n = G.number_of_nodes()
+            e = G.number_of_edges()
+            attrs = None
+            if attr_lists is not None and idx < len(attr_lists):
+                attrs = [int(a) for a in attr_lists[idx][:n]]
+                for a in attrs:
+                    attr_counter[a] += 1
+            gen_stats.append({
+                'idx': idx,
+                'num_nodes': int(n),
+                'num_edges': int(e),
+                'attrs': attrs,
+            })
+
+        total_attrs = sum(attr_counter.values())
+        attr_histogram = {
+            str(cls): {
+                'count': int(cnt),
+                'ratio': cnt / total_attrs if total_attrs else 0.0,
+            }
+            for cls, cnt in sorted(attr_counter.items())
+        }
+
+        # --- reference class histogram (for comparison) ------------------
+        ref_counter = Counter()
+        ref_graphs = (self.graphs_test if len(self.graphs_test) > 0
+                      else self.graphs_train)
+        for G in ref_graphs:
+            for n in G.nodes():
+                ref_counter[int(G.nodes[n].get('attr', 0))] += 1
+        ref_total = sum(ref_counter.values())
+        ref_histogram = {
+            str(cls): {
+                'count': int(cnt),
+                'ratio': cnt / ref_total if ref_total else 0.0,
+            }
+            for cls, cnt in sorted(ref_counter.items())
+        }
+
+        # --- graph size distribution (gen vs ref) ------------------------
+        gen_sizes = Counter(int(G.number_of_nodes()) for G in graphs_gen)
+        ref_sizes = Counter(int(G.number_of_nodes()) for G in ref_graphs)
+
+        def _size_hist(counter):
+            total = sum(counter.values())
+            return {str(k): {'count': int(v),
+                             'ratio': v / total if total else 0.0}
+                    for k, v in sorted(counter.items())}
+
+        # --- assemble full report ----------------------------------------
+        report = {
+            'config_summary': config_summary,
+            'num_generated': len(graphs_gen),
+            'avg_gen_time_per_batch_sec': (
+                float(np.mean(gen_run_time))
+                if len(gen_run_time) > 0 else None),
+            'mmd': {
+                'dev': {k: (float(v) if v == v else None) for k, v in mmd_dev.items()},
+                'test': {k: (float(v) if v == v else None) for k, v in mmd_test.items()},
+            },
+            'gen_graph_size_histogram': _size_hist(gen_sizes),
+            'ref_graph_size_histogram': _size_hist(ref_sizes),
+            'gen_attr_histogram': attr_histogram,
+            'ref_attr_histogram': ref_histogram,
+        }
+
+        # Per-graph stats written to separate file because it can be large
+        with open(os.path.join(save_dir, 'test_results.json'),
+                  'w', encoding='utf-8') as f:
+            json.dump(report, f, indent=2, ensure_ascii=False)
+
+        # Flat CSV for MMD: row per (set, metric)
+        with open(os.path.join(save_dir, 'test_mmd.csv'),
+                  'w', encoding='utf-8', newline='') as f:
+            w = csv.DictWriter(f, fieldnames=['set', 'metric', 'value'])
+            w.writeheader()
+            for set_name, mmd_dict in (('dev', mmd_dev), ('test', mmd_test)):
+                for metric, value in mmd_dict.items():
+                    w.writerow({
+                        'set': set_name,
+                        'metric': metric,
+                        'value': (float(value) if value == value else None),
+                    })
+
+        # Per-graph attr sequence (one row per generated graph)
+        with open(os.path.join(save_dir, 'test_attrs.csv'),
+                  'w', encoding='utf-8', newline='') as f:
+            w = csv.DictWriter(
+                f, fieldnames=['idx', 'num_nodes', 'num_edges',
+                               'attrs_comma_separated'])
+            w.writeheader()
+            for s in gen_stats:
+                w.writerow({
+                    'idx': s['idx'],
+                    'num_nodes': s['num_nodes'],
+                    'num_edges': s['num_edges'],
+                    'attrs_comma_separated': (
+                        ','.join(str(a) for a in (s['attrs'] or []))
+                    ),
+                })
+
+        logger.info(
+            'saved structured test results: test_results.json + '
+            'test_mmd.csv + test_attrs.csv')
 
     # ======================================================================
     # Validation helper
@@ -853,6 +1128,28 @@ class GranRunnerV2(GranRunner):
             "clustering={:.4f} | 4orbits={:.4f} | spectral={:.4f}".format(
                 mmd_num_nodes_test, mmd_degree_test, mmd_clustering_test,
                 mmd_4orbits_test, mmd_spectral_test))
+
+        # [v2] Structured test report for machine consumption. Written to
+        # the SAME run dir where the loaded checkpoint lives, so every
+        # checkpoint has its matching test_results.json right next to it.
+        self._dump_test_results(
+            graphs_gen=graphs_gen, attr_lists=attr_lists,
+            gen_run_time=gen_run_time,
+            mmd_dev={
+                '#nodes': mmd_num_nodes_dev,
+                'degree': mmd_degree_dev,
+                'clustering': mmd_clustering_dev,
+                '4orbits': mmd_4orbits_dev,
+                'spectral': mmd_spectral_dev,
+            },
+            mmd_test={
+                '#nodes': mmd_num_nodes_test,
+                'degree': mmd_degree_test,
+                'clustering': mmd_clustering_test,
+                '4orbits': mmd_4orbits_test,
+                'spectral': mmd_spectral_test,
+            },
+        )
 
         if self.config.dataset.name in ['lobster']:
             return (mmd_degree_dev, mmd_clustering_dev, mmd_4orbits_dev,
