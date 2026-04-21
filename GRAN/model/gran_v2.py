@@ -121,6 +121,22 @@ class GRANv2(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(self.hidden_dim, self.num_attr_classes))
 
+        # ---- v2 structural fix: per-node degree-rank embedding ------------
+        # Optional ordering-invariant structural signal. Indexed by each
+        # node's current rank (0 = highest-degree among already-generated
+        # nodes, N-1 = lowest). Added to initial node features before GNN
+        # propagation in both _inference and _sampling. Gated by
+        # ``config.model.use_degree_feature`` (default False) so old
+        # checkpoints still load cleanly.
+        self.use_degree_feature = getattr(
+            config.model, 'use_degree_feature', False)
+        if self.use_degree_feature:
+            self.degree_embedding = nn.Embedding(
+                num_embeddings=self.max_num_nodes,
+                embedding_dim=config.model.embedding_dim,
+            )
+            nn.init.normal_(self.degree_embedding.weight, mean=0.0, std=0.1)
+
         # ---- dimension-reduction input embed (unchanged) ------------------
         # Adjacency-row inputs have width N (max_num_nodes). When
         # dimension_reduce=True we project them down to embedding_dim first
@@ -179,12 +195,31 @@ class GRANv2(nn.Module):
         """
         B, C, N_max, _ = A_pad.shape
         H = self.hidden_dim
+        # Keep a reference to the (B, C, N, N) form so we can compute
+        # structural features (degree rank) before flattening.
+        A_pad_bcnn = A_pad
         A_pad = A_pad.view(B * C * N_max, -1)                   # (B*C*N, N)
 
         if self.dimension_reduce:
             node_feat = self.decoder_input(A_pad)               # (B*C*N, H)
         else:
             node_feat = A_pad                                    # (B*C*N, N)
+
+        # ---- v2 structural fix: add degree-rank embedding -----------------
+        # For each (b, c, n) node, count how many already-generated
+        # neighbours it has (sum over last dim of the lower-triangular
+        # A_pad), rank them descending, and add an embedding of the rank.
+        # Shapes: degrees (B, C, N) -> inv_ranks (B, C, N) -> flat (B*C*N,).
+        if self.use_degree_feature:
+            degrees = A_pad_bcnn.sum(dim=-1)                     # (B, C, N)
+            # argsort twice to get rank of each element (descending = 0
+            # is highest-degree).
+            ranks_sort = degrees.argsort(dim=-1, descending=True)
+            inv_ranks = ranks_sort.argsort(dim=-1)               # (B, C, N)
+            inv_ranks = inv_ranks.clamp(
+                min=0, max=self.max_num_nodes - 1).long()
+            deg_emb = self.degree_embedding(inv_ranks.view(-1))  # (B*C*N, H)
+            node_feat = node_feat + deg_emb
 
         # Prepend a zero row as feature for the newly-generated nodes.
         node_feat = F.pad(node_feat, (0, 0, 1, 0), 'constant', value=0.0)
@@ -336,6 +371,36 @@ class GRANv2(nn.Module):
                 # node_state_in shape: (B, jj, H)
                 node_state_in = F.pad(
                     node_state[:, :ii, :], (0, 0, 0, K), 'constant', value=0.0)
+
+                # ---- v2 structural fix: add degree-rank embedding ---------
+                # At step ``ii`` only the first ``ii`` rows of A are finalised,
+                # so we compute degree ranks over that prefix only. The K
+                # new-node rows get rank 0 (the default clamp) but we pad
+                # their degree contributions with zeros so they never win
+                # a "highest rank" tie unless no other node has any edges.
+                if self.use_degree_feature and ii > 0:
+                    # A[:, :ii, :ii] is the finalised lower-triangular adj
+                    # prefix; summing over last dim gives each node's current
+                    # degree. Symmetry is only enforced at the very end of
+                    # the loop, so sum over dim=-1 + dim=-2 is not needed
+                    # here: entries at (r, c) for c > r are all zero in the
+                    # ongoing lower-tri canvas.
+                    prefix_adj = A[:, :ii, :ii]                   # (B, ii, ii)
+                    prefix_deg = (prefix_adj + prefix_adj.transpose(1, 2)).sum(
+                        dim=-1)                                   # (B, ii)
+                    # Pad the K new-node rows with -1 so argsort(descending)
+                    # places them last and inv_ranks for them is ii..ii+K-1,
+                    # then clamp to max_num_nodes-1.
+                    pad = torch.full((B, K), fill_value=-1.0,
+                                     device=self.device, dtype=prefix_deg.dtype)
+                    degrees_full = torch.cat([prefix_deg, pad], dim=1)  # (B, jj)
+                    ranks_sort = degrees_full.argsort(
+                        dim=-1, descending=True)
+                    inv_ranks = ranks_sort.argsort(dim=-1)        # (B, jj)
+                    inv_ranks = inv_ranks.clamp(
+                        min=0, max=self.max_num_nodes - 1).long()
+                    deg_emb = self.degree_embedding(inv_ranks)    # (B, jj, H)
+                    node_state_in = node_state_in + deg_emb
 
                 # Build the (fully connected, lower-tri) candidate edge list
                 # used during one sampling step. Every old node connects to

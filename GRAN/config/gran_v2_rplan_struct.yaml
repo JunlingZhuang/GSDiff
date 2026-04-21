@@ -1,0 +1,136 @@
+---
+# =============================================================================
+# GRAN v2 + structural fixes config for RPLAN
+#
+# Same base as gran_v2_rplan.yaml, plus the two structural improvements
+# from docs/plan-v2-structural-fixes.md:
+#   - 3 canonical orderings (DFS + BFS + k-core)
+#   - degree-rank embedding as extra node feature
+#
+# Expected behaviour change vs baseline gran_v2_rplan.yaml:
+#   + model learns structural pattern "Living tends to be the hub"
+#   + room type distribution closer to training set
+#   - ~3x slower per epoch (multi-ordering), compensated by faster convergence
+#
+# Train / test:
+#   uv run python run_exp.py -c config/gran_v2_rplan_struct.yaml
+#   uv run python run_exp.py -c config/gran_v2_rplan_struct.yaml -t
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 1. MOST-COMMONLY TUNED TRAINING KNOBS
+# -----------------------------------------------------------------------------
+train:
+  max_epoch: 100                # 3x orderings learn faster, 100 ep is enough
+  batch_size: 64
+  num_workers: 0
+
+  optimizer: Adam
+  lr: 2.0e-4
+  wd: 1.0e-5
+  momentum: 0.9
+  lr_decay: 0.3
+  lr_decay_epoch: [30, 60]      # adjusted for shorter schedule
+
+  lambda_attr: 0.5
+
+  display_iter: 50
+  snapshot_epoch: 10            # save more often since schedule is shorter
+  valid_epoch: 5
+  shuffle: true
+  is_resume: false
+  resume_dir:
+  resume_model: model_snapshot_0000100.pth
+  resume_epoch: 100
+
+# -----------------------------------------------------------------------------
+# 2. MODEL ARCHITECTURE (+ structural feature)
+# -----------------------------------------------------------------------------
+model:
+  name: GRANv2
+
+  # Backbone switch
+  use_gatv2: true
+  gatv2_num_heads: 8
+
+  num_attr_classes: 7
+
+  hidden_dim: 256
+  embedding_dim: 256
+  num_GNN_layers: 6
+  num_GNN_prop: 1
+
+  max_num_nodes: 16
+  num_mix_component: 30
+  is_sym: true
+  block_size: 1
+  sample_stride: 1
+
+  # ---- [NEW] structural improvements -----------------------------------
+  # Train each graph under 3 canonical orderings (DFS + BFS + k-core).
+  # Paired with degree-rank embedding below, the model is forced to learn
+  # order-invariant structural patterns instead of memorizing "position 0
+  # is Living Room" which is brittle across orderings.
+  num_canonical_order: 3
+
+  # Per-node degree-rank embedding added to initial node features.
+  # Gives the model a direct signal for "which already-generated node has
+  # the highest degree right now" -> learns "rank 0 tends to be Living".
+  use_degree_feature: true
+  # ----------------------------------------------------------------------
+
+  dimension_reduce: true
+  has_attention: true
+  edge_weight: 1.0
+
+# -----------------------------------------------------------------------------
+# 3. DATASET
+# -----------------------------------------------------------------------------
+dataset:
+  loader_name: GRANDataV2
+  name: RPLAN
+  data_path: data/
+
+  # DFS+BFS+k-core is the multi-ordering branch that pairs with
+  # model.num_canonical_order=3. See dataset/gran_data.py::_get_graph_data
+  # for the list of supported values.
+  node_order: 'DFS+BFS+k_core'
+
+  total_graphs: 20000
+
+  train_ratio: 0.9
+  dev_ratio: 0.05
+  num_subgraph_batch: 8
+  num_fwd_pass: 1
+  has_node_feat: false
+  is_save_split: false
+  is_sample_subgraph: true
+  is_overwrite_precompute: true
+
+# -----------------------------------------------------------------------------
+# 4. TEST / INFERENCE
+# -----------------------------------------------------------------------------
+test:
+  batch_size: 100
+  num_workers: 0
+  num_test_gen: 1000
+  is_vis: true
+  is_single_plot: false
+  is_test_ER: false
+  num_vis: 20
+  vis_num_row: 5
+  better_vis: true
+  test_model_dir: snapshot_model
+  test_model_name: gran_v2_rplan_struct.pth
+
+# -----------------------------------------------------------------------------
+# 5. RUNTIME
+# -----------------------------------------------------------------------------
+exp_name: GRANv2_rplan_struct
+exp_dir: exp/GRANv2_rplan_struct    # separate dir to not pollute baseline
+runner: GranRunnerV2
+use_horovod: false
+use_gpu: true
+device: cuda:0
+gpus: [0]
+seed: 1234
