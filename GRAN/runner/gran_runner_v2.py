@@ -700,9 +700,37 @@ class GranRunnerV2(GranRunner):
                     ),
                 })
 
+        # [v2] save the actual generated graphs in two forms:
+        #   1. gen_graphs.json       — human- / AI-readable: edge list + attrs
+        #   2. gen_graphs.p          — pickle of networkx.Graph list (for
+        #                              downstream consumers like GSDiff)
+        gen_graphs_json = []
+        for idx, G in enumerate(graphs_gen):
+            edges = [[int(u), int(v)] for u, v in G.edges()]
+            attrs = None
+            if attr_lists is not None and idx < len(attr_lists):
+                attrs = [int(a) for a in attr_lists[idx][:G.number_of_nodes()]]
+            gen_graphs_json.append({
+                'idx': idx,
+                'num_nodes': int(G.number_of_nodes()),
+                'num_edges': int(G.number_of_edges()),
+                'edges': edges,
+                'attrs': attrs,
+            })
+
+        with open(os.path.join(save_dir, 'gen_graphs.json'),
+                  'w', encoding='utf-8') as f:
+            json.dump({'graphs': gen_graphs_json}, f,
+                      indent=2, ensure_ascii=False)
+
+        # Also save as pickle for downstream use (e.g. feeding into GSDiff
+        # or re-loading with networkx without parsing JSON).
+        with open(os.path.join(save_dir, 'gen_graphs.p'), 'wb') as f:
+            pickle.dump(graphs_gen, f)
+
         logger.info(
-            'saved structured test results: test_results.json + '
-            'test_mmd.csv + test_attrs.csv')
+            'saved structured test results: test_results.json + test_mmd.csv + '
+            'test_attrs.csv + gen_graphs.json + gen_graphs.p')
 
     # ======================================================================
     # Validation helper
