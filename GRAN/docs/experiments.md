@@ -12,11 +12,29 @@
 
 | Run | Config | 数据量 | Epoch | best val_total | TEST/degree MMD | TEST/clustering MMD | TEST/spectral MMD | Living 在中心 | 结论 |
 |-----|--------|-------|-------|---------------|-----------------|---------------------|-------------------|--------------|-----|
-| **✅ Baseline** (`24504`) | gran_v2_rplan.yaml | 20k | 300 (stop @ 30) | 0.5452 | 0.0036 | 0.0164 | 0.0079 | ⚠️ 不稳定 | 结构 SOTA，但 Bedroom bloat (63%) |
+| ⚠️ Baseline (`24504`) | gran_v2_rplan.yaml | 20k | 300 (stop @ 30) | 0.5452 | 0.0036 | 0.0164 | 0.0079 | ❌ 只 22% 图正常 | **结构 MMD 漂亮但语义也坏**（attr-aware 指标揭示）|
 | ❌ Struct (`50908`) | gran_v2_rplan_struct.yaml | 20k | 100 | 0.9631 | 0.2757 | 0.8982 | 0.2103 | ❌ 完全没学到 | 多 ordering 未做 id 条件 → 分布融合崩 |
 | ❌ Degonly (`53732`) | gran_v2_rplan_degonly.yaml | 20k | 50 | **0.4118** | 0.0481 | 0.9645 | 0.1657 | ❌ 没学到 | val 低但 MMD 差——Teacher Forcing 陷阱 |
 | ⚠️ Path 1 (`41540`) | gran_v2_rplan_p1.yaml | 20k | 50 | 1.1425 | 0.0357 | 0.1382 | 0.0388 | ❌ 没学到 | ordering-id 假设被证实（比 Struct 好 5-8×），但仍输 Baseline |
-| ⚠️ **Plan A** (`28764`) | gran_v2_rplan_attrbalance.yaml | 20k | 50 | 0.5851 | **0.0021** | **0.0136** | **0.0070** | ❌ 新 bug | Bedroom bloat 修好 (63%→31%) 但 Living 爆炸 (15%→39%)，结构 MMD **略好于 baseline** |
+| ⚠️ Plan A (`28764`) | gran_v2_rplan_attrbalance.yaml | 20k | 50 | 0.5851 | **0.0021** | **0.0136** | **0.0070** | ❌ 更差 | Bedroom bloat 修好但 Living 爆炸；结构 MMD 略好但**语义指标更差** |
+
+### Attr-aware 指标对比（Exp 5 后新增，比 MMD 有区分度）
+
+| | Ref | Baseline | Plan A |
+|---|-----|----------|--------|
+| **每图 1 个 Living 的比例** | **97.7%** | 22% | **16%** |
+| **endpoint-pair KL** (边语义) | 0 | 0.616 | **0.814** 🔴 |
+| **living count KL** (每图客厅数) | 0 | 8.61 | **9.88** 🔴 |
+| **Living 平均度数** | **5.20** (hub) | 2.46 | 2.81 |
+| **Balcony 平均度数** | **1.63** (leaf) | 4.94 🔴 | 4.79 🔴 |
+| **Bedroom-Bathroom 边** | 14.3% | 2.6% | 3.5% |
+| **Living-Living 边**（错误） | ~0% | 9.6% | **17.3%** 🔴 |
+
+**结论**：
+- Baseline 和 Plan A 都**没学到"Living 是 hub / Balcony 是 leaf"**
+- 两个模型都**把 Balcony 当 hub**（和真实相反）
+- Plan A 让 Living-Living 相邻问题**变严重**（+17.3% vs baseline +9.6%）
+- 都丢失"主卧-卫生间"这种经典 pattern（-10% 以上）
 
 **关键发现 1：val_total 低 ≠ 生成质量好**。Degonly 的 val 比 Baseline 低
 25%，但 MMD 差 50x。说明 autoregressive 模型在训练和推理之间有 distribution
@@ -28,27 +46,29 @@ Path 1 相对 Struct：clustering 0.8982 → 0.1382（好 6.5×），spectral 0.
 4-26× 更差。说明多 ordering 在 RPLAN 这种小图上**没信号可学**——GRAN 原论文
 的多 ordering 增益主要在大/稀疏图上。
 
-**最终结论（诚实版，含 Plan A）：五种 config 都不达 app 标准。**
+**最终结论（诚实版，含 Plan A + attr-aware 指标）：五种 config 全部不可用。**
 
-- Baseline 的 MMD 漂亮是**数字错觉**：MMD 测的是度数、聚类、谱这些
-  graph-level 统计，对"Living 是否在 hub / Bathroom 是否存在 / 类别
-  比例"这种结构-语义信息**不敏感**。视觉上 baseline 仍然是 bedroom
-  bloat + bathroom 塌缩 + Living 位置不稳。
-- Struct / Degonly 既丢了 MMD 又没修视觉。
-- Path 1 把 Struct 的结构崩坏修回来了（证实 ordering-id 假设），但
-  **视觉和类别分布跟 baseline 没区别**——问题不在结构，在 attr head。
+Attr-aware 指标（endpoint_attr_pair_kl, living_count_kl, per-class degree）
+揭示：
 
-**根因**：bedroom bloat 是**属性 head 的类不平衡先验**被 cross-entropy
-loss 直接复制了训练集分布。ordering / degree / 多 ordering 全都解决不了。
+- **Baseline 的结构 MMD 漂亮是数字错觉**：只 22% 图符合"一个客厅"，
+  Living degree 2.46（应是 5.20 hub），Balcony degree 4.94（应是 1.63
+  leaf）——**完全反了**
+- **Plan A 让语义更差**：endpoint-pair KL 0.616 → 0.814，Living-Living
+  相邻 +9.6% → **+17.3%**。loss 权重只移动 bug 位置
+- **Struct / Degonly** 既丢 MMD 又没修语义
+- **Path 1** 证实 ordering-id 假设但对小图无增益
 
-**真正的下一步**（根据 Plan A 结果更新）：
-1. ✅ **类平衡 attr loss（Plan A）已做**：Bedroom bloat 修好了但换成
-   Living bloat，说明 loss 权重只移动问题、不解决 structure-semantics
-   耦合
-2. 🎯 **Plan C = attr-conditioned 边 head（下一步）**：让边 head 看
-   当前节点的 attr embedding，让 attr head 看结构信号。这是真正的
-   架构级修复，能教模型"Living 只能一个 / Bathroom 是叶节点"
-3. 如果 Plan C 还不够：切 diffusion（Phase 3），见
+**根因**：GRAN v2 的 attr head 和 edge head **完全解耦**——attr head 看
+node embedding 预测类别，edge head 看 node embedding pair 预测连接，
+**都不知道对方的决定**。所以模型永远学不到"Living 是 hub / Bedroom
+常邻 Bathroom / 一图只能有一个 Living"这种耦合先验。
+
+**真正的下一步**：
+1. ✅ **Plan A 已证伪**：单纯调 loss 权重只是移动 bug
+2. 🎯 **Plan C（架构级耦合）是唯一出路**：详细设计见
+   `docs/plan-c-design.md`
+3. 如果 Plan C 也不够：切 diffusion（Phase 3），见
    `plan-scale-to-healthcare.md`
 
 **注意**：两个 run 的 val_total 数值**不可直接比较**。
@@ -612,6 +632,69 @@ CE 的 loss 期望值本就比 uniform CE 高）。
   - 让 attr head 拿到结构 feature（degree、local cluster）→ 学
     "叶节点常是 Bathroom / Balcony，hub 是 Living"
 - ⚠️ 保留 Plan A 代码路径作为对照组 / 未来 fine-tune 的起点
+
+### Attr-aware 指标（Exp 5 后加，重测 baseline + plan A）
+
+**每图 Living 数量分布**（真实 97.7% 为 1 个）
+
+| 每图 Living 数 | Ref | Baseline | Plan A |
+|-------------|-----|----------|--------|
+| 0 | 0.0% | 10.6% | 5.1% |
+| **1（正常）** | **97.7%** | 21.9% | 15.7% |
+| 2 | 2.3% | 28.1% | 27.1% |
+| 3 | 0.0% | 23.8% | 27.3% |
+| 4+ | 0.0% | 15.6% | 24.8% |
+
+**Per-class degree mean**（Ref 里 Living=hub, Balcony=leaf）
+
+| 类别 | Ref | Baseline | Plan A |
+|------|-----|----------|--------|
+| Living | **5.20** (hub) | 2.46 | 2.81 |
+| Bedroom | 2.66 | 2.51 | 2.53 |
+| Bathroom | 2.55 | 4.09 | 3.82 |
+| Kitchen | 2.14 | 2.71 | 2.37 |
+| Balcony | **1.63** (leaf) | **4.94** 🔴 | 4.79 🔴 |
+| Storage | 2.23 | 4.10 | 3.72 |
+
+**Endpoint-pair KL + Living count KL**
+
+| 指标 | Baseline | Plan A |
+|------|----------|--------|
+| endpoint_attr_pair_kl | 0.616 | **0.814** 🔴（更差） |
+| living_count_kl | 8.61 | **9.88** 🔴（更差） |
+
+**Top 5 过度使用的边 pair（gen - ref）**
+
+| Pair | Baseline | Plan A |
+|------|----------|--------|
+| 0-0 (Living-Living) | +9.6% | **+17.3%** |
+| 1-4 (Bedroom-Balcony) | +10.4% | - |
+| 1-1 (Bedroom-Bedroom) | +7.7% | - |
+| 1-3 (Bedroom-Kitchen) | - | +4.2% |
+| 3-3 (Kitchen-Kitchen) | - | +2.3% |
+
+**Top 5 缺失的边 pair（gen - ref）** — 两模型一致
+
+| Pair | Baseline | Plan A |
+|------|----------|--------|
+| 1-2 (Bedroom-Bathroom) | -11.7% | -10.8% |
+| 0-2 (Living-Bathroom) | -10.5% | -8.9% |
+| 0-1 (Living-Bedroom) | -6.5% | -4.5% |
+| 0-3 (Living-Kitchen) | -5.3% | - |
+| 2-3 (Bathroom-Kitchen) | -3.2% | -1.5% |
+
+### 重大重新判定（Exp 5 + attr-aware 后）
+
+**之前的判断错了**：attr-aware 指标揭示 baseline 也没学到结构-语义耦合：
+
+1. **Living 不是 hub**：两个模型都把 Living 的 degree 学到 ~2.5（ref 是 5.2）
+2. **Balcony 反而是 hub**：两个模型 Balcony degree ~4.9（ref 是 1.6）—— **完全反了**
+3. **Living-Living 相邻**：两个模型都大量生成（ref 几乎为 0），Plan A 更严重
+4. **Bedroom-Bathroom**（主卧套间）：两个模型都几乎不生成（-11% 左右）
+
+**Baseline 不是"当前最佳"**，只是结构 MMD 漂亮的幻觉。真实情况是**所有 5 种 config 都不可用**。
+
+**只有 Plan C（结构-属性架构耦合）能救**。见 `docs/plan-c-design.md`。
 
 ---
 

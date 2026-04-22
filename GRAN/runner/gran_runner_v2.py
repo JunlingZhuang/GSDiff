@@ -694,6 +694,73 @@ class GranRunnerV2(GranRunner):
                              'ratio': v / total if total else 0.0}
                     for k, v in sorted(counter.items())}
 
+        # --- attr-aware metrics (endpoint pair KL, living-count, per-class degree)
+        from utils.attr_metrics import (
+            endpoint_attr_pair_counts,
+            kl_divergence,
+            living_count_per_graph,
+            per_class_degree_stats,
+        )
+
+        num_attr_classes = int(self.config.model.num_attr_classes)
+        ref_attrs = [
+            [int(G.nodes[n].get('attr', 0)) for n in sorted(G.nodes())]
+            for G in ref_graphs
+        ]
+        gen_attrs_only = [s['attrs'] for s in gen_stats]
+
+        gen_pair_counts = endpoint_attr_pair_counts(
+            graphs_gen, gen_attrs_only, num_attr_classes)
+        ref_pair_counts = endpoint_attr_pair_counts(
+            ref_graphs, ref_attrs, num_attr_classes)
+        pair_kl = kl_divergence(gen_pair_counts, ref_pair_counts)
+
+        def _pair_hist(counts):
+            total = sum(counts.values())
+            return {
+                '%d-%d' % pair: {
+                    'count': int(cnt),
+                    'ratio': cnt / total if total else 0.0,
+                }
+                for pair, cnt in sorted(counts.items())
+            }
+
+        def _count_hist(counter):
+            total = sum(counter.values())
+            return {
+                str(k): {
+                    'count': int(v),
+                    'ratio': v / total if total else 0.0,
+                }
+                for k, v in sorted(counter.items())
+            }
+
+        gen_living = living_count_per_graph(
+            graphs_gen, gen_attrs_only, target_class=0)
+        ref_living = living_count_per_graph(
+            ref_graphs, ref_attrs, target_class=0)
+
+        gen_degree_by_class = per_class_degree_stats(
+            graphs_gen, gen_attrs_only, num_attr_classes)
+        ref_degree_by_class = per_class_degree_stats(
+            ref_graphs, ref_attrs, num_attr_classes)
+
+        attr_aware = {
+            'endpoint_attr_pair_kl': float(pair_kl),
+            'gen_endpoint_pair_histogram': _pair_hist(gen_pair_counts),
+            'ref_endpoint_pair_histogram': _pair_hist(ref_pair_counts),
+            'gen_living_count_histogram': _count_hist(gen_living),
+            'ref_living_count_histogram': _count_hist(ref_living),
+            'gen_per_class_degree_stats': {
+                str(c): gen_degree_by_class[c]
+                for c in range(num_attr_classes)
+            },
+            'ref_per_class_degree_stats': {
+                str(c): ref_degree_by_class[c]
+                for c in range(num_attr_classes)
+            },
+        }
+
         # --- assemble full report ----------------------------------------
         report = {
             'config_summary': config_summary,
@@ -705,6 +772,7 @@ class GranRunnerV2(GranRunner):
                 'dev': {k: (float(v) if v == v else None) for k, v in mmd_dev.items()},
                 'test': {k: (float(v) if v == v else None) for k, v in mmd_test.items()},
             },
+            'attr_aware_metrics': attr_aware,
             'gen_graph_size_histogram': _size_hist(gen_sizes),
             'ref_graph_size_histogram': _size_hist(ref_sizes),
             'gen_attr_histogram': attr_histogram,
@@ -716,7 +784,9 @@ class GranRunnerV2(GranRunner):
                   'w', encoding='utf-8') as f:
             json.dump(report, f, indent=2, ensure_ascii=False)
 
-        # Flat CSV for MMD: row per (set, metric)
+        # Flat CSV for MMD: row per (set, metric). Also includes
+        # attr-aware scalars on the 'test' set so a single file captures
+        # every directly-comparable number.
         with open(os.path.join(save_dir, 'test_mmd.csv'),
                   'w', encoding='utf-8', newline='') as f:
             w = csv.DictWriter(f, fieldnames=['set', 'metric', 'value'])
@@ -728,6 +798,16 @@ class GranRunnerV2(GranRunner):
                         'metric': metric,
                         'value': (float(value) if value == value else None),
                     })
+            w.writerow({
+                'set': 'test',
+                'metric': 'endpoint_attr_pair_kl',
+                'value': float(pair_kl),
+            })
+            w.writerow({
+                'set': 'test',
+                'metric': 'living_count_kl',
+                'value': float(kl_divergence(gen_living, ref_living)),
+            })
 
         # Per-graph attr sequence (one row per generated graph)
         with open(os.path.join(save_dir, 'test_attrs.csv'),

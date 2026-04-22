@@ -44,8 +44,15 @@ def snapshot(model, optimizer, config, step, gpus=[0], tag=None, scheduler=None)
 
 
 def load_model(model, file_name, device, optimizer=None, scheduler=None):
-  model_snapshot = torch.load(file_name, map_location=device)  
-  model.load_state_dict(model_snapshot["model"])
+  model_snapshot = torch.load(file_name, map_location=device)
+  # strict=False tolerates buffers added after the checkpoint was saved
+  # (e.g. attr_class_weights, introduced with plan A). Missing buffers
+  # keep their __init__ defaults; unexpected keys still raise.
+  missing, unexpected = model.load_state_dict(
+      model_snapshot["model"], strict=False)
+  if unexpected:
+    raise RuntimeError(
+        "unexpected keys in checkpoint: %s" % unexpected)
   if optimizer is not None:
     optimizer.load_state_dict(model_snapshot["optimizer"])
 
