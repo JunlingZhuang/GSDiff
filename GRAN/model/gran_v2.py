@@ -3,7 +3,7 @@ conditioning, and an optional GATv2 backbone.
 
 This is a superset of the original ``GRANMixtureBernoulli`` class. The original
 class is kept intact in ``model/gran_mixture_bernoulli.py`` so existing scripts
-continue to work unchanged. GRANv2 extends it along three axes:
+continue to work unchanged. GRANv2 extends it along four axes:
 
   1. **Node attribute head** (``self.output_attr``):
      a small MLP that predicts a per-node categorical label
@@ -21,6 +21,13 @@ continue to work unchanged. GRANv2 extends it along three axes:
      ``model.gatv2.GATv2`` stack instead of the original GRU-based ``GNN``.
      Both classes share the exact same forward signature, so the rest of
      the code path is untouched.
+
+  4. **Optional class-weighted attribute loss** (plan A):
+     ``config.model.attr_class_weight`` accepts ``None`` (uniform),
+     an explicit list of length ``num_attr_classes``, or the string
+     ``'auto'`` (runner computes inverse-frequency weights from
+     ``graphs_train``). Stored as the buffer ``self.attr_class_weights``
+     and passed to ``F.cross_entropy`` every forward pass.
 
 Forward interface matches the original class:
     training (is_sampling=False) -> (edge_loss, attr_loss)
@@ -196,7 +203,69 @@ class GRANv2(nn.Module):
         pos_weight = torch.ones([1]) * self.edge_weight
         self.adj_loss_func = nn.BCEWithLogitsLoss(
             pos_weight=pos_weight, reduction='none')
-        self.attr_loss_func = nn.CrossEntropyLoss()
+
+        # Per-class weights for the attribute cross-entropy. Three options:
+        #   None / unset       -> uniform (behaves like plain CrossEntropyLoss)
+        #   list / tuple of A  -> fixed weights, used verbatim
+        #   the string "auto"  -> placeholder uniform; runner is expected to
+        #                         compute inverse-frequency weights from the
+        #                         training set and call
+        #                         ``model.set_attr_class_weights(w)``.
+        # Stored as a buffer so DataParallel / .to(device) / state_dict work.
+        self.attr_class_weight_mode = getattr(
+            config.model, 'attr_class_weight', None)
+        attr_w = self._build_initial_attr_class_weights(
+            self.attr_class_weight_mode, self.num_attr_classes)
+        self.register_buffer('attr_class_weights', attr_w)
+
+    # ======================================================================
+    # Attribute class weight helpers
+    # ======================================================================
+    @staticmethod
+    def _build_initial_attr_class_weights(mode, num_classes):
+        """Return the tensor to register as ``attr_class_weights``.
+
+        Called exactly once in ``__init__``. The resulting tensor is
+        *always* registered as a buffer so behavior is uniform across code
+        paths (DataParallel replication, checkpointing, etc.) — None vs
+        'auto' vs explicit list is collapsed into a length-``num_classes``
+        float tensor of per-class weights.
+
+        Mapping:
+            None / unset      -> ones (no-op under CrossEntropyLoss)
+            list / tuple      -> copied verbatim (must have length num_classes)
+            'auto'            -> ones placeholder (runner fills via setter)
+        """
+        if mode is None:
+            return torch.ones(num_classes, dtype=torch.float32)
+        if isinstance(mode, (list, tuple)):
+            if len(mode) != num_classes:
+                raise ValueError(
+                    'attr_class_weight list length %d != num_attr_classes %d'
+                    % (len(mode), num_classes))
+            return torch.tensor(list(mode), dtype=torch.float32)
+        if isinstance(mode, str) and mode == 'auto':
+            return torch.ones(num_classes, dtype=torch.float32)
+        raise ValueError(
+            'Invalid attr_class_weight: %r (expected None, list, or "auto")'
+            % (mode,))
+
+    def set_attr_class_weights(self, weights):
+        """Overwrite the in-place attribute class weight buffer.
+
+        Intended to be called by the runner exactly once, right after
+        model construction, when ``config.model.attr_class_weight == 'auto'``.
+        Input shape: (num_attr_classes,) float tensor. The copy is in-place
+        so DataParallel replicas (which share buffers via broadcast_buffers
+        = True, the default) pick up the update.
+        """
+        if weights.shape != (self.num_attr_classes,):
+            raise ValueError(
+                'set_attr_class_weights expects shape (%d,), got %s'
+                % (self.num_attr_classes, tuple(weights.shape)))
+        self.attr_class_weights.data.copy_(
+            weights.to(self.attr_class_weights.device,
+                       dtype=self.attr_class_weights.dtype))
 
     # ======================================================================
     # Training inference (unchanged from original class)
@@ -742,7 +811,9 @@ class GRANv2(nn.Module):
                 # (a) explicit labels for specific node_state indices
                 attr_feat = node_state[node_attr_idx]           # (M, H)
                 attr_logits = self.output_attr(attr_feat)       # (M, A)
-                attr_loss = self.attr_loss_func(attr_logits, node_attr_label)
+                attr_loss = F.cross_entropy(
+                    attr_logits, node_attr_label,
+                    weight=self.attr_class_weights)
             elif node_attrs is not None and node_idx_feat is not None:
                 # (b) derive labels from (B, C, N) attrs + node_idx_feat
                 C = self.num_canonical_order
@@ -761,7 +832,9 @@ class GRANv2(nn.Module):
                     labels = node_attrs[batch_idx, order_idx, node_pos]
                     attr_feat = node_state[valid_mask]          # (M', H)
                     attr_logits = self.output_attr(attr_feat)   # (M', A)
-                    attr_loss = self.attr_loss_func(attr_logits, labels)
+                    attr_loss = F.cross_entropy(
+                        attr_logits, labels,
+                        weight=self.attr_class_weights)
                 else:
                     # All rows are padding — unusual, but keep graph-tied.
                     attr_loss = (node_state.sum() * 0.0)

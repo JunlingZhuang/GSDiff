@@ -1,0 +1,146 @@
+---
+# =============================================================================
+# GRAN v2 ablation config: CLASS-WEIGHTED ATTR LOSS (plan A).
+#
+# Purpose:
+#   Baseline (`gran_v2_rplan.yaml`) achieves SOTA-level structural MMD but
+#   has a bedroom-bloat / bathroom-collapse class imbalance in generated
+#   attrs (63% bedroom vs 37% in ref; 2% bathroom vs 18% in ref). This
+#   config turns on inverse-frequency class weighting for the attribute
+#   cross-entropy so rarer classes (bathroom, kitchen) get louder gradients
+#   during training.
+#
+#   ONLY the attr loss is changed. Structure (mixture-Bernoulli edge head,
+#   GATv2 backbone, single canonical ordering, degree feature OFF, ordering
+#   id OFF) is identical to baseline — this is a single-variable ablation.
+#
+#   Hypothesis:
+#     - Generated attr marginals closer to train-set frequency
+#     - Structural MMD (degree / clustering / spectral) roughly unchanged,
+#       since we haven't touched edge prediction
+#     - "Living in center" problem NOT solved by this alone (that needs
+#       structure-conditioned attr prediction, i.e. plan C)
+#
+# How class weights are computed:
+#   model.attr_class_weight: 'auto' -> runner computes
+#       w[c] = total_attrs / (num_classes * max(count[c], 1))
+#       w = w.clamp(min=0.1, max=10.0)
+#   and injects via model.set_attr_class_weights(w) before DataParallel wrap.
+#
+# Run:
+#   cd D:/Github/GSDiff/GRAN
+#   D:/Github/GSDiff/.venv/Scripts/python.exe run_exp.py \
+#       -c config/gran_v2_rplan_attrbalance.yaml
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 1. TRAINING
+# -----------------------------------------------------------------------------
+train:
+  max_epoch: 50                 # matches baseline's effective training horizon
+  batch_size: 64
+  num_workers: 0
+
+  optimizer: Adam
+  lr: 2.0e-4
+  wd: 1.0e-5
+  momentum: 0.9
+  lr_decay: 0.3
+  lr_decay_epoch: [15, 35]
+
+  lambda_attr: 0.5
+
+  display_iter: 50
+  snapshot_epoch: 10
+  valid_epoch: 5
+  shuffle: true
+  is_resume: false
+  resume_dir:
+  resume_model: model_snapshot_0000050.pth
+  resume_epoch: 50
+
+# -----------------------------------------------------------------------------
+# 2. MODEL
+# -----------------------------------------------------------------------------
+model:
+  name: GRANv2
+
+  use_gatv2: true
+  gatv2_num_heads: 8
+
+  num_attr_classes: 7
+
+  hidden_dim: 256
+  embedding_dim: 256
+  num_GNN_layers: 6
+  num_GNN_prop: 1
+
+  max_num_nodes: 16
+  num_mix_component: 30
+  is_sym: true
+  block_size: 1
+  sample_stride: 1
+
+  num_canonical_order: 1        # single ordering, matches baseline
+  use_degree_feature: false     # no structural feature — isolate attr loss
+  use_ordering_id: false        # no ordering-id — single ordering anyway
+
+  # ---- plan A: class-weighted attr CE ---------------------------------
+  # 'auto' -> runner computes inverse-frequency weights (clamped to [0.1, 10]).
+  # Replace with a 7-element list [w_living, w_bedroom, ... w_external] to
+  # hand-tune.
+  attr_class_weight: auto
+  # ---------------------------------------------------------------------
+
+  dimension_reduce: true
+  has_attention: true
+  edge_weight: 1.0
+
+# -----------------------------------------------------------------------------
+# 3. DATASET
+# -----------------------------------------------------------------------------
+dataset:
+  loader_name: GRANDataV2
+  name: RPLAN
+  data_path: data/
+
+  node_order: DFS               # single ordering
+
+  total_graphs: 20000
+
+  train_ratio: 0.9
+  dev_ratio: 0.05
+  num_subgraph_batch: 8
+  num_fwd_pass: 1
+  has_node_feat: false
+  is_save_split: false
+  is_sample_subgraph: true
+  is_overwrite_precompute: false  # baseline precompute is compatible
+
+# -----------------------------------------------------------------------------
+# 4. TEST / INFERENCE
+# -----------------------------------------------------------------------------
+test:
+  batch_size: 100
+  num_workers: 0
+  num_test_gen: 1000
+  is_vis: true
+  is_single_plot: false
+  is_test_ER: false
+  num_vis: 20
+  vis_num_row: 5
+  better_vis: true
+  test_model_dir: exp/GRANv2_rplan_attrbalance/GRANv2_RPLAN_2026-Apr-22-14-13-40_28764
+  test_model_name: model_best.pth
+
+# -----------------------------------------------------------------------------
+# 5. RUNTIME
+# -----------------------------------------------------------------------------
+exp_name: GRANv2_rplan_attrbalance
+exp_dir: exp/GRANv2_rplan_attrbalance
+runner: GranRunnerV2
+use_horovod: false
+use_gpu: true
+device: cuda:0
+gpus: [0]
+seed: 1234

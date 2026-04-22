@@ -10,10 +10,46 @@
 
 ## TL;DR 实验对比
 
-| Run | Config | 数据量 | Epoch | best val_total | TEST/degree MMD | TEST/spectral MMD | Living 在中心 | 备注 |
-|-----|--------|-------|-------|---------------|-----------------|-------------------|--------------|------|
-| **Baseline** (`24504`) | gran_v2_rplan.yaml | 20k | 300 (early stop @ 30) | **0.5452** | **0.0036** | **0.0079** | ❌ 经常缺失 | 单 ordering + 无 degree feature |
-| **Struct** (`50908`) | gran_v2_rplan_struct.yaml | 20k | 100 | 0.9631 | *待测* | *待测* | *待测* | 3 ordering + degree rank embedding |
+| Run | Config | 数据量 | Epoch | best val_total | TEST/degree MMD | TEST/clustering MMD | TEST/spectral MMD | Living 在中心 | 结论 |
+|-----|--------|-------|-------|---------------|-----------------|---------------------|-------------------|--------------|-----|
+| **✅ Baseline** (`24504`) | gran_v2_rplan.yaml | 20k | 300 (stop @ 30) | 0.5452 | 0.0036 | 0.0164 | 0.0079 | ⚠️ 不稳定 | 结构 SOTA，但 Bedroom bloat (63%) |
+| ❌ Struct (`50908`) | gran_v2_rplan_struct.yaml | 20k | 100 | 0.9631 | 0.2757 | 0.8982 | 0.2103 | ❌ 完全没学到 | 多 ordering 未做 id 条件 → 分布融合崩 |
+| ❌ Degonly (`53732`) | gran_v2_rplan_degonly.yaml | 20k | 50 | **0.4118** | 0.0481 | 0.9645 | 0.1657 | ❌ 没学到 | val 低但 MMD 差——Teacher Forcing 陷阱 |
+| ⚠️ Path 1 (`41540`) | gran_v2_rplan_p1.yaml | 20k | 50 | 1.1425 | 0.0357 | 0.1382 | 0.0388 | ❌ 没学到 | ordering-id 假设被证实（比 Struct 好 5-8×），但仍输 Baseline |
+| ⚠️ **Plan A** (`28764`) | gran_v2_rplan_attrbalance.yaml | 20k | 50 | 0.5851 | **0.0021** | **0.0136** | **0.0070** | ❌ 新 bug | Bedroom bloat 修好 (63%→31%) 但 Living 爆炸 (15%→39%)，结构 MMD **略好于 baseline** |
+
+**关键发现 1：val_total 低 ≠ 生成质量好**。Degonly 的 val 比 Baseline 低
+25%，但 MMD 差 50x。说明 autoregressive 模型在训练和推理之间有 distribution
+mismatch，degree feature 放大了这个 gap。
+
+**关键发现 2：ordering-id conditioning 修复了 Struct 的结构崩坏，但没带来增益**。
+Path 1 相对 Struct：clustering 0.8982 → 0.1382（好 6.5×），spectral 0.2103 →
+0.0388（好 5.4×），degree 0.2757 → 0.0357（好 7.7×）。但相对 Baseline 还是
+4-26× 更差。说明多 ordering 在 RPLAN 这种小图上**没信号可学**——GRAN 原论文
+的多 ordering 增益主要在大/稀疏图上。
+
+**最终结论（诚实版，含 Plan A）：五种 config 都不达 app 标准。**
+
+- Baseline 的 MMD 漂亮是**数字错觉**：MMD 测的是度数、聚类、谱这些
+  graph-level 统计，对"Living 是否在 hub / Bathroom 是否存在 / 类别
+  比例"这种结构-语义信息**不敏感**。视觉上 baseline 仍然是 bedroom
+  bloat + bathroom 塌缩 + Living 位置不稳。
+- Struct / Degonly 既丢了 MMD 又没修视觉。
+- Path 1 把 Struct 的结构崩坏修回来了（证实 ordering-id 假设），但
+  **视觉和类别分布跟 baseline 没区别**——问题不在结构，在 attr head。
+
+**根因**：bedroom bloat 是**属性 head 的类不平衡先验**被 cross-entropy
+loss 直接复制了训练集分布。ordering / degree / 多 ordering 全都解决不了。
+
+**真正的下一步**（根据 Plan A 结果更新）：
+1. ✅ **类平衡 attr loss（Plan A）已做**：Bedroom bloat 修好了但换成
+   Living bloat，说明 loss 权重只移动问题、不解决 structure-semantics
+   耦合
+2. 🎯 **Plan C = attr-conditioned 边 head（下一步）**：让边 head 看
+   当前节点的 attr embedding，让 attr head 看结构信号。这是真正的
+   架构级修复，能教模型"Living 只能一个 / Bathroom 是叶节点"
+3. 如果 Plan C 还不够：切 diffusion（Phase 3），见
+   `plan-scale-to-healthcare.md`
 
 **注意**：两个 run 的 val_total 数值**不可直接比较**。
 - Baseline 用 `num_canonical_order=1` + 原默认 loss（logsumexp over 1 = 直接值）
@@ -182,12 +218,400 @@ D:/Github/GSDiff/.venv/Scripts/python.exe run_exp.py \
 - ✅ 视觉合理性（Living 在中心、类别分布）**应该明显改善**
 - ⚠️ val_total 数字大是 loss 公式差异，不是模型退化
 
-### 评估完后待补充
+### 最终结果（2026-04-21）
 
-等跑完 test，补：
-- TEST MMD（5 个指标）
-- gen_grid.png 对比截图或描述
-- 与 Exp1 的视觉差异
+**MMD（TEST）严重退化**：
+- #nodes: **0.9557**（baseline 0.0171，**56x 更差**）
+- degree: **0.2757**（baseline 0.0036，**77x 更差**）
+- clustering: **0.8982**（baseline 0.0164，**55x 更差**）
+- spectral: **0.2103**（baseline 0.0079，**27x 更差**）
+
+**视觉（gen_grid.png）**：
+- 节点数偏小（大量 2-3 节点图）
+- **几乎全是 Bedroom + Kitchen，Living 完全缺失**
+- 简单链式结构退化
+
+### 失败根因分析
+
+**多 ordering 训练 + 单 ordering 推理的分布偏移。**
+
+训练时模型看同一张图的 3 种 ordering（DFS/BFS/k-core）→ 学到的是
+"融合分布"（P_avg = (P_DFS + P_BFS + P_kcore) / 3）。推理时只按一种
+生成 → 采样到的是"平均 ordering 下的融合分布"，不匹配任何一个单独的
+真实分布。
+
+原版 GRAN 论文用 `sum_order_log_prob=True` 是正确做法（相当于 3 个
+独立子模型），但需要**ordering-id 条件**才能真正 work，我们的实现
+没有加这个 condition embedding。
+
+### 结论
+
+失败实验，**不 ship**。触发 Exp 3（degree-only 隔离变量）。
+
+---
+
+## 🧪 Experiment 3 — Degree-Only Ablation (2026-04-21)
+
+### 目的
+
+隔离变量，定位 Exp2 失败是**多 ordering** 还是 **degree embedding** 的锅。
+保留 degree-rank feature，关闭多 ordering。
+
+### 配置差异（vs Exp2 Struct）
+
+```yaml
+# config/gran_v2_rplan_degonly.yaml
+model:
+  num_canonical_order: 1          # <<< 改回 1（struct 是 3）
+  use_degree_feature: true        # 保留
+dataset:
+  node_order: DFS                 # <<< 改回单 ordering
+train:
+  max_epoch: 50                   # 快速实验
+  lr_decay_epoch: [15, 35]
+```
+
+### 训练曲线
+
+| Epoch | train total | val total |
+|-------|------------|-----------|
+| 5 | - | 0.58 |
+| 15 (lr decay 1) | 0.42 | 0.45 |
+| 30 | 0.40 | **0.4159** |
+| 35 (lr decay 2) | 0.39 | 0.4120 |
+| **40 (best)** | - | **0.4118** |
+| 50 (final) | 0.3872 | - |
+
+Val 降到 **0.4118，比 baseline (0.5452) 低 25%**。看起来很赞。
+
+### MMD（TEST）— 但
+
+| 指标 | Baseline | **Degonly** | 对比 |
+|------|----------|------------|------|
+| #nodes | **0.0171** | 0.9557 | **56x 更差** |
+| degree | **0.0036** | 0.0481 | **13x 更差** |
+| clustering | **0.0164** | 0.9645 | **59x 更差** |
+| spectral | **0.0079** | 0.1657 | **21x 更差** |
+
+**val loss 降了但 MMD 大幅变差。**
+
+### 类别分布（gen vs ref）
+
+| 类别 | Ref | Gen | 偏差 |
+|------|-----|-----|------|
+| 0 Living | 15.1% | 18.5% | ✅ 合理 |
+| 1 Bedroom | **36.8%** | **56.3%** | 过多 |
+| 2 Bathroom | **18.0%** | **0.5%** | **几乎消失** |
+| 3 Kitchen | 14.5% | 5.2% | 不足 |
+| 4 Balcony | 14.7% | 19.2% | 略多 |
+| 5 Storage | 1.0% | 0.2% | 略少 |
+
+模型"偷懒"：生成最常见类（Bedroom），跳过难预测的（Bathroom, Kitchen）。
+
+### 失败根因：Teacher Forcing 陷阱
+
+自回归经典问题：
+```
+训练时：真实 prefix → 预测下一步       → loss 小
+推理时：模型自己生成的 prefix → 预测    → 错误累积
+```
+
+Degree feature 放大了这个 gap：
+- 训练：节点度数 = 真实图的度数
+- 推理：节点度数 = 生成的（早期步度数全 0，分布偏移）
+
+模型 overfit 到训练时看到的度数模式，推理时失真。
+
+### 结论
+
+**两个结构化改动都不 work**：
+- 多 ordering 需要 ordering-id 条件（没实现）
+- Degree feature 受 teacher forcing 拉扯（自回归固有问题）
+
+**下一步**：放弃结构化改动，回 baseline。要根本解决"Living 结构一致性"
+问题，只能切 diffusion（见 `plan-scale-to-healthcare.md` Phase 3）。
+
+### 决定
+
+- ❌ 不 ship 这个 config
+- ✅ 保留 baseline 接入 app
+- 📅 diffusion 作为长期 roadmap
+
+---
+
+## 🧪 Experiment 4 — Path 1: Ordering-ID Conditioning (2026-04-21)
+
+### 目的
+
+诊断 Exp2 (Struct) 的失败根因：多 ordering 训练 + 单 ordering 推理的分布
+融合问题。假设是"模型看 3 种 ordering 但不知道当前是哪种，生成时就按
+一个'平均 ordering'采样，不匹配任何单独真实分布"。
+
+**修复**：在 GNN 输入里给每个节点加一个 `ordering_id` embedding，训练时
+按当前 ordering 的 id 注入，推理时固定为 `ordering_id=0`。这样 multi-
+ordering 训练相当于 3 个 id-conditioned 子模型，推理时退化成第 0 个子
+模型（无融合）。
+
+**核心差异（vs Exp2 Struct）**：隔离变量——只开 Path 1（ordering-id），
+**不开** degree feature，排除 teacher-forcing 干扰。
+
+### 配置差异（vs Exp2 Struct）
+
+```yaml
+# config/gran_v2_rplan_p1.yaml (at commit a277aab)
+dataset:
+  node_order: 'DFS+BFS+k_core'     # 和 Struct 一样
+model:
+  num_canonical_order: 3            # 和 Struct 一样
+  use_ordering_id: true             # <<< NEW：Path 1 开关
+  use_degree_feature: false         # <<< 和 Struct 不同，隔离变量
+train:
+  max_epoch: 50                     # 从 100 缩到 50
+  lr_decay_epoch: [15, 35]
+```
+
+### 实现细节
+
+- `model/gran_v2.py:__init__`: 新增 `nn.Embedding(num_canonical_order, embedding_dim)`，
+  `normal_(std=0.1)` 初始化
+- `_inference`: 从现有 `node_idx_feat = batch*C*N + order*N + pos + 1` 包装
+  中解出 ordering id（`(flat // N) % C`），不改 dataset
+- `_sampling`: 固定 `ordering_id=0`（推理时取第一个子模型）
+
+28 个测试通过（25 旧 + 3 新: `tests/test_ordering_id.py`）。
+
+### 训练曲线
+
+| Epoch | val edge | val attr | val total |
+|-------|----------|----------|-----------|
+| 5 | 0.8405 | 0.7387 | 1.2098 |
+| 15 (lr decay 1) | 0.8234 | 0.7107 | 1.1787 |
+| 25 | 0.8209 | 0.7066 | 1.1742 |
+| 35 (lr decay 2) | 0.7969 | 0.7043 | 1.1490 |
+| 45 | 0.7915 | 0.7030 | 1.1430 |
+| **50 (best)** | **0.7907** | **0.7035** | **1.1425** |
+
+**注意**：val_total 数值不能和 Baseline (0.5452) 直接比——Path 1 用
+`num_canonical_order=3` + `sum_order_log_prob=True`，loss 是 3 个 ordering
+的 log prob 之和（数量级约为 Baseline 的 2x）。但可以和 Struct (0.9631)
+比——同 loss 公式下 Path 1 更差，因为 Struct 额外用了 degree feature 压 loss。
+**MMD 才是可比的指标。**
+
+### MMD 结果（test 阶段）
+
+| 指标 | Baseline | Struct ❌ | Degonly ❌ | **Path 1** | 相对 Baseline |
+|------|----------|----------|-----------|------------|--------------|
+| #nodes | **0.0171** | 0.9557 | 0.9557 | 0.4478 | 26× 更差 |
+| degree | **0.0036** | 0.2757 | 0.0481 | 0.0357 | 10× 更差 |
+| clustering | **0.0164** | 0.8982 | 0.9645 | 0.1382 | 8.4× 更差 |
+| spectral | **0.0079** | 0.2103 | 0.1657 | 0.0388 | 4.9× 更差 |
+| 4-orbits | 0 | 0 | 0 | 0 | 持平（orca 未编译） |
+
+**Path 1 vs Struct**（同 config，只是多了 ordering-id）：
+
+| 指标 | Struct | Path 1 | Path 1 好多少 |
+|------|--------|--------|--------------|
+| degree | 0.2757 | 0.0357 | **7.7×** |
+| clustering | 0.8982 | 0.1382 | **6.5×** |
+| spectral | 0.2103 | 0.0388 | **5.4×** |
+
+### 类别分布（gen vs ref，TEST set）
+
+| 类别 | Ref | Path 1 Gen | 偏差 |
+|------|-----|-----------|------|
+| 0 Living | 15.1% | 12.7% | 稍少（可接受）|
+| 1 Bedroom | 36.8% | **63.0%** | **严重多** |
+| 2 Bathroom | 18.0% | **2.0%** | **严重塌缩** |
+| 3 Kitchen | 14.5% | 10.9% | 接近 |
+| 4 Balcony | 14.7% | 9.6% | 接近 |
+| 5 Storage | 1.0% | 1.7% | 接近 |
+| 6 External | 0% | 0.02% | 接近 |
+
+### Gen 图尺寸分布
+
+| #nodes | Path 1 Gen | Ref |
+|--------|-----------|-----|
+| 4 | 7.5% | 0.3% |
+| 5 | 15.4% | 7.9% |
+| 6 | **29.5%** | 29.3% |
+| 7 | 29.1% | **37.0%** |
+| 8 | 13.5% | 25.5% |
+
+生成的图**偏小**（6 节点占比最高），真实图**偏大**（7 节点主导）。这是
+`#nodes MMD = 0.4478` 的来源。
+
+### 定性观察（`vis/gen_grid.png`）
+
+- ✅ 结构合理（无碎链、多数连通、度数分布接近真实）
+- ✅ Struct 的塌缩问题消失（不再有大量 2-3 节点图）
+- ❌ **一片紫色 bedroom**，Living 偶尔出现但不一定在中心
+- ❌ Bathroom 几乎看不到
+
+### 失败根因
+
+**假设部分正确**：ordering-id conditioning 把 Struct 的结构崩坏从根本
+上修好了（MMD 4-8× 回升）。但**多 ordering 本身对 RPLAN 小图没增益**。
+
+原因（推测）：
+1. RPLAN 的 bubble diagram 只有 4-8 个节点，三种 ordering 看到的图
+   结构信息重叠度高——没有足够的"结构多样性"需要消化
+2. 单 ordering 的 DFS 已经覆盖了大部分可学 pattern
+3. 多 ordering 本质是**数据增强**。在小图上数据增强反而增加 loss
+   方差，拖慢收敛
+
+**Bedroom 过多 / Bathroom 塌缩**不是结构问题，是**属性 head 的类不平衡
+先验**——三个 config 都没解决，需要单独动 attr loss（class-weighted CE
+或 focal），不是 ordering/degree 能救的。
+
+### 结论
+
+- ✅ **ordering-id 假设被证实有效**：修复了 Struct 的实现 bug（`sum_order_log_prob=True`
+  本就需要配合 id conditioning）
+- ❌ **但对 app 没用**：多 ordering 对 RPLAN 小图无增益，且 bedroom bloat /
+  bathroom 塌缩问题完全没动——这些是 attr head 的问题，不是结构问题
+- 📝 **记入负面实验库**：未来如果切大图数据（healthcare 30+ 节点），
+  Path 1 是必需的（否则 Struct 重演），可以直接复用
+- 🔬 **Path 2（scheduled sampling for degree feature）优先级调低**：从
+  Path 1 结果看结构改动救不了 bedroom bloat
+
+### 决定
+
+- ❌ 不 ship 这个 config
+- ❌ Baseline 也不能直接 ship（视觉上对 app 不够）
+- ✅ **下一步 pivot 到 attr loss 调整**（类平衡 CE / focal / attr-conditioned
+  edge head）而不是再堆结构特征
+- 📅 长期：diffusion（Phase 3）
+
+---
+
+## 🧪 Experiment 5 — Plan A: Class-Weighted Attr CE (2026-04-22)
+
+### 目的
+
+诊断是否能用 **loss 层的类平衡** 修 baseline 的 bedroom bloat / bathroom
+塌缩。假设：Bedroom 63% vs ref 37% 是 CE loss 直接复制训练集频率先验的
+结果，加 inverse-frequency weighting 理论上能把常见类压下去、罕见类
+抬起来。
+
+**这是隔离变量**：结构部分完全和 baseline 一样（单 ordering、无 degree
+feature、无 ordering-id），只改 attr CE 的权重。
+
+### 配置差异（vs Baseline）
+
+```yaml
+# config/gran_v2_rplan_attrbalance.yaml
+model:
+  num_canonical_order: 1            # 和 baseline 一样
+  use_degree_feature: false         # 和 baseline 一样
+  use_ordering_id: false            # 和 baseline 一样
+  attr_class_weight: auto           # <<< 唯一变量
+train:
+  max_epoch: 50
+  lr_decay_epoch: [15, 35]
+```
+
+### 实现细节
+
+- `model/gran_v2.py:__init__`: 注册 `attr_class_weights` buffer，`auto` 模式
+  初始化为 ones；新增 `set_attr_class_weights(w)` in-place setter
+- `model/gran_v2.py:forward`: `F.cross_entropy(attr_logits, labels,
+  weight=self.attr_class_weights)` 替换原 `self.attr_loss_func`
+- `runner/gran_runner_v2.py:_compute_auto_attr_class_weights`: sklearn
+  balanced 公式 `w[c] = total / (A * max(count[c], 1))`，clamp 到
+  `[0.1, 10.0]`；DataParallel wrap 前注入
+
+8 个新测试通过（`tests/test_attr_class_weight.py`），总 36 个测试绿。
+
+### 自动计算的 weights（训练时注入）
+
+runner 扫 `graphs_train` 算出：
+
+| 类别 | Count | Weight | 备注 |
+|------|-------|--------|------|
+| 0 Living | ~1023 | **0.945** | 几乎不变 |
+| 1 Bedroom | ~2500 | **0.398** | 压最狠（ref 最多）|
+| 2 Bathroom | ~1221 | 0.807 | 轻度抬 |
+| 3 Kitchen | ~982 | 1.018 | 几乎不变 |
+| 4 Balcony | ~999 | 0.871 | 轻度压 |
+| 5 Storage | ~70 | **10.0** | **顶 clamp 上限** |
+| 6 External | ~1 | **10.0** | **顶 clamp 上限** |
+
+### 训练曲线
+
+| Epoch | val_total |
+|-------|-----------|
+| 5 | 0.6091 |
+| 10 | 0.5976 |
+| 15 (lr decay 1) | 0.5856 |
+| **40 (best)** | **0.5851** |
+| 50 | ~0.5851 |
+
+Val 从 0.61 → 0.585 平稳下降。比 baseline (0.5452) 略高，合理（weighted
+CE 的 loss 期望值本就比 uniform CE 高）。
+
+### MMD 结果（test）
+
+| 指标 | Baseline | **Plan A** | 变化 |
+|------|---------|-----------|------|
+| #nodes | 0.0171 | 0.0377 | 2.2× 略差 |
+| degree | 0.0036 | **0.0021** | **1.7× 更好** ✨ |
+| clustering | 0.0164 | **0.0136** | **1.2× 更好** ✨ |
+| spectral | 0.0079 | **0.0070** | **1.1× 更好** ✨ |
+| 4-orbits | 0 | 0 | 持平（orca 未编译） |
+
+**关键发现：结构 MMD 不仅没坏，三项略好**。说明 weighted CE 对结构
+学习没有破坏。
+
+### 类别分布 — 核心发现
+
+| 类别 | Ref | Baseline Gen | **Plan A Gen** | 诊断 |
+|------|-----|-------------|---------------|------|
+| 0 Living | 15.1% | ~15% | **39.3%** | 🔴 **爆炸 2.6×** |
+| 1 Bedroom | 36.8% | 63.0% | **31.2%** | ✅ **修好了**（接近 ref）|
+| 2 Bathroom | 18.0% | 2.0% | 3.6% | ⚠️ 略好但仍塌缩 |
+| 3 Kitchen | 14.5% | 10.9% | 19.5% | ⚠️ 略高 |
+| 4 Balcony | 14.7% | 9.6% | 5.1% | ⚠️ 被挤出 |
+| 5 Storage | 1.0% | 1.7% | 1.2% | ✅ 持平 |
+| 6 External | 0% | 0.02% | 0.02% | ✅ 持平 |
+
+### 定性观察（gen_graphs.json 抽样）
+
+6-7 节点图里出现大量 **2-3 个 Living** 的样本：
+- `idx 1: [0,3,3,3,0,0,0,0]` → 4 个 Living
+- `idx 11: [5,3,1,1,0,0,0]` → 3 个 Living
+- `idx 12: [0,3,1,1,0,0,0]` → 3 个 Living
+
+**每张 ~7 节点图 × 39% Living = 平均每图 2-3 个 Living**。
+违反现实户型"一个客厅"的常识。
+
+### 失败根因：weighted CE 的生态位转移
+
+训练时：
+- Bedroom gradient × 0.4 → 模型对 Bedroom 预测 confidence 降低
+- Living weight 几乎不变 (0.95) → 仍是"强类"
+- 模型在"该选常见类"时，从 Bedroom 转向 Living（Living 结构 feature 训练充分）
+- Bathroom / Balcony 虽然 ref 常见但结构 feature 弱（多是 degree=1 叶
+  节点，信号不稳），权重提升不足以让模型敢选
+
+**Plan A 没解决 structure-semantics 耦合**，只是把问题从"Bedroom 吞 Living"
+换成"Living 吞 Bedroom"。
+
+### 结论
+
+- ✅ **Bedroom bloat 修好了**（63% → 31%，接近 ref 37%）
+- ✅ **结构 MMD 略好于 baseline**（degree / clustering / spectral 都小幅下降）
+- ❌ **Living bloat 出现**（15% → 39%，新 bug）
+- ❌ **Bathroom 仍塌缩**（2% → 3.6%，微改善不够）
+- ❌ **app 可用性没改善**：从"到处 bedroom"变成"到处 living"
+
+### 决定
+
+- ❌ 不 ship
+- 🎯 **触发 Plan C**：attr-conditioned edge head + 结构-属性联合建模
+  - 让 edge head 拿到邻居 attr embedding → 学"Living 不邻接 Living"
+  - 让 attr head 拿到结构 feature（degree、local cluster）→ 学
+    "叶节点常是 Bathroom / Balcony，hub 是 Living"
+- ⚠️ 保留 Plan A 代码路径作为对照组 / 未来 fine-tune 的起点
 
 ---
 

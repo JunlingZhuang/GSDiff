@@ -124,8 +124,8 @@ test:
   num_vis: 20
   vis_num_row: 5
   better_vis: true
-  test_model_dir: snapshot_model
-  test_model_name: gran_v2_rplan_p1.pth
+  test_model_dir: exp/GRANv2_rplan_p1/GRANv2_RPLAN_2026-Apr-21-18-17-38_41540
+  test_model_name: model_best.pth
 
 # -----------------------------------------------------------------------------
 # 5. RUNTIME

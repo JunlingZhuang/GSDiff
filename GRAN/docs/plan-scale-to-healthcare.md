@@ -17,15 +17,32 @@
 - 医疗平面的 **多 hub、层级结构、规范约束** 跟住宅完全不同，我们现在的
   "degree rank" 结构特征不够用
 
-### V2 必须保留的 5 个能力
+### V2 对外的 3 个核心任务 + 2 个内部能力
 
-未来换架构不能丢的功能：
+**3 个核心任务（对 app 的主要卖点，换架构必须保留）：**
 
-1. **T1 无条件生成** — 从噪声生成完整 floorplan
-2. **T2 Partial graph completion** — 给定前 t 个节点，续生成
-3. **T3 只预测属性** — 给定完整邻接，预测每个节点的房间类型
-4. **T4 `expand_graph`（Mode A）** — T2 的便利包装
-5. **T5 `predict_attr_with_edges`（Mode B）** — 给定连接模式，预测新节点类型
+1. **T1 无条件生成** — `_sampling(B)` → 完整 bubble diagram。用户
+   不给任何约束。
+2. **T2 Partial completion** — 给定 partial graph + 要加的节点数 N，
+   模型生成接下来 N 个节点**的属性和它们与已有节点的连边**。N 由用户
+   指定。API：`_sampling(..., partial_A, partial_attrs, start_idx=k)`。
+3. **T5 Attr with fixed edges** — 给定 partial graph + 用户指定的
+   "下一个新节点连到哪几个已有节点"，模型**只预测这个新节点的属性**
+   （结构由用户固定）。API：`predict_attr_with_edges(partial_A,
+   partial_attrs, fixed_edges)`。
+
+**2 个内部能力（已合并 / 诊断用，不对外主推）：**
+
+- **T3 `expand_graph`** ≡ **T2 的 alias**：同一份代码路径，只是参数化
+  不同。T2 指定 target_size（"补到 N 个节点"），T3 指定 add_n（"再加 M
+  个"），满足 `target_size − K = add_n` 时两者输出完全相同。保留
+  `expand_graph()` 作为 thin wrapper 调 T2。
+- **T4 Attr-only** — `forward({'attr_only': True, 'A': A})`。给定完整
+  结构预测所有 attrs。**不是产品卖点**，保留为诊断探针（研究用途）。
+
+**关于 bubble diagram vs floorplan**：这些任务**全部**在图层面
+（nodes + labels + edges），不包含"从 bubble 到 2D 坐标"那一步。后者由
+GSDiff / HouseDiffusion 等下游模型处理，不在 backbone 选型范围内。
 
 ### 三阶段 roadmap
 
@@ -38,8 +55,16 @@
 ### 关键判断
 
 - ✅ **Phase 2 最安全**：只换 backbone，其他全部保留，5 个任务都能跑
-- ✅ **Phase 3 最干净**：Diffusion 用 **inpainting 一套 mask** 统一实现全部 5 个任务，代码量比 GRAN v2 少很多
-- ❌ **纯 Graphormer 做不了**：它是分类模型不是生成模型
+- ⚠️ **Phase 3 的关键坑在 T2（节点插入）**：Diffusion 的 inpainting
+  mask 对 T1/T4/T5 都很自然，但 **T2（partial completion = 续生成新
+  节点，含 T3 alias）需要扩 adjacency 维度，不是 mask 能搞定的**——
+  DiGress scaffold extension 只演示了"加边到已有节点"，"加节点扩维度"
+  需要自己写 node-insertion schedule，是研究工作不是工程
+- ❌ **纯 Graphormer 做不了**：它是分类模型不是生成模型，只能作为 Phase 2
+  的 backbone 替换件（保留 GRAN 的自回归外壳）
+- ❌ **GSDiff / HouseDiffusion 不是 Phase 3 候选**：它们是 bubble → layout
+  的下游模型，输出坐标/像素，不生成 bubble diagram 本身（详见
+  `docs/research-landscape-and-roadmap.md` §2.2）
 - ⚠️ **医疗数据集要自己搞**：公开数据里 MSD（ECCV 2024，瑞士多单元建筑）最接近但还不够
 
 ### 现在就能做的"降低 Phase 3 风险"的事
@@ -190,40 +215,54 @@ N > 500 基本必须用这类方法。
 
 ---
 
-## 3.5 V2 任务覆盖矩阵 — 换架构后 5 个能力还能做吗
+## 3.5 V2 任务覆盖矩阵 — 换架构后能力还能做吗
 
-**这是最关键的一节**：v2（见 `docs/plan-gran-v2-upgrade.md` Tasks 1-7）给
-app 提供的 **5 种推理模式**，未来迁移架构**必须全部保留**，否则产品
-回退。
+**这是最关键的一节**：v2 给 app 提供的 **3 个核心任务 + 2 个内部能力**，
+未来迁移架构**必须全部保留**，否则产品回退。
+
+**3 个核心任务（用户面）：**
 
 | V2 任务 | 作用 | API |
 |--------|------|-----|
-| **T1** 无条件生成 | 从零采样完整 floorplan | `forward({'is_sampling': True})` |
-| **T2** Partial graph completion | 给定前缀 `(A_partial, attrs_partial)`，续生成 | `_sampling(..., partial_A, partial_attrs, start_idx)` |
-| **T3** 只预测属性 | 给定完整图，预测每个节点类型 | `_sampling(..., partial_A=full, start_idx=N)` |
-| **T4** `expand_graph` (Mode A) | T2 的便利包装，扩到 `num_target_nodes` | `expand_graph(partial_A, partial_attrs, num_target_nodes)` |
-| **T5** `predict_attr_with_edges` (Mode B) | 给定 partial + 下一个节点的连接，预测属性 | `predict_attr_with_edges(partial_A, partial_attrs, fixed_edges)` |
+| **T1** 无条件生成 | 从零采样完整 bubble diagram | `forward({'is_sampling': True})` |
+| **T2** Partial completion | 给定 partial `(A, attrs)` 和要加的节点数 N，生成接下来 N 个节点（含 attr + 连边） | `_sampling(..., partial_A, partial_attrs, start_idx)` |
+| **T5** Attr with fixed edges | 给定 partial + "下一个新节点连到哪些已有节点"，只预测该新节点的 attr | `predict_attr_with_edges(partial_A, partial_attrs, fixed_edges)` |
+
+**2 个内部能力（已合并 / 诊断用）：**
+
+| V2 任务 | 作用 | 定位 |
+|--------|------|-----|
+| **T3** `expand_graph` ≡ T2 alias | 给完整图追加到 `num_target_nodes`；`add_n = num_target_nodes − K` 与 T2 数学等价 | **Thin wrapper** 调 T2 |
+| **T4** 只预测属性 | 给定完整图，预测每个节点类型 | **诊断探针**（研究用，不对外主推） |
 
 ### 架构对这 5 个任务的支持情况
 
+图例：**N** = native / **P** = possible with adapter / **X** = 不支持
+（与 `docs/research-landscape-and-roadmap.md` §3 对齐）
+
 | 架构 | T1 | T2 | T3 | T4 | T5 | 备注 |
 |------|----|----|----|----|----|------|
-| **GRAN v2 + GATv2（当前）** | ✅ | ✅ | ✅ | ✅ | ✅ | 已实现并测试 |
-| **GRAN + Graph Transformer**（[Graphormer](https://github.com/microsoft/Graphormer) / [GRIT](https://github.com/LiamMa/GRIT) 作 backbone） | ✅ | ✅ | ✅ | ✅ | ✅ | 自回归循环不变，只换 backbone |
-| **纯 Graph Transformer**（[Graphormer](https://github.com/microsoft/Graphormer)） | ❌ | ❌ | ⚠️ | ❌ | ⚠️ | 是分类/回归框架，不是生成模型 |
-| **Graph Diffusion**（[DiGress](https://github.com/cvignac/DiGress), [EDGE](https://github.com/tufts-ml/graph-generation-EDGE)） | ✅ | ✅ | ✅ | ✅ | ✅ | 用 inpainting-style mask 全覆盖 |
-| **Continuous SDE**（[GDSS](https://github.com/harryjo97/GDSS)） | ✅ | ✅ | ✅ | ✅ | ⚠️ | 同上，但 T5（fixed edges）需离散风格 mask |
-| **一次性谱生成**（[SPECTRE](https://github.com/KarolisMart/SPECTRE)） | ✅ | ⚠️ | ⚠️ | ⚠️ | ❌ | 为无条件一次性生成设计 |
-| **自回归 flow**（[GraphAF](https://github.com/DeepGraphLearning/GraphAF)） | ✅ | ✅ | ✅ | ✅ | ✅ | 跟 GRAN 类似，自回归天然支持 |
+| **GRAN v2 + GATv2（当前）** | N | N | N | P | P | 已实现并测试；T4/T5 走 attr head 独立分支 |
+| **GRAN + Graph Transformer**（[Graphormer](https://github.com/microsoft/Graphormer) / [GRIT](https://github.com/LiamMa/GRIT) 作 backbone） | N | N | N | P | P | 自回归循环不变，只换 backbone |
+| **纯 Graph Transformer**（[Graphormer](https://github.com/microsoft/Graphormer)） | X | X | X | N | N | 分类/回归框架，不是生成模型 |
+| **Graph Diffusion**（[DiGress](https://github.com/cvignac/DiGress)） | N | P | **P*** | N | N | T1/T4/T5 原生；T2 = scaffold mask；T3 = **自定义 node-insertion schedule** |
+| **Sparse Graph Diffusion**（[EDGE](https://github.com/tufts-ml/graph-generation-EDGE)） | N | P | P | P | P | 稀疏扩散，100+ 节点首选。但 node attr head 要自己加 |
+| **Continuous SDE**（[GDSS](https://github.com/harryjo97/GDSS)） | N | P | P | P | P | Node attrs 是连续向量，做房间类别 awkward |
+| **一次性谱生成**（[SPECTRE](https://github.com/KarolisMart/SPECTRE)） | N | P | X | X | X | 无 attr 模型，不适合我们 |
+| **自回归 flow**（[GraphAF](https://github.com/DeepGraphLearning/GraphAF)） | N | P | P | P | P | 分子向，无 floorplan port |
 
-图例：✅ 原生支持 / ⚠️ 能做但需额外设计 / ❌ 不适合
+***T2 on DiGress 的坑**（T3 是 T2 alias，同一坑）：DiGress scaffold
+extension 演示的是"加边到已有节点"，不是"在中间插新节点扩 adjacency
+维度"。两种可行做法：
+(a) 预分配 N_max 槽位，新增节点走 "empty" 类别 → "existing" 类别的
+    category flip；(b) 用 EDGE 风格的稀疏扩散（每步只改 O(edges) 条）。
+两种都需要我们自己实现，**不是 out-of-the-box**。
 
-### 为什么 Diffusion 特别适合我们的任务
+### 为什么 Diffusion 对 T1/T4/T5 特别干净
 
-Graph diffusion 用**一套 inpainting 机制**覆盖所有 5 个任务：
+Graph diffusion 用**一套 inpainting 机制**覆盖 3 个任务（T1/T4/T5）：
 
 ```python
-# 所有 v2 任务共用一套代码
 def sample(mask, known_values):
     x = pure_noise()
     for t in reversed(range(T)):
@@ -232,23 +271,23 @@ def sample(mask, known_values):
     return x
 ```
 
-不同任务只是不同的 `mask` 配置：
+Mask 配置：
 
-| 任务 | Mask |
-|------|------|
-| T1 无条件 | 全未知 |
-| T2 partial completion | 前 t 个节点的 edges + attrs 固定 |
-| T3 attr-only | 所有 edges 固定，所有 attrs 未知 |
-| T4 expand_graph | 同 T2 |
-| T5 attr-with-fixed-edges | 所有已有 edges + 用户指定的新边固定，新节点 attr 未知 |
+| 任务 | Mask | DiGress 原生支持？ |
+|------|------|------------------|
+| T1 无条件 | 全未知 | ✅ |
+| **T2** partial completion（含 T3 alias） | **需要扩维度，不是 mask** | ❌ **自定义 schedule**（核心坑）|
+| T4 attr-only | 所有 edges 固定，所有 attrs 未知 | ✅（诊断用） |
+| T5 attr-with-fixed-edges | 所有已有 edges + 用户指定新边固定，新节点 attr 未知 | ✅ |
 
-对比 GRAN：T2、T3、T4、T5 每个都需要 `_sampling()` 里写专门分支（Task 7
-光是这 2 个模式就加了 ~200 行分支逻辑）。Diffusion 压缩成"设 mask 然后
-运行"。
+对比 GRAN：T2 / T5 每个都需要 `_sampling()` 里写专门分支（Task 7 加了
+~200 行分支逻辑）。Diffusion 压缩成"设 mask 然后运行"——**但 T2（节点
+插入）还是要自己写**。
 
 **结论**：
-- Phase 2（只换 backbone）是最安全迁移 — 同框架、同测试
-- Phase 3（diffusion）是最大重构，但给出**最干净**的长期 API
+- Phase 2（只换 backbone）是最安全迁移 — 同框架、同测试、3 核心任务不改
+- Phase 3（diffusion）对 T1/T4/T5 给出最干净 API，但 **T2 需要一次研究
+  型投入**（node-insertion schedule），不是 free lunch
 
 ---
 
@@ -291,8 +330,9 @@ def sample(mask, known_values):
    于图，支持离散节点 + 边属性
 2. 用 graph transformer 做 denoiser（可复用 Phase 2 的实现）
 3. 加 Laplacian PE（归一化邻接矩阵的特征向量）作为节点特征
-4. Conditional generation（bubble diagram、partial graph、fixed attrs）
-   用 inpainting mask — **一个框架覆盖所有 5 个 v2 任务**
+4. Conditional generation（partial graph、fixed attrs）用 inpainting mask
+   —— **T1/T2/T4/T5 由同一套 mask 机制覆盖**；**T3（expand_graph）需要
+   额外写 node-insertion schedule**（非 trivial，见 §3.5 的 T3 小节）
 5. 改造 RPLAN pipeline（`dataset/rplan_preprocessing/`）产出 diffusion-
    ready 数据，bubble diagram 格式基本不变
 6. 自建 / 授权医院 floorplan 数据集（**最大未知项** — 目前没有 RPLAN
@@ -356,46 +396,67 @@ O(N³) 是硬墙。
 | 优先级 | Repo | 理由 |
 |-------|------|------|
 | 🥇 | [cvignac/DiGress](https://github.com/cvignac/DiGress) | 离散图扩散标杆实现，直接支持 categorical node/edge attributes，扩展到 100 节点有实证 |
-| 🥈 | [tufts-ml/graph-generation-EDGE](https://github.com/tufts-ml/graph-generation-EDGE) | **稀疏**离散扩散，节点数 > 100 时首选 |
-| 🥉 | [SizheHu/GSDiff](https://github.com/SizheHu/GSDiff) | 上游姊妹项目，floorplan 专门，但规模目前只到住宅 |
+| 🥈 | [tufts-ml/graph-generation-EDGE](https://github.com/tufts-ml/graph-generation-EDGE) | **稀疏**离散扩散，节点数 > 100 时首选；T3 插节点比 DiGress 更容易处理 |
 
-### 快速对比：Fork DiGress 还是 GSDiff 做 Phase 3
+**不推荐作为 Phase 3 候选：**
+- **GSDiff / HouseDiffusion / HouseGAN++**：输出是空间 layout（坐标 /
+  像素 / 向量），**不生成 bubble diagram 本身**。它们是 bubble → layout
+  的下游模型，不是 backbone 候选。详见
+  `docs/research-landscape-and-roadmap.md` §2.2
+- **SPECTRE**：无 attribute 建模，T4/T5 做不了
+- **GraphRNN**：attr 支持只在 appendix，无官方 evaluation
 
-| | DiGress | GSDiff |
-|---|---------|--------|
-| 图节点规模 | 100-1000+ | < 20 |
-| Floorplan-specific | ❌ 通用图 | ✅ |
-| 已实现 attr + edge | ✅ 同时 | ✅ |
-| 代码成熟度 | 高（ICLR 2023 + 广泛采用） | 中（2025 AAAI 新发） |
+### 快速对比：DiGress vs EDGE（两个真正候选）
+
+| | DiGress | EDGE |
+|---|---------|------|
+| 图节点规模 | 10-200 | 100-5000 |
+| 稀疏性 | 否（O(N²) 每步） | ✅ 稀疏（O(edges)） |
+| 原生 node categorical | ✅ | ❌（要自己接 attr head） |
+| T3（插节点）实现难度 | 较高（需预分配槽位） | 较低（稀疏性天然支持） |
+| 代码成熟度 | 高（ICLR 2023 + 广泛采用） | 中（ICML 2023，官方 repo 较新） |
 | 医院场景适配 | **需适配 domain 知识** | **需 scale up** |
 
 **结论**：
-- 小规模（< 20）延用 GSDiff 更省事
-- **大规模（30+ 医疗）→ Fork DiGress 起步**，加上 floorplan 特定 loss
-  和 taxonomy
+- **中等规模（30-100 节点）→ Fork DiGress**，加上 bubble-diagram taxonomy
+  和 T3 自定义 schedule
+- **大规模（100+ 节点）→ Fork EDGE**，手动加 node attr head；T3 的稀疏
+  实现更自然
+- **小规模（<20 节点）**：不用切 Phase 3，GRAN v2 就够用
+
+**注意**：GSDiff 不在此列——它输出 floorplan 坐标，不是 bubble diagram
+（见上）。
 
 ---
 
 ## 8. 参考文献速查
 
-### 核心架构
-- [DiGress](https://arxiv.org/abs/2209.14734) ICLR 2023 ([code](https://github.com/cvignac/DiGress))
-- [Graphormer](https://arxiv.org/abs/2106.05234) NeurIPS 2021 ([code](https://github.com/microsoft/Graphormer))
-- [GATv2](https://arxiv.org/abs/2105.14491) ICLR 2022
+### 核心架构（graph-level generator，真 backbone 候选）
 - [GRAN](https://arxiv.org/abs/1910.00760) NeurIPS 2019 ([code](https://github.com/lrjconan/GRAN))
-- [GRIT](https://arxiv.org/abs/2305.17589) ICML 2023 ([code](https://github.com/LiamMa/GRIT))
+- [GraphRNN](https://arxiv.org/abs/1802.08773) ICML 2018
+- [DeepGMG](https://arxiv.org/abs/1803.03324) ICML 2018
+- [GraphAF](https://arxiv.org/abs/2001.09382) ICLR 2020 ([code](https://github.com/DeepGraphLearning/GraphAF))
+- [DiGress](https://arxiv.org/abs/2209.14734) ICLR 2023 ([code](https://github.com/cvignac/DiGress))
+- [EDGE](https://arxiv.org/abs/2305.04111) ICML 2023 ([code](https://github.com/tufts-ml/graph-generation-EDGE))
 - [GDSS](https://arxiv.org/abs/2202.02514) ICML 2022 ([code](https://github.com/harryjo97/GDSS))
 - [SPECTRE](https://arxiv.org/abs/2204.01613) ICML 2022 ([code](https://github.com/KarolisMart/SPECTRE))
-- [EDGE](https://arxiv.org/abs/2305.04111) ICML 2023 ([code](https://github.com/tufts-ml/graph-generation-EDGE))
-- [GraphAF](https://arxiv.org/abs/2001.09382) ICLR 2020 ([code](https://github.com/DeepGraphLearning/GraphAF))
 
-### Floorplan 专门
+### Graph transformer（backbone 替换 / T4-T5 判别头）
+- [Graphormer](https://arxiv.org/abs/2106.05234) NeurIPS 2021 ([code](https://github.com/microsoft/Graphormer))
+- [GRIT](https://arxiv.org/abs/2305.17589) ICML 2023 ([code](https://github.com/LiamMa/GRIT))
+- [GATv2](https://arxiv.org/abs/2105.14491) ICLR 2022 — v2 当前 backbone
+
+### 下游 Floorplan 模型（**消费方，不是候选 backbone**）
+这些都是 `P(layout | bubble)`，不生成 bubble diagram 本身。保留仅作下游
+接入方参考。详细 scope 说明见
+`docs/research-landscape-and-roadmap.md` §2.2。
+
 - [HouseGAN++](https://arxiv.org/abs/2103.02574) CVPR 2021 ([code](https://github.com/ennauata/houseganpp))
 - [Graph2Plan](https://arxiv.org/abs/2004.13204) SIGGRAPH 2020 ([code](https://github.com/HanHan55/Graph2plan))
 - [HouseDiffusion](https://openaccess.thecvf.com/content/CVPR2023/papers/Shabani_HouseDiffusion_Vector_Floorplan_Generation_via_a_Diffusion_Model_With_Discrete_CVPR_2023_paper.pdf) CVPR 2023 ([code](https://github.com/aminshabani/house_diffusion))
-- [GSDiff](https://wutomwu.github.io/publications/2025-GSDiff/paper.pdf) AAAI 2025 ([code](https://github.com/SizheHu/GSDiff))
-- [MSD](https://caspervanengelenburg.github.io/msd-eccv24-page/) ECCV 2024 ([code](https://github.com/caspervanengelenburg/msd))
-- [Nursing Unit Stable Diffusion](https://www.mdpi.com/2075-5309/14/9/2601) 2024
+- [GSDiff](https://wutomwu.github.io/publications/2025-GSDiff/paper.pdf) AAAI 2025 ([code](https://github.com/SizheHu/GSDiff)) — 本仓库上游姊妹项目
+- [MSD](https://caspervanengelenburg.github.io/msd-eccv24-page/) ECCV 2024 ([code](https://github.com/caspervanengelenburg/msd)) — 中等规模 benchmark
+- [Nursing Unit Stable Diffusion](https://www.mdpi.com/2075-5309/14/9/2601) 2024 — 医疗图像空间扩散
 - [DStruct2Design](https://arxiv.org/html/2407.15723v1) 2024 ([code](https://github.com/plstory/DS2D))
 - [HouseTune](https://arxiv.org/html/2411.12279) 2024
 - [ChatHouseDiffusion](https://arxiv.org/html/2410.11908v1) 2024 ([code](https://github.com/ChatHouseDiffusion/chathousediffusion))

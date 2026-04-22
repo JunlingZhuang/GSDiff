@@ -180,6 +180,18 @@ class GranRunnerV2(GranRunner):
         # [v2] pick up GRANv2 via config.model.name
         model = eval(self.model_conf.name)(self.config)
 
+        # [v2 plan A] Auto-compute inverse-frequency attr class weights from
+        # the training set when config.model.attr_class_weight == 'auto'.
+        # Must happen BEFORE DataParallel wrap so we can call the setter on
+        # the raw GRANv2 instance.
+        if getattr(self.model_conf, 'attr_class_weight', None) == 'auto':
+            weights = self._compute_auto_attr_class_weights()
+            model.set_attr_class_weights(weights)
+            logger.info(
+                "auto attr_class_weight: %s (clamped to [%.2f, %.2f])" % (
+                    ["%.4f" % w for w in weights.tolist()],
+                    float(weights.min()), float(weights.max())))
+
         if self.use_gpu:
             model = DataParallel(model, device_ids=self.gpus).to(self.device)
 
@@ -441,6 +453,40 @@ class GranRunnerV2(GranRunner):
             logger.info("training done. (no validation recorded)")
 
         return 1
+
+    # ======================================================================
+    # Attribute class weight auto-computation (plan A)
+    # ======================================================================
+    def _compute_auto_attr_class_weights(self):
+        """Compute inverse-frequency per-class weights from ``graphs_train``.
+
+        Formula (sklearn "balanced"-style):
+            w[c] = total / (A * max(count[c], 1))
+
+        Weights are then clamped to ``[0.1, 10.0]`` to prevent a rare class
+        from dominating the gradient — e.g. a class with 0.1% prevalence
+        would otherwise get weight ~1000. Empirically cap=10 is a reasonable
+        upper bound for class imbalance studies and matches focal-loss
+        practice.
+
+        Returns a float32 tensor of shape ``(num_attr_classes,)``.
+        """
+        A = self.config.model.num_attr_classes
+        counts = torch.zeros(A, dtype=torch.float64)
+        for g in self.graphs_train:
+            for _, node_data in g.nodes(data=True):
+                # Node attrs are stored at G.nodes[n]['attr']; fall back to 0
+                # to mirror gran_data_v2's `.get('attr', 0)` behavior.
+                attr = int(node_data.get('attr', 0))
+                if 0 <= attr < A:
+                    counts[attr] += 1
+        total = counts.sum()
+        if total == 0:
+            # No attrs found: uniform fallback.
+            return torch.ones(A, dtype=torch.float32)
+        weights = total / (A * counts.clamp(min=1.0))
+        weights = weights.clamp(min=0.1, max=10.0)
+        return weights.float()
 
     # ======================================================================
     # Structured logging helpers

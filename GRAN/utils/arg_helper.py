@@ -46,11 +46,19 @@ def get_config(config_file, exp_dir=None, is_test=False):
 
   if exp_dir is not None:
     config.exp_dir = exp_dir
-  
-  if config.train.is_resume and not is_test:
+
+  if is_test:
+    # Point save_dir at the checkpoint folder so the exp log lands next to the
+    # artifacts the runner will produce (vis/, test_results.json, ...). No new
+    # timestamped run dir is created for test.
+    config.save_dir = config.test.test_model_dir
+    mkdir(config.save_dir)
+    return config
+
+  if config.train.is_resume:
     config.save_dir = config.train.resume_dir
-    save_name = os.path.join(config.save_dir, 'config_resume_{}.yaml'.format(config.run_id))  
-  else:    
+    save_name = os.path.join(config.save_dir, 'config_resume_{}.yaml'.format(config.run_id))
+  else:
     config.save_dir = os.path.join(config.exp_dir, config.exp_name)
     save_name = os.path.join(config.save_dir, 'config.yaml')
 
