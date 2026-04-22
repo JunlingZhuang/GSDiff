@@ -164,6 +164,31 @@ class GRANv2(nn.Module):
             )
             nn.init.normal_(self.ordering_embedding.weight, mean=0.0, std=0.1)
 
+        # ---- Plan C-1: attribute-conditioned edge head --------------------
+        # When on, the edge head sees the attribute embedding of both
+        # endpoints alongside the standard diff = h_u - h_v. This lets the
+        # model learn pair-specific structural priors (e.g. high P(edge)
+        # for Bedroom-Bathroom, low P(edge) for Living-Living).
+        #
+        # We reserve embedding row index ``num_attr_classes`` as the
+        # "unknown / not-yet-sampled" slot. It is used at sampling time for
+        # the K-block self-edges (whose own attr is being predicted in the
+        # same step) and as a safe default if any consumer feeds in an
+        # out-of-range attr id.
+        self.use_attr_conditioned_edge = getattr(
+            config.model, 'use_attr_conditioned_edge', False)
+        if self.use_attr_conditioned_edge:
+            self.attr_embedding_dim = int(
+                getattr(config.model, 'attr_embedding_dim', 32))
+            self.attr_embedding = nn.Embedding(
+                num_embeddings=self.num_attr_classes + 1,
+                embedding_dim=self.attr_embedding_dim,
+            )
+            nn.init.normal_(self.attr_embedding.weight, mean=0.0, std=0.1)
+        else:
+            self.attr_embedding_dim = 0
+            self.attr_embedding = None
+
         # ---- dimension-reduction input embed (unchanged) ------------------
         # Adjacency-row inputs have width N (max_num_nodes). When
         # dimension_reduce=True we project them down to embedding_dim first

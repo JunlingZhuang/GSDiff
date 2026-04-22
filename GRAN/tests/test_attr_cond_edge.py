@@ -84,3 +84,25 @@ def test_smoke_imports_and_helpers():
     assert cfg.model.num_attr_classes == 5
     G = _make_graph(n_nodes=4, seed=0)
     assert G.number_of_nodes() == 4
+
+
+def test_attr_embedding_absent_when_flag_off():
+    """Default GRANv2 has no attr_embedding (backward compat)."""
+    cfg = _cfg(use_attr_cond_edge=False)
+    model = GRANv2(cfg)
+    assert not hasattr(model, 'attr_embedding') or model.attr_embedding is None
+    # Also: use_attr_conditioned_edge attribute should default to False.
+    assert getattr(model, 'use_attr_conditioned_edge', False) is False
+
+
+def test_attr_embedding_registered_when_flag_on():
+    """Flag on -> attr_embedding shape (A+1, attr_emb_dim)."""
+    cfg = _cfg(use_attr_cond_edge=True, attr_emb_dim=8, num_attr_classes=5)
+    model = GRANv2(cfg)
+    assert hasattr(model, 'attr_embedding')
+    # +1 for the "unknown / not-yet-sampled" slot used for K-block self-edges
+    # and for endpoints whose attr hasn't been decided yet.
+    assert model.attr_embedding.num_embeddings == 5 + 1
+    assert model.attr_embedding.embedding_dim == 8
+    # Initial weights should be small (std=0.1 init, see __init__).
+    assert model.attr_embedding.weight.abs().mean().item() < 0.5
