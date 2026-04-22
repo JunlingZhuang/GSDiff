@@ -300,7 +300,8 @@ class GRANv2(nn.Module):
     # Training inference (unchanged from original class)
     # ======================================================================
     def _inference(self, A_pad=None, edges=None,
-                   node_idx_gnn=None, node_idx_feat=None, att_idx=None):
+                   node_idx_gnn=None, node_idx_feat=None, att_idx=None,
+                   subgraph_node_attrs=None):
         """Generate adj in row-wise autoregressive fashion (training path).
 
         Running shapes (example with B=4, C=1, N=20, H=64):
@@ -374,8 +375,26 @@ class GRANv2(nn.Module):
 
         # Pairwise diff between candidate edge endpoints -> edge logits.
         diff = node_state[node_idx_gnn[:, 0], :] - node_state[node_idx_gnn[:, 1], :]
-        log_theta = self.output_theta(diff).view(-1, self.num_mix_component)
-        log_alpha = self.output_alpha(diff).view(-1, self.num_mix_component)
+
+        # ---- Plan C-1: append attr-pair embeddings to edge head input ----
+        # When the flag is on, the edge head sees the attr embedding of
+        # both endpoints alongside the standard node-state diff. Asymmetric
+        # concat (a_u, a_v) is fine: the dataset's multi-ordering averaging
+        # already smooths over u/v swaps.
+        if self.use_attr_conditioned_edge and subgraph_node_attrs is not None:
+            assert self.num_attr_classes > 0, (
+                "use_attr_conditioned_edge=True requires "
+                "config.model.num_attr_classes to be set (>0)")
+            # Clamp out-of-range to the "unknown" slot defensively.
+            attrs = subgraph_node_attrs.clamp(min=0, max=self.num_attr_classes)
+            a_u = self.attr_embedding(attrs[node_idx_gnn[:, 0]])
+            a_v = self.attr_embedding(attrs[node_idx_gnn[:, 1]])
+            edge_in = torch.cat([diff, a_u, a_v], dim=-1)
+        else:
+            edge_in = diff
+
+        log_theta = self.output_theta(edge_in).view(-1, self.num_mix_component)
+        log_alpha = self.output_alpha(edge_in).view(-1, self.num_mix_component)
         return log_theta, log_alpha, node_state
 
     # ======================================================================
@@ -785,6 +804,10 @@ class GRANv2(nn.Module):
         # ``node_idx_feat`` (see mapping in the training path below) so the
         # runner doesn't need to compute node_attr_label / node_attr_idx.
         node_attrs = input_dict.get('node_attrs', None)
+        # [planc] per-state-row attr labels, aligned with node_idx_feat.
+        # When provided + use_attr_conditioned_edge=True, embedded into the
+        # edge head input alongside the node-state diff.
+        subgraph_node_attrs = input_dict.get('subgraph_node_attrs', None)
         partial_A = input_dict.get('partial_A', None)
         partial_attrs = input_dict.get('partial_attrs', None)
         start_idx = input_dict.get('start_idx', 0)
@@ -798,7 +821,8 @@ class GRANv2(nn.Module):
                 edges=edges,
                 node_idx_gnn=node_idx_gnn,
                 node_idx_feat=node_idx_feat,
-                att_idx=att_idx)
+                att_idx=att_idx,
+                subgraph_node_attrs=subgraph_node_attrs)
 
             # Edge (mixture-of-Bernoulli) loss.
             #

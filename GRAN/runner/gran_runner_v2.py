@@ -292,6 +292,10 @@ class GranRunnerV2(GranRunner):
                             # [v2] thread node_attrs through when provided by the loader
                             if 'node_attrs' in batch_data[dd][ff]:
                                 data['node_attrs'] = batch_data[dd][ff]['node_attrs'].pin_memory().to(gpu_id, non_blocking=True)
+                            # [planc] thread per-state-row attr labels for the
+                            # attr-conditioned edge head.
+                            if 'subgraph_node_attrs' in batch_data[dd][ff]:
+                                data['subgraph_node_attrs'] = batch_data[dd][ff]['subgraph_node_attrs'].pin_memory().to(gpu_id, non_blocking=True)
                             batch_fwd.append((data,))
 
                     if batch_fwd:
@@ -900,6 +904,10 @@ class GranRunnerV2(GranRunner):
                             data['subgraph_idx_base'] = batch_data[dd][ff]['subgraph_idx_base'].to(gpu_id, non_blocking=True)
                             if 'node_attrs' in batch_data[dd][ff]:
                                 data['node_attrs'] = batch_data[dd][ff]['node_attrs'].to(gpu_id, non_blocking=True)
+                            # [planc] thread per-state-row attr labels for the
+                            # attr-conditioned edge head.
+                            if 'subgraph_node_attrs' in batch_data[dd][ff]:
+                                data['subgraph_node_attrs'] = batch_data[dd][ff]['subgraph_node_attrs'].to(gpu_id, non_blocking=True)
                             batch_fwd.append((data,))
 
                     if batch_fwd:

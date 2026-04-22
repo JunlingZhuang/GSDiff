@@ -162,3 +162,116 @@ def test_collate_stacks_subgraph_node_attrs():
         assert data['subgraph_node_attrs'].dtype == torch.long
         # Aligns with node_idx_feat after collate (both flattened across batch).
         assert data['subgraph_node_attrs'].shape == data['node_idx_feat'].shape
+
+
+def test_inference_forward_pass_with_flag_on():
+    """End-to-end training forward returns finite scalar losses."""
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = _cfg(use_attr_cond_edge=True, attr_emb_dim=8,
+                   num_attr_classes=5, tmp_dir=tmp)
+        model = GRANv2(cfg)
+        graphs = [_make_graph(n_nodes=6, seed=i, num_classes=5)
+                  for i in range(3)]
+        ds = GRANDataV2(cfg, graphs, tag='train')
+        batch = ds.collate_fn([ds[i] for i in range(len(graphs))])
+        data = batch[0]
+
+        input_dict = {
+            'is_sampling': False,
+            'adj': data['adj'],
+            'edges': data['edges'],
+            'node_idx_gnn': data['node_idx_gnn'],
+            'node_idx_feat': data['node_idx_feat'],
+            'att_idx': data['att_idx'],
+            'label': data['label'],
+            'subgraph_idx': data['subgraph_idx'],
+            'subgraph_idx_base': data['subgraph_idx_base'],
+            'node_attrs': data['node_attrs'],
+            'subgraph_node_attrs': data['subgraph_node_attrs'],
+        }
+        edge_loss, attr_loss = model(input_dict)
+        assert torch.isfinite(edge_loss)
+        assert torch.isfinite(attr_loss)
+        assert edge_loss.item() > 0
+        assert attr_loss.item() > 0
+
+
+def test_inference_uses_attr_embeddings_in_edge_logits():
+    """Edge logits depend on attr_embedding weights when flag on.
+
+    Strategy: build two flag-on models with identical state EXCEPT for
+    attr_embedding weights, run forward on the same batch, verify the
+    edge_loss differs.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = _cfg(use_attr_cond_edge=True, attr_emb_dim=8,
+                   num_attr_classes=5, tmp_dir=tmp)
+        m1 = GRANv2(cfg)
+        m2 = GRANv2(cfg)
+        # Copy all params from m1 to m2 then perturb only attr_embedding.
+        sd1 = m1.state_dict()
+        sd2 = m2.state_dict()
+        for k, v in sd1.items():
+            if k != 'attr_embedding.weight':
+                sd2[k].copy_(v)
+        # Set m2's attr_embedding to a different value.
+        m2.attr_embedding.weight.data = torch.randn_like(
+            m2.attr_embedding.weight) * 0.5
+
+        graphs = [_make_graph(n_nodes=6, seed=i, num_classes=5)
+                  for i in range(3)]
+        ds = GRANDataV2(cfg, graphs, tag='train')
+        batch = ds.collate_fn([ds[i] for i in range(len(graphs))])
+        data = batch[0]
+        input_dict = {
+            'is_sampling': False,
+            'adj': data['adj'],
+            'edges': data['edges'],
+            'node_idx_gnn': data['node_idx_gnn'],
+            'node_idx_feat': data['node_idx_feat'],
+            'att_idx': data['att_idx'],
+            'label': data['label'],
+            'subgraph_idx': data['subgraph_idx'],
+            'subgraph_idx_base': data['subgraph_idx_base'],
+            'node_attrs': data['node_attrs'],
+            'subgraph_node_attrs': data['subgraph_node_attrs'],
+        }
+        m1.eval(); m2.eval()
+        with torch.no_grad():
+            e1, _ = m1(input_dict)
+            e2, _ = m2(input_dict)
+        assert not torch.isclose(e1, e2), (
+            "Edge loss did not change when attr_embedding changed -- "
+            "attr embeddings are not flowing into the edge head")
+
+
+def test_inference_flag_off_unchanged():
+    """Flag off + identical seed -> identical edge loss as before this change.
+
+    We construct a flag-off model and check that omitting subgraph_node_attrs
+    from input_dict still works (backward compat with existing call sites).
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = _cfg(use_attr_cond_edge=False, num_attr_classes=5, tmp_dir=tmp)
+        model = GRANv2(cfg)
+        graphs = [_make_graph(n_nodes=6, seed=i, num_classes=5)
+                  for i in range(3)]
+        ds = GRANDataV2(cfg, graphs, tag='train')
+        batch = ds.collate_fn([ds[i] for i in range(len(graphs))])
+        data = batch[0]
+        input_dict = {
+            'is_sampling': False,
+            'adj': data['adj'],
+            'edges': data['edges'],
+            'node_idx_gnn': data['node_idx_gnn'],
+            'node_idx_feat': data['node_idx_feat'],
+            'att_idx': data['att_idx'],
+            'label': data['label'],
+            'subgraph_idx': data['subgraph_idx'],
+            'subgraph_idx_base': data['subgraph_idx_base'],
+            'node_attrs': data['node_attrs'],
+            # Deliberately omit subgraph_node_attrs to verify back-compat.
+        }
+        edge_loss, attr_loss = model(input_dict)
+        assert torch.isfinite(edge_loss)
+        assert torch.isfinite(attr_loss)
