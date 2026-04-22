@@ -121,3 +121,44 @@ def test_edge_head_input_dim_grows_when_flag_on():
     assert in_on == cfg_on.model.hidden_dim + 2 * 8
     # output_alpha matches output_theta input dim
     assert model_on.output_alpha[0].in_features == in_on
+
+
+def test_dataset_emits_subgraph_node_attrs_aligned_with_node_state():
+    """``subgraph_node_attrs`` shape matches what node_state will have.
+
+    For each subgraph of size jj+K, the array stores the ground-truth attr
+    of every row (existing nodes get their real attr; padding/out-of-range
+    slots get num_attr_classes -- the 'unknown' slot id).
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = _cfg(num_attr_classes=5, tmp_dir=tmp)
+        graphs = [_make_graph(n_nodes=6, seed=i, num_classes=5)
+                  for i in range(3)]
+        ds = GRANDataV2(cfg, graphs, tag='train')
+        # __getitem__ returns a list of num_fwd_pass dicts; index pass 0.
+        sample = ds[0][0]
+        assert 'subgraph_node_attrs' in sample
+        assert sample['subgraph_node_attrs'].dtype.kind in ('i', 'u')
+        # The per-subgraph row count equals subgraph_size summed:
+        # each subgraph contributes (jj+K) rows.
+        assert sample['subgraph_node_attrs'].shape[0] == \
+            sample['node_idx_feat'].shape[0]
+        # Values must be in [0, num_attr_classes] (last slot reserved).
+        assert sample['subgraph_node_attrs'].min() >= 0
+        assert sample['subgraph_node_attrs'].max() <= cfg.model.num_attr_classes
+
+
+def test_collate_stacks_subgraph_node_attrs():
+    """collate_fn concatenates per-sample subgraph_node_attrs into one tensor."""
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = _cfg(num_attr_classes=5, tmp_dir=tmp)
+        graphs = [_make_graph(n_nodes=6, seed=i, num_classes=5)
+                  for i in range(3)]
+        ds = GRANDataV2(cfg, graphs, tag='train')
+        batch = ds.collate_fn([ds[i] for i in range(len(graphs))])
+        data = batch[0]
+        assert 'subgraph_node_attrs' in data
+        assert isinstance(data['subgraph_node_attrs'], torch.Tensor)
+        assert data['subgraph_node_attrs'].dtype == torch.long
+        # Aligns with node_idx_feat after collate (both flattened across batch).
+        assert data['subgraph_node_attrs'].shape == data['node_idx_feat'].shape

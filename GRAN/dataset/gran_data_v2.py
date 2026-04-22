@@ -314,6 +314,7 @@ class GRANDataV2(GRANData):
             subgraph_size = []
             subgraph_idx = []
             att_idx = []
+            subgraph_node_attrs = []   # Plan C-1: aligned with node_state rows
             subgraph_count = 0
 
             for ii in range(len(adj_list)):
@@ -370,6 +371,24 @@ class GRANDataV2(GRANData):
                             np.uint8)
                     ]
 
+                    # ---- Plan C-1: per-subgraph-row attr label ----------
+                    # node_state for this subgraph has jj+K rows in this
+                    # canonical ordering. Existing-node rows take their
+                    # real attr; new-node rows take their GROUND-TRUTH attr
+                    # (teacher forcing). Positions beyond n_real_nodes
+                    # (rare -- only when the graph is shorter than jj+K)
+                    # take the "unknown" slot id = num_attr_classes.
+                    # Backward-compat: if the config has no attr-class
+                    # count, fall back to 0 for the unknown slot (legacy
+                    # consumers ignore this field anyway).
+                    A_classes = getattr(
+                        self.config.model, 'num_attr_classes', 0)
+                    n_real = attr_list[ii].shape[0]
+                    sg_attrs = np.full(jj + K, A_classes, dtype=np.int64)
+                    take_n = min(jj + K, n_real)
+                    sg_attrs[:take_n] = attr_list[ii][:take_n]
+                    subgraph_node_attrs.append(sg_attrs)
+
                     subgraph_size += [jj + K]
                     subgraph_idx += [
                         np.ones_like(label[-1]).astype(np.int64) *
@@ -404,6 +423,11 @@ class GRANDataV2(GRANData):
             # NEW: per-ordering attribute labels, 0-padded to N_max.
             # shape: (C, N_max) int64
             data['node_attrs'] = node_attrs_padded
+            # Plan C-1: per-state-row attr labels, aligned with node_idx_feat.
+            # shape: (M,) int64 where M = sum_subgraphs(jj+K).
+            data['subgraph_node_attrs'] = np.concatenate(subgraph_node_attrs) \
+                if len(subgraph_node_attrs) > 0 \
+                else np.zeros((0,), dtype=np.int64)
             data_batch += [data]
 
         end_time = time.time()
@@ -426,5 +450,13 @@ class GRANDataV2(GRANData):
             stacked = np.stack(
                 [bb[ff]['node_attrs'] for bb in batch], axis=0)
             batch_data[ff]['node_attrs'] = torch.from_numpy(stacked).long()
+
+            # ---- Plan C-1: concat per-sample subgraph_node_attrs ----
+            # Each bb[ff]['subgraph_node_attrs'] is a 1D int64 array of
+            # variable length; concat across batch yields a flat (M_total,)
+            # tensor aligned with batch_data[ff]['node_idx_feat'].
+            sgna_list = [bb[ff]['subgraph_node_attrs'] for bb in batch]
+            batch_data[ff]['subgraph_node_attrs'] = torch.from_numpy(
+                np.concatenate(sgna_list)).long()
 
         return batch_data
