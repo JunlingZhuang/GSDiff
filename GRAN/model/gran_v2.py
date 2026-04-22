@@ -102,19 +102,48 @@ class GRANv2(nn.Module):
         self.has_rand_feat = False
         self.att_edge_dim = 64
 
-        # ---- edge heads (unchanged from original) -------------------------
-        # output_theta: hidden -> L logits for the mixture-of-Bernoulli means
-        # output_alpha: hidden -> L mixture weights
-        # Input to both is (diff = node_state_i - node_state_j), shape (*, H).
+        # ---- Plan C-1: attribute-conditioned edge head --------------------
+        # When on, the edge head sees the attribute embedding of both
+        # endpoints alongside the standard diff = h_u - h_v. This lets the
+        # model learn pair-specific structural priors (e.g. high P(edge)
+        # for Bedroom-Bathroom, low P(edge) for Living-Living).
+        #
+        # We reserve embedding row index ``num_attr_classes`` as the
+        # "unknown / not-yet-sampled" slot. It is used at sampling time for
+        # the K-block self-edges (whose own attr is being predicted in the
+        # same step) and as a safe default if any consumer feeds in an
+        # out-of-range attr id.
+        #
+        # NOTE: this block must be declared BEFORE the edge-head MLPs below
+        # because ``edge_head_in_dim`` depends on ``self.attr_embedding_dim``.
+        self.use_attr_conditioned_edge = getattr(
+            config.model, 'use_attr_conditioned_edge', False)
+        if self.use_attr_conditioned_edge:
+            self.attr_embedding_dim = int(
+                getattr(config.model, 'attr_embedding_dim', 32))
+            self.attr_embedding = nn.Embedding(
+                num_embeddings=self.num_attr_classes + 1,
+                embedding_dim=self.attr_embedding_dim,
+            )
+            nn.init.normal_(self.attr_embedding.weight, mean=0.0, std=0.1)
+        else:
+            self.attr_embedding_dim = 0
+            self.attr_embedding = None
+
+        # ---- edge heads: input is diff_h_uv (width hidden_dim) plus,
+        # when use_attr_conditioned_edge=True, the concatenated attr
+        # embeddings of both endpoints (each width attr_embedding_dim).
+        edge_head_in_dim = self.hidden_dim + 2 * self.attr_embedding_dim
+
         self.output_theta = nn.Sequential(
-            nn.Linear(self.hidden_dim, self.hidden_dim),
+            nn.Linear(edge_head_in_dim, self.hidden_dim),
             nn.ReLU(inplace=True),
             nn.Linear(self.hidden_dim, self.hidden_dim),
             nn.ReLU(inplace=True),
             nn.Linear(self.hidden_dim, self.output_dim * self.num_mix_component))
 
         self.output_alpha = nn.Sequential(
-            nn.Linear(self.hidden_dim, self.hidden_dim),
+            nn.Linear(edge_head_in_dim, self.hidden_dim),
             nn.ReLU(inplace=True),
             nn.Linear(self.hidden_dim, self.hidden_dim),
             nn.ReLU(inplace=True),
@@ -163,31 +192,6 @@ class GRANv2(nn.Module):
                 embedding_dim=config.model.embedding_dim,
             )
             nn.init.normal_(self.ordering_embedding.weight, mean=0.0, std=0.1)
-
-        # ---- Plan C-1: attribute-conditioned edge head --------------------
-        # When on, the edge head sees the attribute embedding of both
-        # endpoints alongside the standard diff = h_u - h_v. This lets the
-        # model learn pair-specific structural priors (e.g. high P(edge)
-        # for Bedroom-Bathroom, low P(edge) for Living-Living).
-        #
-        # We reserve embedding row index ``num_attr_classes`` as the
-        # "unknown / not-yet-sampled" slot. It is used at sampling time for
-        # the K-block self-edges (whose own attr is being predicted in the
-        # same step) and as a safe default if any consumer feeds in an
-        # out-of-range attr id.
-        self.use_attr_conditioned_edge = getattr(
-            config.model, 'use_attr_conditioned_edge', False)
-        if self.use_attr_conditioned_edge:
-            self.attr_embedding_dim = int(
-                getattr(config.model, 'attr_embedding_dim', 32))
-            self.attr_embedding = nn.Embedding(
-                num_embeddings=self.num_attr_classes + 1,
-                embedding_dim=self.attr_embedding_dim,
-            )
-            nn.init.normal_(self.attr_embedding.weight, mean=0.0, std=0.1)
-        else:
-            self.attr_embedding_dim = 0
-            self.attr_embedding = None
 
         # ---- dimension-reduction input embed (unchanged) ------------------
         # Adjacency-row inputs have width N (max_num_nodes). When

@@ -106,3 +106,18 @@ def test_attr_embedding_registered_when_flag_on():
     assert model.attr_embedding.embedding_dim == 8
     # Initial weights should be small (std=0.1 init, see __init__).
     assert model.attr_embedding.weight.abs().mean().item() < 0.5
+
+
+def test_edge_head_input_dim_grows_when_flag_on():
+    """First Linear of output_theta and output_alpha grows by 2*attr_emb."""
+    cfg_off = _cfg(use_attr_cond_edge=False)
+    model_off = GRANv2(cfg_off)
+    in_off = model_off.output_theta[0].in_features
+    assert in_off == cfg_off.model.hidden_dim
+
+    cfg_on = _cfg(use_attr_cond_edge=True, attr_emb_dim=8)
+    model_on = GRANv2(cfg_on)
+    in_on = model_on.output_theta[0].in_features
+    assert in_on == cfg_on.model.hidden_dim + 2 * 8
+    # output_alpha matches output_theta input dim
+    assert model_on.output_alpha[0].in_features == in_on
