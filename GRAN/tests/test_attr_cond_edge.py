@@ -337,3 +337,41 @@ def test_sampling_attr_decisions_affect_edge_decisions():
     assert not torch.equal(A_a, A_b), (
         "Adjacency identical with different partial_attrs — attr signal "
         "is not reaching the edge head during sampling")
+
+
+def test_attr_embedding_gradient_flows_from_edge_loss():
+    """Backprop from edge_loss must reach attr_embedding.weight.grad.
+
+    Only the edge head consumes attr_embedding (output_attr maps from
+    hidden states, not from the embedding), so edge_loss is the sole
+    gradient path into attr_embedding.weight.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = _cfg(use_attr_cond_edge=True, attr_emb_dim=8,
+                   num_attr_classes=5, tmp_dir=tmp)
+        model = GRANv2(cfg)
+        model.train()
+        graphs = [_make_graph(n_nodes=6, seed=i, num_classes=5)
+                  for i in range(3)]
+        ds = GRANDataV2(cfg, graphs, tag='train')
+        batch = ds.collate_fn([ds[i] for i in range(len(graphs))])
+        data = batch[0]
+        input_dict = {
+            'is_sampling': False,
+            'adj': data['adj'],
+            'edges': data['edges'],
+            'node_idx_gnn': data['node_idx_gnn'],
+            'node_idx_feat': data['node_idx_feat'],
+            'att_idx': data['att_idx'],
+            'label': data['label'],
+            'subgraph_idx': data['subgraph_idx'],
+            'subgraph_idx_base': data['subgraph_idx_base'],
+            'node_attrs': data['node_attrs'],
+            'subgraph_node_attrs': data['subgraph_node_attrs'],
+        }
+        edge_loss, _attr_loss = model(input_dict)
+        edge_loss.backward()
+        g = model.attr_embedding.weight.grad
+        assert g is not None, (
+            "attr_embedding has no .grad after edge_loss.backward()")
+        assert g.abs().sum().item() > 0, "attr_embedding.grad is all zeros"
