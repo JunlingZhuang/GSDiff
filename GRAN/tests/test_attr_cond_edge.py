@@ -275,3 +275,65 @@ def test_inference_flag_off_unchanged():
         edge_loss, attr_loss = model(input_dict)
         assert torch.isfinite(edge_loss)
         assert torch.isfinite(attr_loss)
+
+
+def test_sampling_returns_correct_shapes_with_flag_on():
+    """End-to-end sampling produces (B, N) adjacency and (B, N) attrs."""
+    cfg = _cfg(use_attr_cond_edge=True, attr_emb_dim=8, num_attr_classes=5)
+    model = GRANv2(cfg)
+    model.eval()
+    B = 2
+    A, attrs = model._sampling(B)
+    assert A.shape == (B, cfg.model.max_num_nodes, cfg.model.max_num_nodes)
+    assert attrs.shape == (B, cfg.model.max_num_nodes)
+    # Attrs are in [0, num_attr_classes) (they were SAMPLED from the model
+    # head, never set to the "unknown" slot).
+    assert attrs.min().item() >= 0
+    assert attrs.max().item() < cfg.model.num_attr_classes
+
+
+def test_sampling_attr_decisions_affect_edge_decisions():
+    """When attr embedding is large+distinct per class, swapping an existing
+    node's attr (via partial_attrs) measurably changes downstream edge probs.
+
+    Strategy: pin n_partial=2 nodes with all-zero adjacency. Run sampling
+    once with partial_attrs=[0, 0] and once with partial_attrs=[1, 4].
+    Verify the resulting adjacency distributions differ over many seeds.
+    """
+    cfg = _cfg(use_attr_cond_edge=True, attr_emb_dim=16, num_attr_classes=5)
+    # Seed model init so the test does not depend on global RNG state from
+    # earlier tests in the suite.
+    torch.manual_seed(123)
+    model = GRANv2(cfg)
+    # Amplify attr_embedding so the per-edge logit shift is large enough to
+    # flip multiple Bernoulli draws despite the discrete sampling collapse.
+    # 50x is well above the threshold (5x flips ~2/512 entries; 50x flips
+    # ~14/512 entries on the seed used here).
+    with torch.no_grad():
+        model.attr_embedding.weight.mul_(50.0)
+    model.eval()
+    B = 8
+    n_partial = 2
+    partial_A = torch.zeros(B, n_partial, n_partial)
+
+    torch.manual_seed(0)
+    A_a, _ = model._sampling(
+        B,
+        partial_A=partial_A,
+        partial_attrs=torch.zeros(B, n_partial, dtype=torch.long),
+        start_idx=n_partial,
+    )
+    torch.manual_seed(0)
+    A_b, _ = model._sampling(
+        B,
+        partial_A=partial_A,
+        partial_attrs=torch.tensor(
+            [[1, 4]] * B, dtype=torch.long),
+        start_idx=n_partial,
+    )
+    # The two adjacencies should differ on at least some entries; if the
+    # attr signal weren't reaching the edge head, identical seed +
+    # identical h_uv => identical Bernoulli draws => identical A.
+    assert not torch.equal(A_a, A_b), (
+        "Adjacency identical with different partial_attrs — attr signal "
+        "is not reaching the edge head during sampling")

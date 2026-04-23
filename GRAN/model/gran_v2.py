@@ -400,6 +400,31 @@ class GRANv2(nn.Module):
     # ======================================================================
     # Autoregressive sampling with optional partial-graph conditioning
     # ======================================================================
+    def _sample_new_node_attrs(self, new_node_feat, H):
+        """Sample attr for K new nodes from softmax(output_attr(h)).
+
+        Plan C-1 helper. Same temperature-scaling logic as the legacy
+        attr-sampling block at the end of ``_sampling``, factored out so
+        it can run before the edge head.
+
+        Args:
+            new_node_feat: (B, K, H) hidden states for the K new nodes.
+            H:             hidden dim, passed in to avoid re-derivation.
+
+        Returns:
+            (B, K) long tensor of sampled attr ids in [0, num_attr_classes).
+        """
+        B, K, _ = new_node_feat.shape
+        new_attr_logits = self.output_attr(new_node_feat.reshape(-1, H))
+        new_attr_logits = new_attr_logits.view(B, K, -1)
+        temp = float(
+            getattr(self.config.model, 'attr_temperature', 1.0) or 1.0)
+        scaled_logits = new_attr_logits / temp
+        probs = F.softmax(scaled_logits, dim=-1)
+        flat_probs = probs.view(-1, probs.shape[-1])
+        flat_samples = torch.multinomial(flat_probs, 1).squeeze(-1)
+        return flat_samples.view(B, K)
+
     def _sampling(self, B, partial_A=None, partial_attrs=None,
                   fixed_edges_next=None, skip_edge_sampling=False,
                   return_attr_logits=False, start_idx=0):
@@ -596,6 +621,22 @@ class GRANv2(nn.Module):
                     node_state_in.view(-1, H), edges, edge_feat=att_edge_feat)
                 node_state_out = node_state_out.view(B, jj, -1)   # (B, jj, H)
 
+                # ---- Plan C-1: sample attrs for the K new nodes BEFORE
+                # the edge head runs, so the edge head can condition on
+                # the just-sampled attrs.
+                # When the flag is OFF this block runs in its OLD location
+                # (after edge sampling) — see further down.
+                if self.use_attr_conditioned_edge:
+                    new_attrs = self._sample_new_node_attrs(
+                        node_state_out[:, ii:jj, :], H)
+                    node_attrs[:, ii:jj] = new_attrs
+                    if return_attr_logits:
+                        # Recompute logits with the sampled attrs already
+                        # written, for consistency with the new order.
+                        new_node_feat = node_state_out[:, ii:jj, :]
+                        attr_logits_all[:, ii:jj, :] = self.output_attr(
+                            new_node_feat.reshape(-1, H)).view(B, K, -1)
+
                 # Build pairwise diffs between (new node row) and (all cols).
                 idx_row, idx_col = np.meshgrid(np.arange(ii, jj), np.arange(jj))
                 idx_row = torch.from_numpy(idx_row.reshape(-1)).long().to(self.device)
@@ -603,8 +644,30 @@ class GRANv2(nn.Module):
 
                 diff = node_state_out[:, idx_row, :] - node_state_out[:, idx_col, :]
                 diff = diff.view(-1, node_state.shape[2])
-                log_theta = self.output_theta(diff)
-                log_alpha = self.output_alpha(diff)
+
+                # ---- Plan C-1: append attr-pair embeddings to edge head ----
+                if self.use_attr_conditioned_edge:
+                    # Lookup attrs for both endpoints. Both are populated
+                    # in node_attrs already: existing rows from prior loop
+                    # iterations, new rows from the just-sampled new_attrs
+                    # written above.
+                    # node_attrs has shape (B, N_pad). idx_row/idx_col are
+                    # node positions in the (B, jj) grid. We want a 2D gather
+                    # indexed by (b, idx_row[e]) for every batch b and edge e.
+                    a_row = node_attrs[:, idx_row]                # (B, E_per_b)
+                    a_col = node_attrs[:, idx_col]                # (B, E_per_b)
+                    a_row = a_row.clamp(min=0, max=self.num_attr_classes)
+                    a_col = a_col.clamp(min=0, max=self.num_attr_classes)
+                    a_u_emb = self.attr_embedding(a_row).view(
+                        -1, self.attr_embedding_dim)
+                    a_v_emb = self.attr_embedding(a_col).view(
+                        -1, self.attr_embedding_dim)
+                    edge_in = torch.cat([diff, a_u_emb, a_v_emb], dim=-1)
+                else:
+                    edge_in = diff
+
+                log_theta = self.output_theta(edge_in)
+                log_alpha = self.output_alpha(edge_in)
 
                 log_theta = log_theta.view(B, -1, K, self.num_mix_component)
                 log_theta = log_theta.transpose(1, 2)           # (B, K, jj, L)
@@ -642,7 +705,7 @@ class GRANv2(nn.Module):
                     prob = torch.stack(prob, dim=0)             # (B, K, jj)
                     A[:, ii:jj, :jj] = torch.bernoulli(prob[:, :jj - ii, :])
 
-                # ---- attribute prediction for the new nodes --------------
+                # ---- attribute prediction (LEGACY ORDER: flag off) -------
                 # node_state_out[:, ii:jj, :] is (B, K, H); convert to class
                 # logits via output_attr, then SAMPLE from the softmax
                 # distribution (multinomial). Argmax would collapse diversity
@@ -660,23 +723,28 @@ class GRANv2(nn.Module):
                 # pre-edge-decision node_state_out (the GNN has not seen the
                 # user's fixed edges). A second GNN pass would give a more
                 # accurate logit — future work if needed.
-                new_node_feat = node_state_out[:, ii:jj, :]     # (B, K, H)
-                new_attr_logits = self.output_attr(
-                    new_node_feat.reshape(-1, H))               # (B*K, A)
-                new_attr_logits = new_attr_logits.view(B, K, -1)
+                #
+                # When use_attr_conditioned_edge=True the attrs were already
+                # sampled BEFORE the edge head ran (see top of iteration);
+                # this legacy block is gated off so it doesn't double-fire.
+                if not self.use_attr_conditioned_edge:
+                    new_node_feat = node_state_out[:, ii:jj, :]     # (B, K, H)
+                    new_attr_logits = self.output_attr(
+                        new_node_feat.reshape(-1, H))               # (B*K, A)
+                    new_attr_logits = new_attr_logits.view(B, K, -1)
 
-                temp = float(
-                    getattr(self.config.model, 'attr_temperature', 1.0) or 1.0)
-                scaled_logits = new_attr_logits / temp
-                probs = F.softmax(scaled_logits, dim=-1)        # (B, K, A)
-                # multinomial works on 2D, so flatten batch/time dims
-                flat_probs = probs.view(-1, probs.shape[-1])    # (B*K, A)
-                flat_samples = torch.multinomial(flat_probs, 1).squeeze(-1)
-                new_attrs = flat_samples.view(B, K)             # (B, K) long
+                    temp = float(
+                        getattr(self.config.model, 'attr_temperature', 1.0) or 1.0)
+                    scaled_logits = new_attr_logits / temp
+                    probs = F.softmax(scaled_logits, dim=-1)        # (B, K, A)
+                    # multinomial works on 2D, so flatten batch/time dims
+                    flat_probs = probs.view(-1, probs.shape[-1])    # (B*K, A)
+                    flat_samples = torch.multinomial(flat_probs, 1).squeeze(-1)
+                    new_attrs = flat_samples.view(B, K)             # (B, K) long
 
-                node_attrs[:, ii:jj] = new_attrs
-                if return_attr_logits:
-                    attr_logits_all[:, ii:jj, :] = new_attr_logits
+                    node_attrs[:, ii:jj] = new_attrs
+                    if return_attr_logits:
+                        attr_logits_all[:, ii:jj, :] = new_attr_logits
 
             if self.is_sym:
                 A = torch.tril(A, diagonal=-1)
