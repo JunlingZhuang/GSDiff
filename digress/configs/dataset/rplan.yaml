@@ -1,0 +1,9 @@
+name: rplan
+datadir: 'data/rplan/'
+graphs_path: '../GRAN/data/RPLAN/graphs.p'
+split_seed: 0
+train_ratio: 0.8
+val_ratio: 0.1
+max_nodes: null
+remove_h: null
+pin_memory: False
