@@ -114,7 +114,7 @@ test:
   num_vis: 20
   vis_num_row: 5
   better_vis: true
-  test_model_dir:               # set after first training run completes
+  test_model_dir: exp/GRANv2_rplan_planc/GRANv2_RPLAN_2026-Apr-23-16-52-00_38728
   test_model_name: model_best.pth
 
 # -----------------------------------------------------------------------------

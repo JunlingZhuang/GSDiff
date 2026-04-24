@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>GRAN to DiGress: Upgrade Journey</title>
+
+<style>
+body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+       max-width: 820px; margin: 40px auto; color: #222; line-height: 1.55;
+       padding: 0 24px; }
+h1 { border-bottom: 2px solid #333; padding-bottom: 6px; }
+h2 { border-bottom: 1px solid #ccc; padding-bottom: 4px; margin-top: 32px; }
+h3 { margin-top: 24px; }
+code { background: #f4f4f4; padding: 2px 5px; border-radius: 3px;
+       font-family: Consolas, Menlo, monospace; font-size: 0.92em; }
+pre { background: #f4f4f4; padding: 12px; border-radius: 4px;
+      overflow-x: auto; font-size: 0.88em; line-height: 1.4; }
+pre code { background: none; padding: 0; }
+blockquote { border-left: 4px solid #bbb; color: #555;
+             margin: 16px 0; padding: 8px 16px; background: #fafafa; }
+table { border-collapse: collapse; margin: 12px 0; font-size: 0.92em;
+        width: 100%; }
+th, td { border: 1px solid #ccc; padding: 8px 10px; text-align: left;
+         vertical-align: top; }
+th { background: #f0f0f0; }
+img { max-width: 100%; height: auto; display: block;
+      margin: 8px auto; border: 1px solid #eee; }
+a { color: #0366d6; text-decoration: none; }
+a:hover { text-decoration: underline; }
+hr { border: none; border-top: 1px solid #ddd; margin: 28px 0; }
+</style>
+
+</head><body>
+<h1 id="gran-digress-upgrade-journey">GRAN → DiGress: Upgrade Journey</h1>
+<blockquote>
+<p><strong>Background</strong>: We're trying to auto-generate "bubble diagrams" — abstractions of apartment floorplans where each room is a node (one of 7 types: Living / Bedroom / Bathroom / Kitchen / Balcony / Storage / External) and adjacent rooms are connected by an edge. Generated graphs need:
+- <strong>Structurally plausible</strong>: node count, edge count, degree distribution match real floorplans
+- <strong>Semantically plausible</strong>: typically one Living room per plan, usually the most-connected hub; small rooms (Bathroom, Balcony) appear at realistic rates</p>
+<p>Three main metric families:
+- <strong>MMD</strong> — does the structural distribution look like real data? (lower = better)
+- <strong>endpoint pair KL</strong> — does the joint distribution of "room types at the two ends of each edge" look real? (lower = better)
+- <strong>per-class room frequency</strong> — are Living/Bedroom/Bathroom etc. proportions reasonable?</p>
+</blockquote>
+<hr />
+<h2 id="1-tldr">1. TL;DR</h2>
+<p><strong>GRAN family (v2 + multiple patches): every variant trades one problem for another.</strong> Structure is learnable, but the link between "what type of room a node is" and "how it connects to other nodes" is never properly captured: either Living rooms fail to act as hubs, or small rooms collapse out of the distribution.</p>
+<p><strong>DiGress (discrete diffusion): the right direction.</strong> Node types and edge types are denoised by the same network, so structure and semantics co-evolve.</p>
+<table>
+<thead>
+<tr>
+<th>Experiment</th>
+<th>What changed</th>
+<th>One-line result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>gran_v2_rplan</code> (baseline)</td>
+<td>Vanilla GRAN v2</td>
+<td>Living-Living edges way too common (9.85% vs 0.24% real)</td>
+</tr>
+<tr>
+<td><code>gran_v2_rplan_struct</code></td>
+<td>Drop room-type loss, structure only</td>
+<td>Structure OK, but Living almost disappears (3.3%)</td>
+</tr>
+<tr>
+<td><code>gran_v2_rplan_degonly</code></td>
+<td>Add a node-degree supervision signal</td>
+<td>Type distribution drifts, Bathroom nearly gone</td>
+</tr>
+<tr>
+<td><code>gran_v2_rplan_p1</code></td>
+<td>Reweight type loss</td>
+<td>Bedroom blows up to 63% (real 36%)</td>
+</tr>
+<tr>
+<td><code>gran_v2_rplan_attrbalance</code></td>
+<td>Class-weighted type loss</td>
+<td>Worse — endpoint-pair KL up to 0.81</td>
+</tr>
+<tr>
+<td><code>gran_v2_rplan_planc</code></td>
+<td><strong>Edge head conditioned on endpoint room types</strong></td>
+<td>Living-Living edges drop sharply, but small classes collapse</td>
+</tr>
+<tr>
+<td><strong>DiGress</strong></td>
+<td>Joint denoising of nodes + edges</td>
+<td>Structure + semantics converge together</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="2-gran-runs-in-detail">2. GRAN runs in detail</h2>
+<h3 id="21-baseline-gran_v2_rplan">2.1 Baseline (<code>gran_v2_rplan</code>)</h3>
+<p><strong>What we did</strong>: Standard GRAN v2 — generate one node at a time. For each new node, jointly predict (a) its room type and (b) which earlier nodes to connect to.</p>
+<p><strong>Result</strong>:
+- Structural MMD is fine; node/edge count distributions look real
+- <strong>Problem</strong>: Living-Living edges occur in <strong>9.85%</strong> of all edges (real: 0.24%). The model frequently produces floorplans with two Living rooms next to each other, which is unrealistic.</p>
+<table>
+<thead>
+<tr>
+<th>Reference</th>
+<th>Generated</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><img alt="ref" src="file:///D:/Github/GSDiff/GRAN/exp/GRANv2_rplan/GRANv2_RPLAN_2026-Apr-20-15-43-48_24504/vis/ref_grid.png" /></td>
+<td><img alt="gen" src="file:///D:/Github/GSDiff/GRAN/exp/GRANv2_rplan/GRANv2_RPLAN_2026-Apr-20-15-43-48_24504/vis/gen_grid.png" /></td>
+</tr>
+</tbody>
+</table>
+<h3 id="22-struct-only-gran_v2_rplan_struct">2.2 Struct-only (<code>gran_v2_rplan_struct</code>)</h3>
+<p><strong>What we did</strong>: Drop the room-type loss entirely; learn only the connectivity, to see whether structure can be learned cleanly on its own.</p>
+<p><strong>Result</strong>: Connections look reasonable, but with no type supervision the model defaults most nodes to Bedroom. Living drops to 3.3% — effectively a "draws walls but can't label rooms" model.</p>
+<p><img alt="struct gen" src="file:///D:/Github/GSDiff/GRAN/exp/GRANv2_rplan_struct/GRANv2_RPLAN_2026-Apr-21-14-24-30_50908/vis/gen_grid.png" /></p>
+<h3 id="23-plan-1-plan-a-degree-only">2.3 Plan-1 / Plan A / Degree-only</h3>
+<p>Three independent attempts, each targeting one symptom:</p>
+<ul>
+<li><strong><code>p1</code></strong> (raise the room-type loss weight): the model collapses uncertain nodes into Bedroom → <strong>Bedroom = 63%</strong> (real 36%)</li>
+<li><strong><code>attrbalance</code></strong> (class-weighted type loss to boost rare rooms): backfires — endpoint-pair KL <strong>rises to 0.81</strong></li>
+<li><strong><code>degonly</code></strong> (extra supervision on each node's degree): Balcony gets close to real (19% vs 14.7%), but Bathroom collapses to 0.5%</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>p1</th>
+<th>attrbalance</th>
+<th>degonly</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><img alt="" src="file:///D:/Github/GSDiff/GRAN/exp/GRANv2_rplan_p1/GRANv2_RPLAN_2026-Apr-21-18-17-38_41540/vis/gen_grid.png" /></td>
+<td><img alt="" src="file:///D:/Github/GSDiff/GRAN/exp/GRANv2_rplan_attrbalance/GRANv2_RPLAN_2026-Apr-22-14-13-40_28764/vis/gen_grid.png" /></td>
+<td><img alt="" src="file:///D:/Github/GSDiff/GRAN/exp/GRANv2_rplan_degonly/GRANv2_RPLAN_2026-Apr-21-16-58-16_53732/vis/gen_grid.png" /></td>
+</tr>
+</tbody>
+</table>
+<h3 id="24-plan-c-1-edge-head-sees-endpoint-room-types-the-deepest-attempt">2.4 Plan C-1: Edge head sees endpoint room types (the deepest attempt)</h3>
+<p><strong>What we did</strong>: Originally, when the model decides whether two nodes should be connected, it only looks at their hidden vectors. Plan C <strong>also feeds in the room-type embedding for both endpoints</strong> — telling the edge predictor "endpoint A is Living, endpoint B is Bedroom — now decide if they connect."</p>
+<p><strong>Partial wins</strong>:
+- Living-Living edge ratio <strong>9.85% → 4.75%</strong> ✅ (closer to real 0.24%)
+- KL of "how many Living rooms per graph" distribution <strong>1.40 → 0.53</strong> ✅ (closer to real, where there's basically always exactly one Living)</p>
+<p><strong>New problem</strong>: The edge predictor learns a shortcut — "I'm not confident about Bathroom/Balcony combinations, so just generate fewer of them." Result: <strong>Bathroom = 2.0% (real 18%), Balcony = 1.3% (real 14.7%)</strong> — class collapse.</p>
+<p><img alt="planc gen" src="file:///D:/Github/GSDiff/GRAN/exp/GRANv2_rplan_planc/GRANv2_RPLAN_2026-Apr-23-16-52-00_38728/vis/gen_grid.png" /></p>
+<hr />
+<h2 id="3-why-gran-cant-get-there">3. Why GRAN can't get there</h2>
+<p>GRAN is <strong>autoregressive + two-headed</strong>:</p>
+<pre><code>current node → GNN → hidden h
+                      ├── edge head → who to connect
+                      └── type head → what room type
+</code></pre>
+<p>The two heads <strong>don't see each other's predictions</strong>; training just sums their losses. "Joint" only happens at the <strong>loss level</strong> — at the <strong>model level the two are decoupled</strong>. Plan C-1 wired up the type → edge direction, fixing one half:</p>
+<ul>
+<li>Edge side learned "Livings shouldn't be adjacent" ✅</li>
+<li>Type side never learned "preserve rare rooms" ❌</li>
+<li>The model converged to a <strong>"sacrifice room diversity to satisfy structural constraints"</strong> local optimum</li>
+</ul>
+<hr />
+<h2 id="4-digress-is-the-answer">4. DiGress is the answer</h2>
+<p><strong>Architecture in brief</strong>:</p>
+<ul>
+<li><strong>Generative model</strong>: discrete diffusion (D3PM). Forward process gradually corrupts node-type and edge-type categories over <code>T = 500</code> steps using <strong>marginal</strong> transitions (cosine schedule). Reverse process: a network takes noisy <code>(X_t, E_t)</code> and predicts clean categories <code>(X_0, E_0)</code>; sampling iterates this in parallel over all nodes and edges.</li>
+<li><strong>Backbone</strong>: 5-layer <strong>Graph Transformer</strong>. Each layer maintains three feature streams — node <code>X</code>, edge <code>E</code>, global <code>y</code> — and updates them jointly: node attention is gated by edge features, edge updates are modulated by node interactions, <code>y</code> aggregates from both. This is the key difference from GRAN: <strong>nodes and edges condition each other inside every layer</strong>, not just at the loss.</li>
+<li><strong>Extra features</strong> (<code>extra_features: all</code>): cycle counts (3–6) per node + Laplacian spectral features are concatenated into the inputs each step, so the network doesn't have to relearn them from scratch.</li>
+<li><strong>Training on RPLAN</strong>: 200 epochs, batch 128, AdamW lr 2e-4, hidden dims <code>dx=256, de=64</code>, 8 heads.</li>
+</ul>
+<p><strong>Why this beats GRAN</strong>: node-type prediction sees the current edge state, and edge prediction sees the current node types — true bidirectional coupling at every step, not just two heads sharing a loss.</p>
+<p>Current DiGress run on RPLAN (<code>outputs/2026-04-23/21-11-23-rplan</code>):</p>
+<p>Training curves (converged):</p>
+<p><img alt="digress training" src="file:///D:/Github/GSDiff/digress/outputs/2026-04-23/21-11-23-rplan/training_curves.png" /></p>
+<p>Sample grid at epoch 199 (structure + semantics both closer to real than any GRAN variant):</p>
+<p><img alt="digress samples" src="file:///D:/Github/GSDiff/digress/outputs/2026-04-23/21-11-23-rplan/test_samples/samples_grid.png" /></p>
+<hr />
+<h2 id="5-next-steps">5. Next steps</h2>
+<p>Pivot to <strong>MSD (Modified Swiss Dwellings, ECCV 2024)</strong> — multi-apartment building complexes, much larger and more diverse graphs than RPLAN — with an upgraded DiGress. Detailed plan in <a href="./absorbing_d3pm_msd_plan.md"><code>docs/absorbing_d3pm_msd_plan.md</code></a>. Three core upgrades:</p>
+<ul>
+<li>
+<p><strong>Absorbing D3PM</strong>: change the noising process from "marginal" to "absorbing." In current DiGress, the forward process replaces a node/edge category with another category drawn from the dataset marginal. In <strong>absorbing</strong> D3PM, the forward process instead replaces it with a special <code>[MASK]</code> token — once a position becomes <code>[MASK]</code>, it stays <code>[MASK]</code> until the reverse process unmasks it. This is mathematically equivalent to BERT-style masked modeling on graphs, which means one trained model handles three tasks just by varying which positions are pre-masked at inference: (A) all masked → unconditional generation; (B) some nodes/edges given, rest masked → partial-graph completion; (C) almost everything given, one node masked → attribute prediction. No separate heads, no post-hoc hacks.</p>
+<p><em>Why not just do partial completion with vanilla (marginal) DiGress?</em> It <strong>is</strong> possible via <strong>RePaint</strong> (Lugmayr et al., CVPR 2022) — a technique originally for image inpainting. At each reverse step, the known region is re-noised to the current timestep and pasted over the model's prediction, so only the unknown region actually uses the model's output; a periodic "jump-back + resample" harmonizes the boundary. DiGress Appendix D.1 adapts this for graphs. The problem: the model was trained only on "all-noise → clean," so at inference time we're feeding it a "partially-known + partially-noise" input that's out-of-distribution, and quality depends on tuning jump-length / resample-count. Absorbing D3PM sidesteps this entirely — the training objective at each timestep already <strong>is</strong> "given some known positions and some <code>[MASK]</code> positions, predict the <code>[MASK]</code> ones," so partial completion is a native training-distribution task, not an inference-time workaround. (The training set itself doesn't change; the forward noising process, by masking each position independently with probability <code>β̄_t</code>, naturally produces inputs with every mask ratio from 0% to 100% across training steps — same trick as BERT's random-15%-mask, just swept over all ratios.)</p>
+</li>
+<li>
+<p><strong>Graphormer centrality encoding</strong>: a node-feature add-on borrowed from the Graphormer paper (NeurIPS 2021). For each node, compute (i) its <strong>degree</strong> (number of edges it has) and (ii) its <strong>eigenvector centrality</strong> (a graph-theoretic "importance" score, high for nodes connected to other important nodes). Both are turned into learnable embeddings and concatenated to the node features before the transformer. This bakes in the "Living room is the hub" prior — the network is told upfront which nodes are central.</p>
+</li>
+<li>
+<p><strong>MaskGIT-style parallel decoding</strong>: a faster sampler from MaskGIT (CVPR 2022). Standard D3PM does 500 sequential reverse steps, unmasking everything every step. MaskGIT instead runs ~10–20 steps; each step (i) predicts categories at all currently-masked positions, (ii) keeps only the <strong>top-k most confident</strong> predictions and commits them, (iii) leaves the less-confident positions masked for the next step. Result: ~30× fewer steps with comparable or better quality, because the easy decisions get locked in early and the network can focus capacity on the hard ones.</p>
+</li>
+</ul>
+</body></html>

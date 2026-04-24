@@ -10,6 +10,7 @@ __pycache__/
 .uv-cache/
 
 # Pretrained model weights
+outputs/
 scripts/outputs/
 GRAN/snapshot_model/
 GRAN/*.pth
