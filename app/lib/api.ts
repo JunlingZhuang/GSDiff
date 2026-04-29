@@ -1,4 +1,16 @@
+import type { DatasetId } from './constants';
+import type { GraphGenerationResponse, ModelStatusResponse } from './types';
+
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
+async function readError(res: Response, fallback: string): Promise<Error> {
+  try {
+    const body = await res.json();
+    return new Error(body.detail || fallback);
+  } catch {
+    return new Error(fallback);
+  }
+}
 
 export async function generateUnconstrained(): Promise<{ image: string; rooms?: number }> {
   const res = await fetch(`${API_BASE}/api/generate/unconstrained`, {
@@ -6,7 +18,28 @@ export async function generateUnconstrained(): Promise<{ image: string; rooms?: 
     headers: { 'Content-Type': 'application/json' },
     signal: AbortSignal.timeout(120000),
   });
-  if (!res.ok) throw new Error('Generation failed');
+  if (!res.ok) throw await readError(res, 'Generation failed');
+  return res.json();
+}
+
+export async function generateGraph(dataset: DatasetId): Promise<GraphGenerationResponse> {
+  const res = await fetch(`${API_BASE}/api/generate/graph`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ dataset, num_samples: 1 }),
+    signal: AbortSignal.timeout(180000),
+  });
+  if (!res.ok) throw await readError(res, 'Graph generation failed');
+  return res.json();
+}
+
+export async function getModelStatus(): Promise<ModelStatusResponse> {
+  const res = await fetch(`${API_BASE}/api/models/status`, {
+    method: 'GET',
+    headers: { 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!res.ok) throw await readError(res, 'Failed to load model status');
   return res.json();
 }
 
@@ -20,7 +53,7 @@ export async function generateTopology(
     body: JSON.stringify({ rooms, adjacency }),
     signal: AbortSignal.timeout(120000),
   });
-  if (!res.ok) throw new Error('Generation failed');
+  if (!res.ok) throw await readError(res, 'Generation failed');
   return res.json();
 }
 
@@ -31,6 +64,6 @@ export async function generateBoundary(boundaryImage: string): Promise<{ image: 
     body: JSON.stringify({ boundary_image: boundaryImage }),
     signal: AbortSignal.timeout(120000),
   });
-  if (!res.ok) throw new Error('Generation failed');
+  if (!res.ok) throw await readError(res, 'Generation failed');
   return res.json();
 }

@@ -15,28 +15,35 @@ function RoomNodeComponent({ data, selected }: NodeProps) {
   const roomType = ROOM_TYPES[nodeData.roomTypeId];
   if (!roomType) return null;
 
-  const handleStyle = "!w-3 !h-3 !bg-muted-foreground/60 !border-2 !border-background hover:!bg-foreground transition-colors";
+  const handleStyle =
+    '!h-4 !w-4 !border-2 !border-background !bg-foreground/55 !opacity-0 transition-opacity group-hover:!opacity-80';
 
   return (
-    <>
-      {/* Each position has both source and target handles for bidirectional connections */}
-      <Handle type="source" position={Position.Top} id="top-src" className={handleStyle} isConnectable />
-      <Handle type="target" position={Position.Top} id="top-tgt" className={handleStyle} isConnectable />
-      <Handle type="source" position={Position.Bottom} id="bottom-src" className={handleStyle} isConnectable />
-      <Handle type="target" position={Position.Bottom} id="bottom-tgt" className={handleStyle} isConnectable />
-      <Handle type="source" position={Position.Left} id="left-src" className={handleStyle} isConnectable />
-      <Handle type="target" position={Position.Left} id="left-tgt" className={handleStyle} isConnectable />
-      <Handle type="source" position={Position.Right} id="right-src" className={handleStyle} isConnectable />
-      <Handle type="target" position={Position.Right} id="right-tgt" className={handleStyle} isConnectable />
+    <div className="group relative">
+      {/* A full-bubble invisible handle keeps topology editing unconstrained. */}
+      <Handle
+        type="source"
+        position={Position.Right}
+        id="room-handle"
+        className={handleStyle}
+        isConnectable
+      />
+      <Handle
+        type="target"
+        position={Position.Left}
+        id="room-target"
+        className={handleStyle}
+        isConnectable
+      />
 
       <div
-        className="flex h-16 w-16 items-center justify-center rounded-full border-2 shadow-sm transition-all duration-150 cursor-grab active:cursor-grabbing"
+        className="flex h-16 w-16 items-center justify-center rounded-full border-2 transition-all duration-150 cursor-grab active:cursor-grabbing"
         style={{
           backgroundColor: roomType.color,
-          borderColor: selected ? 'oklch(0.205 0 0)' : 'transparent',
+          borderColor: selected ? 'oklch(0.205 0 0)' : 'oklch(0.2 0 0 / 0.18)',
           boxShadow: selected
-            ? '0 0 0 3px oklch(0.205 0 0 / 0.15)'
-            : '0 1px 3px rgba(0,0,0,0.08)',
+            ? '0 0 0 3px oklch(0.205 0 0 / 0.16)'
+            : 'none',
         }}
       >
         <span
@@ -44,9 +51,9 @@ function RoomNodeComponent({ data, selected }: NodeProps) {
           style={{ color: roomType.textColor }}
         >
           {nodeData.label}
-        </span>
+          </span>
       </div>
-    </>
+    </div>
   );
 }
 

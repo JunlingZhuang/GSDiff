@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useMemo } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import {
   ReactFlow,
   useNodesState,
@@ -9,25 +9,31 @@ import {
   Controls,
   Background,
   BackgroundVariant,
+  ConnectionMode,
   type Connection,
   type Node,
   type Edge,
 } from '@xyflow/react';
-import { Share2, Trash2, Plus } from 'lucide-react';
+import { Share2, Trash2, Plus, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { RoomNode, type RoomNodeData } from '@/components/RoomNode';
 import { ROOM_TYPES, MIN_ROOMS, MAX_ROOMS } from '@/lib/constants';
+import { flowToTopology, graphToFlow } from '@/lib/graph-flow';
+import type { GeneratedGraph } from '@/lib/types';
 
 interface Props {
   onGenerate: (rooms: number[], adjacency: number[][]) => void;
+  onSampleGraph: () => Promise<GeneratedGraph | null>;
+  datasetName: string;
   loading: boolean;
 }
 
 const nodeTypes = { room: RoomNode };
 
-export function TopologyEditor({ onGenerate, loading }: Props) {
+export function TopologyEditor({ onGenerate, onSampleGraph, datasetName, loading }: Props) {
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
+  const [samplingGraph, setSamplingGraph] = useState(false);
 
   const onConnect = useCallback(
     (connection: Connection) => {
@@ -42,7 +48,10 @@ export function TopologyEditor({ onGenerate, loading }: Props) {
         addEdge(
           {
             ...connection,
-            style: { stroke: 'oklch(0.439 0 0)', strokeWidth: 2 },
+            type: 'straight',
+            sourceHandle: connection.sourceHandle ?? 'room-handle',
+            targetHandle: connection.targetHandle ?? 'room-target',
+            style: { stroke: 'oklch(0.439 0 0)', strokeWidth: 1.75 },
           },
           eds
         )
@@ -93,28 +102,21 @@ export function TopologyEditor({ onGenerate, loading }: Props) {
     setEdges([]);
   }, [setNodes, setEdges]);
 
-  const handleGenerate = useCallback(() => {
-    // Build room type array and adjacency matrix from React Flow state
-    const nodeIds = nodes.map((n) => n.id);
-    const nodeIndexMap = new Map(nodeIds.map((id, i) => [id, i]));
-    const rooms = nodes.map(
-      (n) => (n.data as unknown as RoomNodeData).roomTypeId
-    );
-
-    const n = rooms.length;
-    const adjacency: number[][] = Array.from({ length: n }, () =>
-      Array(n).fill(0)
-    );
-
-    for (const edge of edges) {
-      const i = nodeIndexMap.get(edge.source);
-      const j = nodeIndexMap.get(edge.target);
-      if (i !== undefined && j !== undefined) {
-        adjacency[i][j] = 1;
-        adjacency[j][i] = 1;
-      }
+  const handleSampleGraph = useCallback(async () => {
+    setSamplingGraph(true);
+    try {
+      const graph = await onSampleGraph();
+      if (!graph) return;
+      const flow = graphToFlow(graph);
+      setNodes(flow.nodes);
+      setEdges(flow.edges);
+    } finally {
+      setSamplingGraph(false);
     }
+  }, [onSampleGraph, setEdges, setNodes]);
 
+  const handleGenerate = useCallback(() => {
+    const { rooms, adjacency } = flowToTopology(nodes, edges);
     onGenerate(rooms, adjacency);
   }, [nodes, edges, onGenerate]);
 
@@ -133,14 +135,28 @@ export function TopologyEditor({ onGenerate, loading }: Props) {
           <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
             Add Rooms ({nodes.length}/{MAX_ROOMS})
           </p>
-          {nodes.length > 0 && (
+          <div className="flex items-center gap-3">
             <button
-              onClick={clearAll}
-              className="text-[11px] text-muted-foreground hover:text-destructive transition-colors"
+              onClick={handleSampleGraph}
+              disabled={loading || samplingGraph}
+              className="inline-flex items-center gap-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
             >
-              Clear all
+              {samplingGraph ? (
+                <span className="h-3 w-3 animate-spin rounded-full border-2 border-muted-foreground/30 border-t-muted-foreground" />
+              ) : (
+                <Sparkles className="h-3 w-3" />
+              )}
+              Sample {datasetName} graph
             </button>
-          )}
+            {nodes.length > 0 && (
+              <button
+                onClick={clearAll}
+                className="text-[11px] text-muted-foreground hover:text-destructive transition-colors"
+              >
+                Clear all
+              </button>
+            )}
+          </div>
         </div>
         <div className="flex flex-wrap gap-1.5">
           {ROOM_TYPES.map((rt) => (
@@ -181,6 +197,7 @@ export function TopologyEditor({ onGenerate, loading }: Props) {
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}
           nodeTypes={nodeTypes}
+          connectionMode={ConnectionMode.Loose}
           fitView
           deleteKeyCode={['Backspace', 'Delete']}
           className="bg-muted/30"
@@ -223,7 +240,7 @@ export function TopologyEditor({ onGenerate, loading }: Props) {
         )}
         <Button
           onClick={handleGenerate}
-          disabled={!canGenerate}
+          disabled={!canGenerate || samplingGraph}
           className="w-full h-10 text-sm font-medium"
           size="lg"
         >

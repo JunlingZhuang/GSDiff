@@ -9,6 +9,23 @@ export const ROOM_TYPES = [
 
 export type RoomType = (typeof ROOM_TYPES)[number];
 
+export const DATASETS = [
+  {
+    id: 'rplan',
+    name: 'RPLAN',
+    description: 'Residential floorplan graphs',
+    enabled: true,
+  },
+  {
+    id: 'msd',
+    name: 'MSD',
+    description: 'Coming later',
+    enabled: false,
+  },
+] as const;
+
+export type DatasetId = (typeof DATASETS)[number]['id'];
+
 export const MIN_ROOMS = 4;
 export const MAX_ROOMS = 8;
 
@@ -18,6 +35,12 @@ export const GENERATION_MODES = [
     name: 'Unconstrained',
     description: 'Generate a random floorplan from scratch',
     icon: 'Sparkles',
+  },
+  {
+    id: 'graph' as const,
+    name: 'Graph',
+    description: 'Sample a room graph before floorplan generation',
+    icon: 'Network',
   },
   {
     id: 'topology' as const,

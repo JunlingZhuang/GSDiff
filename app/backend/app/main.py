@@ -5,11 +5,13 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
 from app.services.model_manager import manager
 from app.routers.generate import router as generate_router
+from app.routers.models import router as models_router
 
 
 @asynccontextmanager
@@ -31,8 +33,14 @@ app.add_middleware(
 )
 
 app.include_router(generate_router)
+app.include_router(models_router)
 
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/doc", include_in_schema=False)
+def doc_alias():
+    return RedirectResponse(url="/docs")

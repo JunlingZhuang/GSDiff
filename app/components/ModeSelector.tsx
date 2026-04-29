@@ -1,11 +1,12 @@
 'use client';
 
-import { Sparkles, Share2, PenTool } from 'lucide-react';
+import { Sparkles, Share2, PenTool, Network } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { GENERATION_MODES, type GenerationMode } from '@/lib/constants';
 
 const iconMap = {
   Sparkles,
+  Network,
   Share2,
   PenTool,
 } as const;
