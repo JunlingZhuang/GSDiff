@@ -1,4 +1,5 @@
-import type { GenerationMode } from './constants';
+import type { DatasetId, GenerationMode } from './constants';
+import type { HistoryItem as NewHistoryItem } from './history';
 
 export interface HistoryItem {
   id: number;
@@ -35,6 +36,8 @@ export interface GraphGenerationResponse {
   checkpoint: string;
   inference_seconds: number;
   graphs: GeneratedGraph[];
+  room_types: string[];
+  edge_types: string[];
 }
 
 export type ModelLoadState = 'not_loaded' | 'loading' | 'loaded' | 'error';
@@ -58,4 +61,25 @@ export interface ModelStatusResponse {
     reserved_mb: number;
   } | null;
   models: ModelStatusItem[];
+}
+
+export interface TopologyDraft {
+  graph: GeneratedGraph;
+}
+
+export interface BoundaryDraft {
+  canvasDataUrl: string;
+}
+
+export interface PageState {
+  selectedDataset: DatasetId;
+  activeMode: GenerationMode;
+  history: NewHistoryItem[];
+  selectedHistoryId: string | null;
+  modeDrafts: {
+    topology?: TopologyDraft;
+    boundary?: BoundaryDraft;
+  };
+  loading: boolean;
+  error: string | null;
 }
