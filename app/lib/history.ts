@@ -21,17 +21,11 @@ export interface FloorplanHistoryItem {
 
 export type HistoryItem = GraphHistoryItem | FloorplanHistoryItem;
 
-const HISTORY_CAP = 30;
-
-let nextId = 0;
-function makeId(prefix: string): string {
-  nextId += 1;
-  return `${prefix}-${Date.now()}-${nextId}`;
-}
+export const HISTORY_CAP = 30;
 
 export function createGraphItem(dataset: DatasetId, graph: GeneratedGraph): GraphHistoryItem {
   return {
-    id: makeId('g'),
+    id: `g-${crypto.randomUUID()}`,
     kind: 'graph',
     dataset,
     graph,
@@ -46,7 +40,7 @@ export function createFloorplanItem(
   sourceGraphId?: string,
 ): FloorplanHistoryItem {
   return {
-    id: makeId('f'),
+    id: `f-${crypto.randomUUID()}`,
     kind: 'floorplan',
     dataset,
     image,
@@ -57,7 +51,7 @@ export function createFloorplanItem(
 }
 
 /** Prepend a new item; cap to the most recent HISTORY_CAP items. */
-export function appendHistory(prev: HistoryItem[], item: HistoryItem): HistoryItem[] {
+export function prependHistory(prev: HistoryItem[], item: HistoryItem): HistoryItem[] {
   return [item, ...prev].slice(0, HISTORY_CAP);
 }
 
