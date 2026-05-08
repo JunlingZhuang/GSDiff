@@ -23,6 +23,22 @@ import {
   type HistoryItem,
   type GraphHistoryItem,
 } from '@/lib/history';
+import type { GeneratedGraph } from '@/lib/types';
+
+// ---------------------------------------------------------------------------
+// Helper: build an adjacency matrix from a GeneratedGraph's edges.
+// The editor does not compute adjacency eagerly, so we derive it here before
+// passing to the topology generation API.
+// ---------------------------------------------------------------------------
+function computeAdjacency(g: GeneratedGraph): number[][] {
+  const n = g.nodes.length;
+  const adj: number[][] = Array.from({ length: n }, () => Array(n).fill(0));
+  for (const e of g.edges) {
+    adj[e.source][e.target] = 1;
+    adj[e.target][e.source] = 1;
+  }
+  return adj;
+}
 
 export default function Home() {
   const [activeMode, setActiveMode] = useState<GenerationMode>('unconstrained');
@@ -31,6 +47,7 @@ export default function Home() {
   const [selectedHistoryId, setSelectedHistoryId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [topologyDraft, setTopologyDraft] = useState<GeneratedGraph | undefined>(undefined);
 
   const selectedDatasetMeta = DATASETS.find((dataset) => dataset.id === selectedDataset) ?? DATASETS[0];
   const selectedItem = findHistoryItem(history, selectedHistoryId);
@@ -82,6 +99,26 @@ export default function Home() {
     }
   }, [selectedDataset]);
 
+  const handleGenerateFloorplanFromTopology = useCallback(async () => {
+    if (!topologyDraft) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const adjacency =
+        topologyDraft.adjacency.length > 0
+          ? topologyDraft.adjacency
+          : computeAdjacency(topologyDraft);
+      const res = await generateTopology(topologyDraft.rooms, adjacency);
+      const item = createFloorplanItem(selectedDataset, res.image, 'topology');
+      setHistory((prev) => prependHistory(prev, item));
+      setSelectedHistoryId(item.id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Generation failed');
+    } finally {
+      setLoading(false);
+    }
+  }, [topologyDraft, selectedDataset]);
+
   return (
     <div className="flex h-full flex-col">
       <Header />
@@ -102,7 +139,7 @@ export default function Home() {
             )}
             {activeMode === 'topology' && (
               <div className="rounded-xl border border-border/70 bg-background p-3 text-xs text-muted-foreground">
-                Topology editor will move into the right workspace (Task 9).
+                Edit the bubble graph in the workspace. Click empty space to add a room, drag from a node&apos;s edge to connect, right-click an edge to delete. Ctrl+Z/Y to undo/redo.
               </div>
             )}
             {activeMode === 'boundary' && (
@@ -119,8 +156,13 @@ export default function Home() {
               onClick={() => {
                 if (activeMode === 'unconstrained') handleUnconstrained();
                 else if (activeMode === 'graph') handleSampleGraph();
+                else if (activeMode === 'topology') handleGenerateFloorplanFromTopology();
               }}
-              disabled={activeMode !== 'unconstrained' && activeMode !== 'graph'}
+              disabled={
+                activeMode !== 'unconstrained' &&
+                activeMode !== 'graph' &&
+                !(activeMode === 'topology' && topologyDraft !== undefined)
+              }
             />
           </div>
         </aside>
@@ -132,6 +174,9 @@ export default function Home() {
             selectedItem={selectedItem}
             loading={loading}
             error={error}
+            dataset={selectedDataset}
+            topologyDraft={topologyDraft}
+            onTopologyChange={setTopologyDraft}
           />
 
           <HistoryBar

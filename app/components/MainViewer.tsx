@@ -2,17 +2,45 @@
 
 import { ImageIcon, Network } from 'lucide-react';
 import { BubbleGraphCanvas } from '@/components/bubble-graph/BubbleGraphCanvas';
-import type { GenerationMode } from '@/lib/constants';
+import { TopologyEditor } from '@/components/TopologyEditor';
+import type { DatasetId, GenerationMode } from '@/lib/constants';
 import type { HistoryItem } from '@/lib/history';
+import type { GeneratedGraph } from '@/lib/types';
 
 interface Props {
   mode: GenerationMode;
   selectedItem: HistoryItem | undefined;
   loading: boolean;
   error: string | null;
+  dataset: DatasetId;
+  topologyDraft?: GeneratedGraph;
+  onTopologyChange?: (g: GeneratedGraph) => void;
 }
 
-export function MainViewer({ mode, selectedItem, loading, error }: Props) {
+export function MainViewer({
+  mode,
+  selectedItem,
+  loading,
+  error,
+  dataset,
+  topologyDraft,
+  onTopologyChange,
+}: Props) {
+  // Topology mode: always render the editor regardless of selectedItem
+  if (mode === 'topology') {
+    return (
+      <div className="flex flex-1 items-center justify-center overflow-hidden bg-background p-6">
+        <div className="h-full w-full max-w-[1200px]">
+          <TopologyEditor
+            dataset={dataset}
+            initialGraph={topologyDraft}
+            onGraphChange={onTopologyChange ?? (() => {})}
+          />
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-1 items-center justify-center overflow-hidden bg-background p-6">
       <div className="flex h-full w-full max-w-[1200px] items-center justify-center">
