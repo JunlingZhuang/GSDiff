@@ -1,0 +1,42 @@
+# @package _global_
+general:
+    name: 'msd_wall'
+    gpus: 1
+    strategy: 'auto'
+    matmul_precision: 'high'
+    wandb: 'disabled'
+    check_val_every_n_epochs: 10
+    sample_every_val: 2
+    samples_to_generate: 16
+    samples_to_save: 8
+    chains_to_save: 0
+    final_model_samples_to_generate: 128
+    final_model_samples_to_save: 32
+    final_model_chains_to_save: 0
+train:
+    n_epochs: 200
+    batch_size: 8
+    lr: 0.0001
+    weight_decay: 1e-12
+    clip_grad: null
+    ema_decay: 0
+    num_workers: 0
+    num_sanity_val_steps: 0
+    save_model: True
+model:
+    transition: 'marginal'
+    diffusion_steps: 500
+    n_layers: 5
+    lambda_train: [2, 0]
+    extra_features: 'all'
+    hidden_mlp_dims: {'X': 128, 'E': 64, 'y': 128}
+    hidden_dims: {'dx': 256, 'de': 64, 'dy': 64, 'n_head': 8, 'dim_ffX': 256, 'dim_ffE': 64, 'dim_ffy': 256}
+test:
+    checkpoint: 'outputs/2026-05-05/13-58-49-msd_wall_v5/checkpoints/msd_wall_v5/best.ckpt'
+    out_dir: null
+    num_samples: 32
+    batch_size: 8
+    num_nodes: null
+    grid_samples: 24
+    grid_cols: 4
+    device: 'auto'
