@@ -13,6 +13,8 @@ import {
   generateTopology,
 } from '@/lib/api';
 import { DATASETS, type DatasetId, type GenerationMode } from '@/lib/constants';
+import { Button } from '@/components/ui/button';
+import { HistoryBar } from '@/components/HistoryBar';
 import {
   prependHistory,
   createGraphItem,
@@ -132,25 +134,17 @@ export default function Home() {
             error={error}
           />
 
-          {/* Send to Floorplan — shown when a graph item is selected */}
-          {selectedItem?.kind === 'graph' && (
-            <div className="border-t border-border/60 bg-card px-4 py-3">
-              <button
-                onClick={() => handleSendGraphToFloorplan(selectedItem)}
-                disabled={loading}
-                className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:pointer-events-none disabled:opacity-50"
-              >
+          <HistoryBar
+            items={history}
+            selectedId={selectedHistoryId}
+            onSelect={setSelectedHistoryId}
+            onClear={() => { setHistory([]); setSelectedHistoryId(null); }}
+            rightSlot={selectedItem?.kind === 'graph' ? (
+              <Button onClick={() => handleSendGraphToFloorplan(selectedItem)} disabled={loading} size="sm">
                 Send to Floorplan
-              </button>
-            </div>
-          )}
-
-          {/* History bar placeholder — wired up in Task 7 */}
-          {history.length > 0 && (
-            <div className="border-t border-border/60 bg-card px-4 py-2 text-xs text-muted-foreground">
-              History: {history.length} item(s) — bar wired up in Task 7
-            </div>
-          )}
+              </Button>
+            ) : null}
+          />
         </div>
       </div>
     </div>
