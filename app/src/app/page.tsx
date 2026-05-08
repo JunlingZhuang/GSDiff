@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Header } from '@/components/Header';
 import { ModeSelector } from '@/components/ModeSelector';
 import { DatasetSelector } from '@/components/DatasetSelector';
@@ -27,6 +27,32 @@ import {
 import type { GeneratedGraph } from '@/lib/types';
 
 // ---------------------------------------------------------------------------
+// useSessionState — persists state in sessionStorage so drafts survive
+// page reloads within the same browser tab.  Guarded against SSR (Next.js
+// server render) and private-browsing / quota failures.
+// ---------------------------------------------------------------------------
+function useSessionState<T>(key: string, initial: T): [T, (v: T) => void] {
+  const [value, setValue] = useState<T>(() => {
+    if (typeof window === 'undefined') return initial;
+    try {
+      const raw = window.sessionStorage.getItem(key);
+      return raw ? (JSON.parse(raw) as T) : initial;
+    } catch {
+      return initial;
+    }
+  });
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      window.sessionStorage.setItem(key, JSON.stringify(value));
+    } catch {
+      // quota exceeded or private browsing — silently ignore
+    }
+  }, [key, value]);
+  return [value, setValue];
+}
+
+// ---------------------------------------------------------------------------
 // Helper: build an adjacency matrix from a GeneratedGraph's edges.
 // The editor does not compute adjacency eagerly, so we derive it here before
 // passing to the topology generation API.
@@ -48,8 +74,9 @@ export default function Home() {
   const [selectedHistoryId, setSelectedHistoryId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [topologyDraft, setTopologyDraft] = useState<GeneratedGraph | undefined>(undefined);
-  const [boundaryDraft, setBoundaryDraft] = useState<string>('');
+  const [topologyDraft, setTopologyDraft] = useSessionState<GeneratedGraph | undefined>('topologyDraft', undefined);
+  const [boundaryDraft, setBoundaryDraft] = useSessionState<string>('boundaryDraft', '');
+  const [toast, setToast] = useState<string | null>(null);
 
   const selectedDatasetMeta = DATASETS.find((dataset) => dataset.id === selectedDataset) ?? DATASETS[0];
   const selectedItem = findHistoryItem(history, selectedHistoryId);
@@ -121,6 +148,31 @@ export default function Home() {
     }
   }, [topologyDraft, selectedDataset]);
 
+  const handleSelectHistory = useCallback((id: string) => {
+    const item = findHistoryItem(history, id);
+    if (!item) return;
+    // Auto-switch to a viewer mode that can render this item.
+    // Rules per spec §6.4 and §6.2:
+    //   • graph item → must be in Graph mode to see it
+    //   • floorplan item while in Graph mode → switch to Unconstrained (no editor there)
+    //   • floorplan item in Topology/Boundary mode → switch to Unconstrained
+    //     (the editor occupies the main viewer in those modes, so the floorplan can't display)
+    let nextMode: GenerationMode = activeMode;
+    if (item.kind === 'graph' && activeMode !== 'graph') {
+      nextMode = 'graph';
+    } else if (item.kind === 'floorplan' && activeMode === 'graph') {
+      nextMode = 'unconstrained';
+    } else if (item.kind === 'floorplan' && (activeMode === 'topology' || activeMode === 'boundary')) {
+      nextMode = 'unconstrained';
+    }
+    if (nextMode !== activeMode) {
+      setActiveMode(nextMode);
+      setToast(`Switched to ${nextMode} mode to view this item`);
+      setTimeout(() => setToast(null), 3000);
+    }
+    setSelectedHistoryId(id);
+  }, [activeMode, history]);
+
   const handleGenerateFloorplanFromBoundary = useCallback(async () => {
     if (!boundaryDraft) return;
     setLoading(true);
@@ -191,6 +243,12 @@ export default function Home() {
 
         {/* Right workspace */}
         <div className="flex flex-1 flex-col overflow-hidden">
+          {/* Cross-mode toast — auto-dismisses after 3 s */}
+          {toast && (
+            <div className="border-b border-border/60 bg-foreground/90 px-4 py-2 text-xs text-background">
+              {toast}
+            </div>
+          )}
           <MainViewer
             mode={activeMode}
             selectedItem={selectedItem}
@@ -207,7 +265,7 @@ export default function Home() {
           <HistoryBar
             items={history}
             selectedId={selectedHistoryId}
-            onSelect={setSelectedHistoryId}
+            onSelect={handleSelectHistory}
             onClear={() => { setHistory([]); setSelectedHistoryId(null); }}
             rightSlot={selectedItem?.kind === 'graph' ? (
               <Button onClick={() => handleSendGraphToFloorplan(selectedItem)} disabled={loading} size="sm">
