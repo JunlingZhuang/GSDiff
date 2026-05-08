@@ -2,6 +2,7 @@
 
 import { ImageIcon, Network } from 'lucide-react';
 import { BubbleGraphCanvas } from '@/components/bubble-graph/BubbleGraphCanvas';
+import { BoundaryCanvas } from '@/components/BoundaryCanvas';
 import { TopologyEditor } from '@/components/TopologyEditor';
 import type { DatasetId, GenerationMode } from '@/lib/constants';
 import type { HistoryItem } from '@/lib/history';
@@ -15,6 +16,9 @@ interface Props {
   dataset: DatasetId;
   topologyDraft?: GeneratedGraph;
   onTopologyChange?: (g: GeneratedGraph) => void;
+  boundaryDraft?: string;
+  onBoundaryChange?: (dataUrl: string) => void;
+  onGenerateBoundary?: () => void;
 }
 
 export function MainViewer({
@@ -25,7 +29,24 @@ export function MainViewer({
   dataset,
   topologyDraft,
   onTopologyChange,
+  boundaryDraft,
+  onBoundaryChange,
+  onGenerateBoundary,
 }: Props) {
+  // Boundary mode: always render the canvas regardless of selectedItem
+  if (mode === 'boundary') {
+    return (
+      <div className="flex flex-1 items-center justify-center overflow-hidden bg-background p-6">
+        <BoundaryCanvas
+          value={boundaryDraft}
+          onChange={onBoundaryChange}
+          onGenerate={() => onGenerateBoundary?.()}
+          loading={loading}
+        />
+      </div>
+    );
+  }
+
   // Topology mode: always render the editor regardless of selectedItem
   if (mode === 'topology') {
     return (

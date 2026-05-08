@@ -11,6 +11,7 @@ import {
   generateUnconstrained,
   generateGraph,
   generateTopology,
+  generateBoundary,
 } from '@/lib/api';
 import { DATASETS, type DatasetId, type GenerationMode } from '@/lib/constants';
 import { Button } from '@/components/ui/button';
@@ -48,6 +49,7 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [topologyDraft, setTopologyDraft] = useState<GeneratedGraph | undefined>(undefined);
+  const [boundaryDraft, setBoundaryDraft] = useState<string>('');
 
   const selectedDatasetMeta = DATASETS.find((dataset) => dataset.id === selectedDataset) ?? DATASETS[0];
   const selectedItem = findHistoryItem(history, selectedHistoryId);
@@ -119,6 +121,24 @@ export default function Home() {
     }
   }, [topologyDraft, selectedDataset]);
 
+  const handleGenerateFloorplanFromBoundary = useCallback(async () => {
+    if (!boundaryDraft) return;
+    setLoading(true);
+    setError(null);
+    try {
+      // boundaryDraft is a full data URL; strip the prefix to get raw base64
+      const base64 = boundaryDraft.split(',')[1] || '';
+      const res = await generateBoundary(base64);
+      const item = createFloorplanItem(selectedDataset, res.image, 'boundary');
+      setHistory((prev) => prependHistory(prev, item));
+      setSelectedHistoryId(item.id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Generation failed');
+    } finally {
+      setLoading(false);
+    }
+  }, [boundaryDraft, selectedDataset]);
+
   return (
     <div className="flex h-full flex-col">
       <Header />
@@ -144,7 +164,7 @@ export default function Home() {
             )}
             {activeMode === 'boundary' && (
               <div className="rounded-xl border border-border/70 bg-background p-3 text-xs text-muted-foreground">
-                Boundary canvas will move into the right workspace (Task 10).
+                Draw a boundary in the workspace, then click Generate to synthesise a floorplan.
               </div>
             )}
           </div>
@@ -157,11 +177,13 @@ export default function Home() {
                 if (activeMode === 'unconstrained') handleUnconstrained();
                 else if (activeMode === 'graph') handleSampleGraph();
                 else if (activeMode === 'topology') handleGenerateFloorplanFromTopology();
+                else if (activeMode === 'boundary') handleGenerateFloorplanFromBoundary();
               }}
               disabled={
                 activeMode !== 'unconstrained' &&
                 activeMode !== 'graph' &&
-                !(activeMode === 'topology' && topologyDraft !== undefined)
+                !(activeMode === 'topology' && topologyDraft !== undefined) &&
+                !(activeMode === 'boundary' && boundaryDraft !== '')
               }
             />
           </div>
@@ -177,6 +199,9 @@ export default function Home() {
             dataset={selectedDataset}
             topologyDraft={topologyDraft}
             onTopologyChange={setTopologyDraft}
+            boundaryDraft={boundaryDraft}
+            onBoundaryChange={setBoundaryDraft}
+            onGenerateBoundary={handleGenerateFloorplanFromBoundary}
           />
 
           <HistoryBar

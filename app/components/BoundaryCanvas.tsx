@@ -7,6 +7,8 @@ import { Button } from '@/components/ui/button';
 interface Props {
   onGenerate: (boundaryImage: string) => void;
   loading: boolean;
+  value?: string;
+  onChange?: (dataUrl: string) => void;
 }
 
 type DrawMode = 'polygon' | 'rect-add' | 'rect-sub';
@@ -20,7 +22,7 @@ const CANVAS_DISPLAY_SIZE = 400;
 const EXPORT_SIZE = 256;
 const CLOSE_THRESHOLD = 12;
 
-export function BoundaryCanvas({ onGenerate, loading }: Props) {
+export function BoundaryCanvas({ onGenerate, loading, onChange }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   // Polygon mode state
@@ -376,6 +378,19 @@ export function BoundaryCanvas({ onGenerate, loading }: Props) {
     const base64 = dataUrl.split(',')[1] || '';
     onGenerate(base64);
   }, [exportBoundary, onGenerate]);
+
+  // Notify parent of draft changes after each stroke/clear
+  useEffect(() => {
+    if (!onChange) return;
+    // Only emit when there is actual content
+    if (!canGenerate) {
+      onChange('');
+      return;
+    }
+    const dataUrl = exportBoundary();
+    onChange(dataUrl);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [closed, rects, points.length]);
 
   // ── Event dispatcher ──
   const onCanvasClick = isPolygon ? handlePolygonClick : undefined;
