@@ -5,104 +5,80 @@ import { Header } from '@/components/Header';
 import { ModeSelector } from '@/components/ModeSelector';
 import { DatasetSelector } from '@/components/DatasetSelector';
 import { ModelStatusPanel } from '@/components/ModelStatusPanel';
-import { ResultPanel } from '@/components/ResultPanel';
-import { HistoryPanel } from '@/components/HistoryPanel';
 import { MainViewer } from '@/components/MainViewer';
 import { GenerateButton } from '@/components/GenerateButton';
 import {
   generateUnconstrained,
   generateGraph,
   generateTopology,
-  generateBoundary,
 } from '@/lib/api';
 import { DATASETS, type DatasetId, type GenerationMode } from '@/lib/constants';
-import type { GeneratedGraph, HistoryItem } from '@/lib/types';
+import {
+  prependHistory,
+  createGraphItem,
+  createFloorplanItem,
+  findHistoryItem,
+  type HistoryItem,
+  type GraphHistoryItem,
+} from '@/lib/history';
 
 export default function Home() {
   const [activeMode, setActiveMode] = useState<GenerationMode>('unconstrained');
   const [selectedDataset, setSelectedDataset] = useState<DatasetId>('rplan');
-  const [image, setImage] = useState<string | null>(null);
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [selectedHistoryId, setSelectedHistoryId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [history, setHistory] = useState<HistoryItem[]>([]);
-  const selectedDatasetMeta = DATASETS.find((dataset) => dataset.id === selectedDataset) ?? DATASETS[0];
 
-  const addToHistory = useCallback((img: string, mode: GenerationMode) => {
-    setHistory(prev => [{
-      id: Date.now(),
-      image: img,
-      mode,
-      timestamp: new Date(),
-    }, ...prev]);
-  }, []);
+  const selectedDatasetMeta = DATASETS.find((dataset) => dataset.id === selectedDataset) ?? DATASETS[0];
+  const selectedItem = findHistoryItem(history, selectedHistoryId);
 
   const handleUnconstrained = useCallback(async () => {
     setLoading(true);
     setError(null);
-    setImage(null);
     try {
       const res = await generateUnconstrained();
-      setImage(res.image);
-      addToHistory(res.image, 'unconstrained');
+      const item = createFloorplanItem(selectedDataset, res.image, 'unconstrained');
+      setHistory((prev) => prependHistory(prev, item));
+      setSelectedHistoryId(item.id);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Generation failed');
     } finally {
       setLoading(false);
-    }
-  }, [addToHistory]);
-
-  const handleTopology = useCallback(
-    async (rooms: number[], adjacency: number[][]) => {
-      setLoading(true);
-      setError(null);
-      setImage(null);
-      try {
-        const res = await generateTopology(rooms, adjacency);
-        setImage(res.image);
-        addToHistory(res.image, 'topology');
-      } catch (e) {
-        setError(e instanceof Error ? e.message : 'Generation failed');
-      } finally {
-        setLoading(false);
-      }
-    },
-    [addToHistory]
-  );
-
-  const handleSampleGraph = useCallback(async (): Promise<GeneratedGraph | null> => {
-    setError(null);
-    try {
-      const res = await generateGraph(selectedDataset);
-      return res.graphs[0] ?? null;
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Graph generation failed');
-      return null;
     }
   }, [selectedDataset]);
 
-  const handleBoundary = useCallback(async (boundaryImage: string) => {
+  const handleSampleGraph = useCallback(async () => {
     setLoading(true);
     setError(null);
-    setImage(null);
     try {
-      const res = await generateBoundary(boundaryImage);
-      setImage(res.image);
-      addToHistory(res.image, 'boundary');
+      const res = await generateGraph(selectedDataset);
+      const graph = res.graphs[0];
+      if (!graph) throw new Error('Server returned no graph');
+      const item = createGraphItem(selectedDataset, graph);
+      setHistory((prev) => prependHistory(prev, item));
+      setSelectedHistoryId(item.id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Graph generation failed');
+    } finally {
+      setLoading(false);
+    }
+  }, [selectedDataset]);
+
+  const handleSendGraphToFloorplan = useCallback(async (graphItem: GraphHistoryItem) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await generateTopology(graphItem.graph.rooms, graphItem.graph.adjacency);
+      const item = createFloorplanItem(selectedDataset, res.image, 'graph', graphItem.id);
+      setHistory((prev) => prependHistory(prev, item));
+      setSelectedHistoryId(item.id);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Generation failed');
     } finally {
       setLoading(false);
     }
-  }, [addToHistory]);
-
-  const handleSelectHistory = useCallback((item: HistoryItem) => {
-    setImage(item.image);
-    setError(null);
-  }, []);
-
-  const handleClearHistory = useCallback(() => {
-    setHistory([]);
-  }, []);
+  }, [selectedDataset]);
 
   return (
     <div className="flex h-full flex-col">
@@ -116,7 +92,7 @@ export default function Home() {
             <ModeSelector activeMode={activeMode} onModeChange={setActiveMode} />
             <ModelStatusPanel />
 
-            {/* Mode-specific controls — slim sidebars without canvas/editor for now */}
+            {/* Mode-specific controls */}
             {activeMode === 'graph' && (
               <div className="rounded-xl border border-border/70 bg-background p-3 text-xs text-muted-foreground">
                 Sample bubble graphs from {selectedDatasetMeta.name}.
@@ -140,27 +116,40 @@ export default function Home() {
               loading={loading}
               onClick={() => {
                 if (activeMode === 'unconstrained') handleUnconstrained();
-                // Other modes get wired in subsequent tasks
+                else if (activeMode === 'graph') handleSampleGraph();
               }}
-              disabled={activeMode !== 'unconstrained'}
+              disabled={activeMode !== 'unconstrained' && activeMode !== 'graph'}
             />
           </div>
         </aside>
 
         {/* Right workspace */}
         <div className="flex flex-1 flex-col overflow-hidden">
-          <MainViewer>
-            <ResultPanel image={image} loading={loading} error={error} dataset={selectedDataset} />
-          </MainViewer>
+          <MainViewer
+            mode={activeMode}
+            selectedItem={selectedItem}
+            loading={loading}
+            error={error}
+          />
 
-          {/* History bar (placeholder using existing HistoryPanel until Task 7) */}
+          {/* Send to Floorplan — shown when a graph item is selected */}
+          {selectedItem?.kind === 'graph' && (
+            <div className="border-t border-border/60 bg-card px-4 py-3">
+              <button
+                onClick={() => handleSendGraphToFloorplan(selectedItem)}
+                disabled={loading}
+                className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:pointer-events-none disabled:opacity-50"
+              >
+                Send to Floorplan
+              </button>
+            </div>
+          )}
+
+          {/* History bar placeholder — wired up in Task 7 */}
           {history.length > 0 && (
-            <HistoryPanel
-              history={history}
-              onSelect={handleSelectHistory}
-              onClear={handleClearHistory}
-              currentImage={image}
-            />
+            <div className="border-t border-border/60 bg-card px-4 py-2 text-xs text-muted-foreground">
+              History: {history.length} item(s) — bar wired up in Task 7
+            </div>
           )}
         </div>
       </div>
