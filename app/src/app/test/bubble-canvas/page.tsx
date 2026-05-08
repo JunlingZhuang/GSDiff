@@ -1,5 +1,6 @@
 'use client';
 
+import { useState } from 'react';
 import { BubbleGraphCanvas } from '@/components/bubble-graph/BubbleGraphCanvas';
 import type { GeneratedGraph } from '@/lib/types';
 
@@ -28,6 +29,34 @@ const FIXTURE_RPLAN: GeneratedGraph = {
   ],
 };
 
+function EditModeDemo() {
+  const [graph, setGraph] = useState<GeneratedGraph>(FIXTURE_RPLAN);
+  return (
+    <div className="mt-8">
+      <h2 className="mb-4 text-lg font-semibold">Edit mode (RPLAN fixture)</h2>
+      <p className="mb-2 text-sm text-muted-foreground">
+        Click empty space to add a node. Click a node to select, DEL to delete. Drag node perimeter
+        to another node to add an edge. Click an edge to cycle its type, right-click to delete.
+        Double-click a node to cycle its room type. Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z) for
+        undo/redo.
+      </p>
+      <div className="h-[600px] w-full max-w-[900px] rounded-xl border bg-card p-4">
+        <BubbleGraphCanvas
+          graph={graph}
+          dataset="rplan"
+          mode="edit"
+          onChange={setGraph}
+          defaultNodeAttr={1}
+          defaultEdgeType={1}
+        />
+      </div>
+      <pre className="mt-2 max-h-32 overflow-auto rounded bg-muted p-2 text-xs">
+        {JSON.stringify({ n: graph.num_nodes, e: graph.num_edges }, null, 2)}
+      </pre>
+    </div>
+  );
+}
+
 export default function BubbleCanvasFixture() {
   return (
     <div className="min-h-screen bg-background p-8">
@@ -35,6 +64,7 @@ export default function BubbleCanvasFixture() {
       <div className="h-[600px] w-full max-w-[900px] rounded-xl border bg-card p-4">
         <BubbleGraphCanvas graph={FIXTURE_RPLAN} dataset="rplan" mode="view" />
       </div>
+      <EditModeDemo />
     </div>
   );
 }

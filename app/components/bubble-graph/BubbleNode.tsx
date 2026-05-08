@@ -9,9 +9,10 @@ interface Props {
   selected: boolean;
   onPointerDown?: (e: React.PointerEvent) => void;
   onClick?: (e: React.MouseEvent) => void;
+  onDoubleClick?: (e: React.MouseEvent) => void;
 }
 
-export function BubbleNode({ node, meta, selected, onPointerDown, onClick }: Props) {
+export function BubbleNode({ node, meta, selected, onPointerDown, onClick, onDoubleClick }: Props) {
   const fill = meta?.color ?? '#e5e7eb';
   const textColor = meta?.textColor ?? '#111827';
   const label = meta?.name ?? `class_${node.attr}`;
@@ -21,6 +22,7 @@ export function BubbleNode({ node, meta, selected, onPointerDown, onClick }: Pro
       style={{ cursor: onPointerDown ? 'grab' : 'default' }}
       onPointerDown={onPointerDown}
       onClick={onClick}
+      onDoubleClick={onDoubleClick}
     >
       <circle
         r="36"
