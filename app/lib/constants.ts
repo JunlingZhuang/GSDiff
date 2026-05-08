@@ -1,4 +1,5 @@
-export const ROOM_TYPES = [
+// RPLAN room types — index matches digress/configs/dataset/rplan.yaml node_decoder.
+export const ROOM_TYPES_RPLAN = [
   { id: 0, name: 'Living Room', color: '#F4F1DE', textColor: '#4a4637' },
   { id: 1, name: 'Bedroom', color: '#EAB69F', textColor: '#5c3a2b' },
   { id: 2, name: 'Bathroom', color: '#6B705C', textColor: '#ffffff' },
@@ -7,24 +8,62 @@ export const ROOM_TYPES = [
   { id: 5, name: 'Storage', color: '#F2CC8F', textColor: '#5c4a2b' },
 ] as const;
 
-export type RoomType = (typeof ROOM_TYPES)[number];
+// MSD room types — index matches digress/configs/dataset/msd_wall.yaml node_decoder.
+// Colors mirror digress/src/analysis/msd_utils.py MSD_NODE_COLORS for consistency.
+export const ROOM_TYPES_MSD = [
+  { id: 0, name: 'Bedroom', color: '#8da0cb', textColor: '#1f2937' },
+  { id: 1, name: 'Living Room', color: '#47b39c', textColor: '#ffffff' },
+  { id: 2, name: 'Kitchen', color: '#f1c27d', textColor: '#5c3a2b' },
+  { id: 3, name: 'Dining', color: '#fdae6b', textColor: '#5c3a2b' },
+  { id: 4, name: 'Corridor', color: '#fdd0a2', textColor: '#5c3a2b' },
+  { id: 5, name: 'Stairs', color: '#72246c', textColor: '#ffffff' },
+  { id: 6, name: 'Storage', color: '#ffd92f', textColor: '#5c4a2b' },
+  { id: 7, name: 'Bathroom', color: '#bdbdbd', textColor: '#1f2937' },
+  { id: 8, name: 'Balcony', color: '#a6d854', textColor: '#1f2937' },
+] as const;
+
+// RPLAN edge types — node_decoder index 0 reserved for "no edge".
+export const EDGE_TYPES_RPLAN = [
+  { id: 0, name: 'none', color: '#cbd5e1', dashed: false },
+  { id: 1, name: 'wall', color: '#334155', dashed: false },
+  { id: 2, name: 'door', color: '#c2410c', dashed: true },
+] as const;
+
+// MSD edge types — index matches msd_wall.yaml edge_decoder.
+export const EDGE_TYPES_MSD = [
+  { id: 0, name: 'none', color: '#cbd5e1', dashed: false },
+  { id: 1, name: 'wall', color: '#334155', dashed: false },
+  { id: 2, name: 'passage', color: '#64748b', dashed: false },
+  { id: 3, name: 'door', color: '#c2410c', dashed: true },
+  { id: 4, name: 'entrance', color: '#d97706', dashed: true },
+] as const;
+
+export type RoomTypeMeta = { id: number; name: string; color: string; textColor: string };
+export type EdgeTypeMeta = { id: number; name: string; color: string; dashed: boolean };
 
 export const DATASETS = [
   {
     id: 'rplan',
     name: 'RPLAN',
-    description: 'Residential floorplan graphs',
+    description: 'Residential floorplan graphs (6 room types, 2 edge types)',
     enabled: true,
   },
   {
-    id: 'msd',
+    id: 'msd_wall',
     name: 'MSD',
-    description: 'Coming later',
-    enabled: false,
+    description: 'Modified Swiss Dwellings (9 room types, 4 edge types)',
+    enabled: true,
   },
 ] as const;
 
 export type DatasetId = (typeof DATASETS)[number]['id'];
+
+// Per-dataset spec used by frontend rendering. The order of `roomTypes` and
+// `edgeTypes` MUST match the digress dataset config decoders.
+export const DATASET_SPECS: Record<DatasetId, { roomTypes: readonly RoomTypeMeta[]; edgeTypes: readonly EdgeTypeMeta[] }> = {
+  rplan: { roomTypes: ROOM_TYPES_RPLAN, edgeTypes: EDGE_TYPES_RPLAN },
+  msd_wall: { roomTypes: ROOM_TYPES_MSD, edgeTypes: EDGE_TYPES_MSD },
+};
 
 export const MIN_ROOMS = 4;
 export const MAX_ROOMS = 8;

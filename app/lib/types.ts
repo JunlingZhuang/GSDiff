@@ -1,12 +1,5 @@
 import type { DatasetId, GenerationMode } from './constants';
-import type { HistoryItem as NewHistoryItem } from './history';
-
-export interface HistoryItem {
-  id: number;
-  image: string;
-  mode: GenerationMode;
-  timestamp: Date;
-}
+import type { HistoryItem } from './history';
 
 export interface GeneratedGraphNode {
   id: number;
@@ -74,7 +67,7 @@ export interface BoundaryDraft {
 export interface PageState {
   selectedDataset: DatasetId;
   activeMode: GenerationMode;
-  history: NewHistoryItem[];
+  history: HistoryItem[];
   selectedHistoryId: string | null;
   modeDrafts: {
     topology?: TopologyDraft;

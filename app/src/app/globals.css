@@ -1,8 +1,6 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
-@import "@xyflow/react/dist/style.css";
-
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
@@ -128,33 +126,6 @@
   html {
     @apply font-sans;
   }
-}
-
-/* React Flow custom styling */
-.react-flow__node {
-  cursor: grab;
-}
-
-.react-flow__node:active {
-  cursor: grabbing;
-}
-
-.react-flow__handle {
-  width: 8px !important;
-  height: 8px !important;
-  border-radius: 50% !important;
-  background-color: oklch(0.556 0 0) !important;
-  border: 2px solid white !important;
-  opacity: 0;
-  transition: opacity 0.15s ease;
-}
-
-.react-flow__node:hover .react-flow__handle {
-  opacity: 1;
-}
-
-.react-flow__edge-path {
-  stroke-width: 2;
 }
 
 /* Boundary canvas crosshair */
