@@ -5,6 +5,8 @@ import {
   forceManyBody,
   forceCenter,
   forceCollide,
+  type ForceLink,
+  type ForceCenter,
   type Simulation,
 } from 'd3-force';
 import type { BubbleNodeState, BubbleEdgeState } from './types';
@@ -17,6 +19,18 @@ interface UseForceSimulationParams {
   onTick: (nodes: BubbleNodeState[]) => void;
 }
 
+/**
+ * Force-directed graph simulation, owned by this hook.
+ *
+ * Architectural note: the simulation is created ONCE per component lifetime
+ * and updated *in place* when nodes/edges/dimensions change. We do NOT
+ * tear down and re-create the sim on every add/delete, because rebuilding
+ * resets alpha to 1, which makes the whole graph visibly resettle — the
+ * user perceives it as "the graph keeps spreading out every time I add a
+ * node." Instead, `sim.nodes()` and the link force's `.links()` are
+ * mutated in place and we apply a small alpha bump (0.3) so just the
+ * affected element nudges into place.
+ */
 export function useForceSimulation({
   nodes,
   edges,
@@ -30,7 +44,13 @@ export function useForceSimulation({
 } {
   const simRef = useRef<Simulation<BubbleNodeState, BubbleEdgeState> | null>(null);
   const nodesRef = useRef<BubbleNodeState[]>(nodes);
+  const onTickRef = useRef(onTick);
+  onTickRef.current = onTick;
 
+  // -------------------------------------------------------------------------
+  // Lifecycle — create / destroy simulation. Runs only when canvas size
+  // changes; node/edge updates are handled in separate effects below.
+  // -------------------------------------------------------------------------
   useEffect(() => {
     nodesRef.current = nodes;
     const sim = forceSimulation<BubbleNodeState>(nodes)
@@ -38,39 +58,65 @@ export function useForceSimulation({
         'link',
         forceLink<BubbleNodeState, BubbleEdgeState>(edges)
           .id((d) => d.id)
-          // Larger target distance + stiffer link spring → uniform edge
-          // length across the graph. Without this, peripheral nodes
-          // (which have few neighbours pulling outward) get sucked inward
-          // by their one link and edges visually look much shorter than
-          // edges inside a dense cluster.
+          // distance + strength tuned together: stiff springs at moderate
+          // distance keep edges visually uniform. Tweaking these is the
+          // primary lever for "tighter" vs "looser" layout.
           .distance(105)
           .strength(0.9),
       )
-      // Moderate node repulsion — enough to spread overlapping clusters,
-      // not so much that edges look long.
-      .force('charge', forceManyBody<BubbleNodeState>().strength(-450).distanceMax(500))
-      // Weak centering: just keeps the graph from drifting off-screen,
-      // doesn't actively pull peripheral nodes inward.
-      .force('center', forceCenter(width / 2, height / 2).strength(0.05))
-      // Slightly larger than node radius (36) so circles never overlap.
+      .force(
+        'charge',
+        forceManyBody<BubbleNodeState>().strength(-450).distanceMax(500),
+      )
+      .force(
+        'center',
+        forceCenter(width / 2, height / 2).strength(0.05),
+      )
       .force('collide', forceCollide<BubbleNodeState>(44))
-      // Use d3-force defaults (alphaDecay 0.0228, alphaMin 0.001) so the
-      // simulation feels "alive" — graph rebalances smoothly after edits.
-      .on('tick', () => onTick([...nodesRef.current]));
+      .on('tick', () => onTickRef.current([...nodesRef.current]));
     simRef.current = sim;
     return () => {
       sim.stop();
       simRef.current = null;
     };
-    // Rebuild only when node/edge identity changes
+    // Intentionally NOT depending on nodes/edges identity — those are
+    // handled by the dedicated effects below. Re-creating the simulation
+    // for every node addition is exactly the "graph keeps spreading" bug.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes.length, edges.length, width, height]);
+  }, [width, height]);
 
-  const reheat = () => simRef.current?.alpha(0.5).restart();
+  // -------------------------------------------------------------------------
+  // Sync simulation nodes/edges when their count changes (add/delete).
+  // Uses in-place updates so existing node positions are preserved.
+  // -------------------------------------------------------------------------
+  useEffect(() => {
+    const sim = simRef.current;
+    if (!sim) return;
+    nodesRef.current = nodes;
+    sim.nodes(nodes);
+    const linkForce = sim.force('link') as ForceLink<BubbleNodeState, BubbleEdgeState> | undefined;
+    if (linkForce) linkForce.links(edges);
+    // Mild reheat so the new/removed element settles into place without
+    // throwing the rest of the graph around.
+    sim.alpha(0.3).restart();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodes.length, edges.length]);
 
-  // Mutate the simulation's node directly so the next tick respects the new position.
-  // The drag handler must call this on the SAME node object the simulation holds —
-  // pass a node from the array given to useForceSimulation, NOT a separately-constructed copy.
+  // -------------------------------------------------------------------------
+  // Keep center force in sync with canvas size (resize, etc.) without
+  // rebuilding the whole simulation.
+  // -------------------------------------------------------------------------
+  useEffect(() => {
+    const sim = simRef.current;
+    if (!sim) return;
+    const center = sim.force('center') as ForceCenter<BubbleNodeState> | undefined;
+    if (center) {
+      center.x(width / 2).y(height / 2);
+    }
+  }, [width, height]);
+
+  const reheat = () => simRef.current?.alpha(0.3).restart();
+
   const pinNode = (nodeId: number, x: number, y: number) => {
     const node = nodesRef.current.find((n) => n.id === nodeId);
     if (!node) return;
@@ -78,8 +124,8 @@ export function useForceSimulation({
     node.fy = y;
     node.x = x;
     node.y = y;
-    // Tiny alpha bump: enough to trigger one tick so React sees the new
-    // position, but not so much that all other nodes resettle dramatically.
+    // Tiny alpha so the render reflects the new position without
+    // disturbing other nodes.
     simRef.current?.alpha(0.05).restart();
   };
 
