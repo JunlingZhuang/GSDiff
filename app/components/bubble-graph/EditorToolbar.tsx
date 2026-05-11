@@ -1,6 +1,6 @@
 'use client';
 
-import { Undo2, Redo2, ChevronDown } from 'lucide-react';
+import { Undo2, Redo2, ChevronDown, RotateCcw } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -18,6 +18,7 @@ interface Props {
   onUndo: () => void;
   onRedo: () => void;
   onAddNode: () => void;
+  onReset: () => void;
 }
 
 type SwatchItem = { id: number; name: string; color: string; dashArray?: string | undefined };
@@ -131,6 +132,7 @@ export function EditorToolbar({
   onUndo,
   onRedo,
   onAddNode,
+  onReset,
 }: Props) {
   return (
     <div className="absolute left-3 top-3 z-20 flex items-center gap-1.5 rounded-xl border border-border bg-card px-2 py-1.5 shadow-sm">
@@ -184,6 +186,18 @@ export function EditorToolbar({
         title="Redo (Ctrl+Y)"
       >
         <Redo2 />
+      </Button>
+
+      <div className="mx-1 h-5 w-px bg-border" />
+
+      {/* Reset to original / blank slate */}
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        onClick={onReset}
+        title="Reset graph to original"
+      >
+        <RotateCcw />
       </Button>
     </div>
   );

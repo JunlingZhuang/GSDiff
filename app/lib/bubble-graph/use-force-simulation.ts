@@ -44,6 +44,11 @@ export function useForceSimulation({
       .force('charge', forceManyBody<BubbleNodeState>().strength(-400))
       .force('center', forceCenter(width / 2, height / 2))
       .force('collide', forceCollide<BubbleNodeState>(42))
+      // Settle quickly so deletes / type changes don't trigger a long
+      // visible re-layout. Sim stops in ~1 second; after that, only the
+      // explicitly modified element moves (e.g. a dragged node).
+      .alphaDecay(0.08)
+      .alphaMin(0.05)
       .on('tick', () => onTick([...nodesRef.current]));
     simRef.current = sim;
     return () => {
@@ -66,7 +71,9 @@ export function useForceSimulation({
     node.fy = y;
     node.x = x;
     node.y = y;
-    simRef.current?.alpha(0.3).restart();
+    // Tiny alpha bump: enough to trigger one tick so React sees the new
+    // position, but not so much that all other nodes resettle dramatically.
+    simRef.current?.alpha(0.05).restart();
   };
 
   const releaseNode = (nodeId: number) => {

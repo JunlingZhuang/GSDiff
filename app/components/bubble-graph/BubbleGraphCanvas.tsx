@@ -49,6 +49,8 @@ type EditAction =
   | { type: 'set-edge-type'; id: string; edgeType: number }
   /** Compound: add a new node then connect source → new-node in ONE undo step */
   | { type: 'add-node-and-edge'; attr: number; x: number; y: number; sourceId: number; edgeType: number }
+  /** Restore nodes+edges to a snapshot (used by Reset). Undoable. */
+  | { type: 'reset-to'; nodes: BubbleNodeState[]; edges: BubbleEdgeState[] }
   | { type: 'undo' }
   | { type: 'redo' }
   | { type: 'tick'; nodes: BubbleNodeState[] };
@@ -149,6 +151,13 @@ function reducer(state: EditState, action: EditAction): EditState {
         edges: state.edges.map((e) =>
           e.id === action.id ? { ...e, edgeType: action.edgeType } : e,
         ),
+      };
+    }
+    case 'reset-to': {
+      return {
+        ...checkpointed,
+        nodes: action.nodes.map((n) => ({ ...n })),
+        edges: action.edges.map((e) => ({ ...e })),
       };
     }
     case 'add-node-and-edge': {
@@ -267,6 +276,12 @@ export function BubbleGraphCanvas({
   // Hover tracking for "+" handle
   const [hoveredNodeId, setHoveredNodeId] = useState<number | null>(null);
 
+  // Pan + zoom state (in viewBox coordinate space).
+  //   - `k` is the scale factor (1 = no zoom)
+  //   - `(x, y)` is the translate applied BEFORE scale, so a point P in
+  //     "world" coordinates is rendered at viewBox position (P * k + (x, y)).
+  const [zoom, setZoom] = useState<{ k: number; x: number; y: number }>({ k: 1, x: 0, y: 0 });
+
   // Edge-creation rubber-band state (edit mode only)
   const [edgeDraft, setEdgeDraft] = useState<{
     sourceId: number;
@@ -276,6 +291,16 @@ export function BubbleGraphCanvas({
   // Keep stable ref to nodes for pointer callbacks
   const nodesRef = useRef<BubbleNodeState[]>(nodes);
   nodesRef.current = nodes;
+
+  // Snapshot of the initial graph (from `graph` prop). Used by Reset.
+  // Updates whenever the incoming graph identity changes (new sample / new mount).
+  const initialSnapshotRef = useRef<{ nodes: BubbleNodeState[]; edges: BubbleEdgeState[] }>({
+    nodes: initialNodes,
+    edges: initialEdges,
+  });
+  useEffect(() => {
+    initialSnapshotRef.current = { nodes: initialNodes, edges: initialEdges };
+  }, [initialNodes, initialEdges]);
 
   // ---------------------------------------------------------------------------
   // Force simulation
@@ -379,27 +404,63 @@ export function BubbleGraphCanvas({
     [onSelectionChange],
   );
 
-  // Convert SVG viewBox coords → container-relative pixels
+  // Convert "world" coords (the logical position of nodes, ignoring zoom) →
+  // container-relative pixels. Factors in the current pan+zoom transform so
+  // floating HTML action bars track the on-screen position of the node/edge.
   const viewBoxToContainer = useCallback(
     (vx: number, vy: number): { px: number; py: number } => {
       const rect = containerRef.current?.getBoundingClientRect();
       if (!rect) return { px: vx, py: vy };
+      const transformedX = vx * zoom.k + zoom.x;
+      const transformedY = vy * zoom.k + zoom.y;
       const scaleX = rect.width / width;
       const scaleY = rect.height / height;
-      return { px: vx * scaleX, py: vy * scaleY };
+      return { px: transformedX * scaleX, py: transformedY * scaleY };
     },
-    [width, height],
+    [width, height, zoom],
   );
 
-  // Convert client coordinates to SVG viewBox coordinates
-  const clientToViewBox = (
-    clientX: number,
-    clientY: number,
-    rect: DOMRect,
-  ): { x: number; y: number } => ({
-    x: ((clientX - rect.left) / rect.width) * width,
-    y: ((clientY - rect.top) / rect.height) * height,
-  });
+  // Convert client coordinates to "world" viewBox coordinates (undo zoom).
+  const clientToViewBox = useCallback(
+    (clientX: number, clientY: number, rect: DOMRect): { x: number; y: number } => {
+      const rawX = ((clientX - rect.left) / rect.width) * width;
+      const rawY = ((clientY - rect.top) / rect.height) * height;
+      return {
+        x: (rawX - zoom.x) / zoom.k,
+        y: (rawY - zoom.y) / zoom.k,
+      };
+    },
+    [width, height, zoom],
+  );
+
+  // Wheel zoom — non-passive native listener so we can preventDefault and
+  // stop the browser from scrolling the page while the cursor is over the canvas.
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = container.getBoundingClientRect();
+      // Cursor position in raw viewBox coords (pre-transform)
+      const rawX = ((e.clientX - rect.left) / rect.width) * width;
+      const rawY = ((e.clientY - rect.top) / rect.height) * height;
+      setZoom((prev) => {
+        // Same cursor point in current world coords
+        const worldX = (rawX - prev.x) / prev.k;
+        const worldY = (rawY - prev.y) / prev.k;
+        const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+        const newK = Math.max(0.3, Math.min(4, prev.k * factor));
+        // Keep the same world point under the cursor
+        return {
+          k: newK,
+          x: rawX - worldX * newK,
+          y: rawY - worldY * newK,
+        };
+      });
+    };
+    container.addEventListener('wheel', onWheel, { passive: false });
+    return () => container.removeEventListener('wheel', onWheel);
+  }, [width, height]);
 
   // Drag node to move it
   const dragNode = (nodeId: number) => (e: React.PointerEvent) => {
@@ -529,6 +590,14 @@ export function BubbleGraphCanvas({
           onUndo={() => dispatch({ type: 'undo' })}
           onRedo={() => dispatch({ type: 'redo' })}
           onAddNode={handleAddNodeAtCenter}
+          onReset={() => {
+            dispatch({
+              type: 'reset-to',
+              nodes: initialSnapshotRef.current.nodes.map((n) => ({ ...n })),
+              edges: initialSnapshotRef.current.edges.map((e) => ({ ...e })),
+            });
+            updateSelection({ nodeId: null, edgeId: null });
+          }}
         />
       )}
 
@@ -587,6 +656,9 @@ export function BubbleGraphCanvas({
           updateSelection({ nodeId: null, edgeId: null });
         }}
       >
+        {/* Pan+zoom transform — content positions are in "world" coords,
+            this group applies the user's current zoom/pan. */}
+        <g transform={`translate(${zoom.x},${zoom.y}) scale(${zoom.k})`}>
         {/* Edges */}
         <g>
           {edges.map((edge) => {
@@ -704,7 +776,8 @@ export function BubbleGraphCanvas({
                     +
                   </text>
                 )}
-                {/* Delete badge — selected node only, top-right of circle */}
+                {/* Delete badge — selected node only, bottom-right of circle
+                    (positioned away from the room-type action bar that floats above) */}
                 {editing && selection.nodeId === node.id && (
                   <g
                     style={{ cursor: 'pointer' }}
@@ -716,18 +789,18 @@ export function BubbleGraphCanvas({
                   >
                     <circle
                       cx={node.x + 26}
-                      cy={node.y - 26}
-                      r={11}
+                      cy={node.y + 26}
+                      r={12}
                       fill="oklch(0.58 0.22 25)"
                       stroke="white"
                       strokeWidth={2}
                     />
                     <text
                       x={node.x + 26}
-                      y={node.y - 26}
+                      y={node.y + 26}
                       textAnchor="middle"
                       dominantBaseline="middle"
-                      fontSize="14"
+                      fontSize="15"
                       fontWeight="bold"
                       fill="white"
                       style={{ pointerEvents: 'none', userSelect: 'none' }}
@@ -772,6 +845,7 @@ export function BubbleGraphCanvas({
             </text>
           </g>
         )}
+        </g>{/* end pan+zoom group */}
       </svg>
     </div>
   );
