@@ -71,7 +71,21 @@ function pushPast(state: EditState): EditState {
 
 function reducer(state: EditState, action: EditAction): EditState {
   if (action.type === 'tick') {
-    return { ...state, nodes: action.nodes };
+    // Merge positions by id rather than replacing the array wholesale.
+    // The simulation may be one tick behind a freshly-added node (between
+    // dispatch add-node and sim rebuild); in that window, action.nodes
+    // is shorter than state.nodes. Nodes the sim doesn't know about keep
+    // their current position.
+    const simPositions = new Map(action.nodes.map((n) => [n.id, n]));
+    return {
+      ...state,
+      nodes: state.nodes.map((n) => {
+        const fromSim = simPositions.get(n.id);
+        return fromSim
+          ? { ...n, x: fromSim.x, y: fromSim.y, fx: fromSim.fx, fy: fromSim.fy }
+          : n;
+      }),
+    };
   }
   if (action.type === 'undo') {
     if (state.past.length === 0) return state;
@@ -321,9 +335,19 @@ export function BubbleGraphCanvas({
     [editing],
   );
 
+  // Feed the live editor state into the force sim so newly-added nodes/edges
+  // participate in the layout. The hook rebuilds the simulation whenever
+  // nodes.length or edges.length changes — that's our cue for add/delete.
+  //
+  // Without this, the sim is stuck on the original `initialNodes`; on every
+  // tick it would overwrite editState.nodes with the simulation's 4-node
+  // array, making newly-added nodes silently disappear.
+  const simInputNodes = editing ? editState.nodes : initialNodes;
+  const simInputEdges = editing ? editState.edges : initialEdges;
+
   const { pinNode, releaseNode, reheat } = useForceSimulation({
-    nodes: initialNodes,
-    edges: initialEdges,
+    nodes: simInputNodes,
+    edges: simInputEdges,
     width,
     height,
     onTick: handleTick,
