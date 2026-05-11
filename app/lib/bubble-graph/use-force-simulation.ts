@@ -38,12 +38,22 @@ export function useForceSimulation({
         'link',
         forceLink<BubbleNodeState, BubbleEdgeState>(edges)
           .id((d) => d.id)
-          .distance(120)
-          .strength(0.5),
+          // Larger target distance + stiffer link spring → uniform edge
+          // length across the graph. Without this, peripheral nodes
+          // (which have few neighbours pulling outward) get sucked inward
+          // by their one link and edges visually look much shorter than
+          // edges inside a dense cluster.
+          .distance(160)
+          .strength(0.9),
       )
-      .force('charge', forceManyBody<BubbleNodeState>().strength(-400))
-      .force('center', forceCenter(width / 2, height / 2))
-      .force('collide', forceCollide<BubbleNodeState>(42))
+      // Stronger node repulsion spreads the graph out so links can reach
+      // their target distance instead of getting compressed.
+      .force('charge', forceManyBody<BubbleNodeState>().strength(-900).distanceMax(700))
+      // Weak centering: just keeps the graph from drifting off-screen,
+      // doesn't actively pull peripheral nodes inward.
+      .force('center', forceCenter(width / 2, height / 2).strength(0.05))
+      // Slightly larger than node radius (36) so circles never overlap.
+      .force('collide', forceCollide<BubbleNodeState>(44))
       // Use d3-force defaults (alphaDecay 0.0228, alphaMin 0.001) so the
       // simulation feels "alive" — graph rebalances smoothly after edits.
       .on('tick', () => onTick([...nodesRef.current]));
