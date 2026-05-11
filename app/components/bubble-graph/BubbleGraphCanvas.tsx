@@ -580,14 +580,11 @@ export function BubbleGraphCanvas({
         role="img"
         aria-label="Bubble graph"
         onClick={(e) => {
+          // Empty-space click only deselects — never adds nodes.
+          // Adding nodes is intentional only: toolbar "+ Add Room" button,
+          // or dragging the "+" handle from an existing node into empty space.
           if (e.target !== e.currentTarget) return;
-          if (editing) {
-            const rect = e.currentTarget.getBoundingClientRect();
-            const { x, y } = clientToViewBox(e.clientX, e.clientY, rect);
-            dispatch({ type: 'add-node', attr: defaultNodeAttr, x, y });
-          } else {
-            updateSelection({ nodeId: null, edgeId: null });
-          }
+          updateSelection({ nodeId: null, edgeId: null });
         }}
       >
         {/* Edges */}
