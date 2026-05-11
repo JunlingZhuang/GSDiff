@@ -20,17 +20,50 @@ interface Props {
   onAddNode: () => void;
 }
 
+type SwatchItem = { id: number; name: string; color: string; dashArray?: string | undefined };
+
+function SwatchPreview({ item, size }: { item: SwatchItem; size: 'sm' | 'md' }) {
+  // Edge items carry a dashArray field — render a line preview.
+  // Room items don't — render a colored square.
+  const isEdge = 'dashArray' in item;
+  if (isEdge) {
+    const w = size === 'sm' ? 16 : 22;
+    return (
+      <svg width={w} height={6} className="shrink-0">
+        <line
+          x1="0"
+          y1="3"
+          x2={w}
+          y2="3"
+          stroke={item.color}
+          strokeWidth="2"
+          strokeDasharray={item.dashArray}
+          strokeLinecap="round"
+        />
+      </svg>
+    );
+  }
+  const px = size === 'sm' ? 'h-3 w-3' : 'h-4 w-4';
+  return (
+    <span
+      className={cn('inline-block shrink-0 rounded-sm border border-black/10', px)}
+      style={{ background: item.color }}
+    />
+  );
+}
+
 function SwatchDropdown({
   items,
   value,
   onChange,
-  label,
+  fallbackLabel,
   skipIds,
 }: {
-  items: readonly { id: number; name: string; color: string }[];
+  items: readonly SwatchItem[];
   value: number;
   onChange: (id: number) => void;
-  label: string;
+  /** Used if no item matches `value`. */
+  fallbackLabel: string;
   skipIds?: number[];
 }) {
   const [open, setOpen] = useState(false);
@@ -54,28 +87,31 @@ function SwatchDropdown({
         onClick={() => setOpen((v) => !v)}
         className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-border bg-background px-2.5 text-xs font-medium hover:bg-muted focus-visible:outline-none"
       >
-        <span
-          className="inline-block h-3 w-3 rounded-sm border border-black/10"
-          style={{ background: current?.color ?? '#e5e7eb' }}
-        />
-        <span className="max-w-[80px] truncate">{label}</span>
+        {current ? <SwatchPreview item={current} size="sm" /> : null}
+        <span className="max-w-[88px] truncate">{current?.name ?? fallbackLabel}</span>
         <ChevronDown className="h-3 w-3 opacity-60" />
       </button>
       {open && (
-        <div className="absolute left-0 top-full z-50 mt-1 flex flex-wrap gap-1.5 rounded-lg border border-border bg-card p-2 shadow-md"
-          style={{ minWidth: 140, maxWidth: 220 }}>
+        <div
+          className="absolute left-0 top-full z-50 mt-1 flex flex-col gap-0.5 rounded-lg border border-border bg-card p-1 shadow-md"
+          style={{ minWidth: 140 }}
+        >
           {filtered.map((item) => (
             <button
               key={item.id}
               type="button"
-              title={item.name}
-              onClick={() => { onChange(item.id); setOpen(false); }}
+              onClick={() => {
+                onChange(item.id);
+                setOpen(false);
+              }}
               className={cn(
-                'h-6 w-6 rounded border-2 transition-transform hover:scale-110',
-                item.id === value ? 'border-foreground' : 'border-transparent',
+                'flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors',
+                item.id === value ? 'bg-muted font-medium' : 'hover:bg-muted/60',
               )}
-              style={{ background: item.color }}
-            />
+            >
+              <SwatchPreview item={item} size="md" />
+              <span className="flex-1 truncate">{item.name}</span>
+            </button>
           ))}
         </div>
       )}
@@ -114,7 +150,7 @@ export function EditorToolbar({
         items={roomTypes}
         value={defaultNodeAttr}
         onChange={onDefaultNodeAttrChange}
-        label="type"
+        fallbackLabel="room"
       />
 
       <div className="mx-1 h-5 w-px bg-border" />
@@ -124,7 +160,7 @@ export function EditorToolbar({
         items={edgeTypes}
         value={defaultEdgeType}
         onChange={onDefaultEdgeTypeChange}
-        label="edge"
+        fallbackLabel="edge"
         skipIds={[0]}
       />
 

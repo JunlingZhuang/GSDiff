@@ -15,18 +15,24 @@ interface Props {
 
 export function BubbleEdge({ edge, source, target, meta, selected, onClick, onContextMenu }: Props) {
   const stroke = meta?.color ?? '#475569';
-  const dashed = meta?.dashed ?? false;
-  const showLabel = meta && meta.id > 1; // wall is dominant; only label door/passage/entrance
+  const dashArray = meta?.dashArray;
+  // Label every meaningful edge (none has id=0 and isn't rendered anyway).
+  const showLabel = meta && meta.id > 0;
   return (
-    <g onClick={onClick} onContextMenu={onContextMenu} style={{ cursor: onClick ? 'pointer' : 'default' }}>
+    <g
+      onClick={onClick}
+      onContextMenu={onContextMenu}
+      style={{ cursor: onClick ? 'pointer' : 'default' }}
+      data-edge-id={edge.id}
+    >
       <line
         x1={source.x}
         y1={source.y}
         x2={target.x}
         y2={target.y}
         stroke={stroke}
-        strokeWidth={selected ? 4 : dashed ? 2.5 : 2}
-        strokeDasharray={dashed ? '7 5' : undefined}
+        strokeWidth={selected ? 4 : dashArray ? 2.5 : 2}
+        strokeDasharray={dashArray}
         strokeLinecap="round"
       />
       {showLabel && (
@@ -35,6 +41,7 @@ export function BubbleEdge({ edge, source, target, meta, selected, onClick, onCo
           y={(source.y + target.y) / 2 - 6}
           textAnchor="middle"
           fontSize="10"
+          fontWeight="600"
           fill={stroke}
           paintOrder="stroke"
           stroke="oklch(0.97 0 0)"

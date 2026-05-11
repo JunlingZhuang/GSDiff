@@ -23,23 +23,30 @@ export const ROOM_TYPES_MSD = [
 ] as const;
 
 // RPLAN edge types — node_decoder index 0 reserved for "no edge".
+// dashArray follows SVG stroke-dasharray syntax. undefined = solid.
 export const EDGE_TYPES_RPLAN = [
-  { id: 0, name: 'none', color: '#cbd5e1', dashed: false },
-  { id: 1, name: 'wall', color: '#334155', dashed: false },
-  { id: 2, name: 'door', color: '#c2410c', dashed: true },
+  { id: 0, name: 'none', color: '#cbd5e1', dashArray: undefined },
+  { id: 1, name: 'wall', color: '#1e293b', dashArray: undefined },
+  { id: 2, name: 'door', color: '#c2410c', dashArray: '7 5' },
 ] as const;
 
 // MSD edge types — index matches msd_wall.yaml edge_decoder.
+// Each type has a visually distinct stroke pattern so all four are
+// recognizable at a glance without reading labels:
+//   wall      solid dark slate
+//   passage   medium-dashed mid slate
+//   door      long-dashed warm red
+//   entrance  dotted amber
 export const EDGE_TYPES_MSD = [
-  { id: 0, name: 'none', color: '#cbd5e1', dashed: false },
-  { id: 1, name: 'wall', color: '#334155', dashed: false },
-  { id: 2, name: 'passage', color: '#64748b', dashed: false },
-  { id: 3, name: 'door', color: '#c2410c', dashed: true },
-  { id: 4, name: 'entrance', color: '#d97706', dashed: true },
+  { id: 0, name: 'none', color: '#cbd5e1', dashArray: undefined },
+  { id: 1, name: 'wall', color: '#1e293b', dashArray: undefined },
+  { id: 2, name: 'passage', color: '#64748b', dashArray: '4 3' },
+  { id: 3, name: 'door', color: '#c2410c', dashArray: '8 5' },
+  { id: 4, name: 'entrance', color: '#b45309', dashArray: '2 3' },
 ] as const;
 
 export type RoomTypeMeta = { id: number; name: string; color: string; textColor: string };
-export type EdgeTypeMeta = { id: number; name: string; color: string; dashed: boolean };
+export type EdgeTypeMeta = { id: number; name: string; color: string; dashArray: string | undefined };
 
 export const DATASETS = [
   {
