@@ -43,12 +43,12 @@ export function useForceSimulation({
           // (which have few neighbours pulling outward) get sucked inward
           // by their one link and edges visually look much shorter than
           // edges inside a dense cluster.
-          .distance(160)
+          .distance(105)
           .strength(0.9),
       )
-      // Stronger node repulsion spreads the graph out so links can reach
-      // their target distance instead of getting compressed.
-      .force('charge', forceManyBody<BubbleNodeState>().strength(-900).distanceMax(700))
+      // Moderate node repulsion — enough to spread overlapping clusters,
+      // not so much that edges look long.
+      .force('charge', forceManyBody<BubbleNodeState>().strength(-450).distanceMax(500))
       // Weak centering: just keeps the graph from drifting off-screen,
       // doesn't actively pull peripheral nodes inward.
       .force('center', forceCenter(width / 2, height / 2).strength(0.05))
