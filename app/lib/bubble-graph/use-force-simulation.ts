@@ -44,11 +44,8 @@ export function useForceSimulation({
       .force('charge', forceManyBody<BubbleNodeState>().strength(-400))
       .force('center', forceCenter(width / 2, height / 2))
       .force('collide', forceCollide<BubbleNodeState>(42))
-      // Settle quickly so deletes / type changes don't trigger a long
-      // visible re-layout. Sim stops in ~1 second; after that, only the
-      // explicitly modified element moves (e.g. a dragged node).
-      .alphaDecay(0.08)
-      .alphaMin(0.05)
+      // Use d3-force defaults (alphaDecay 0.0228, alphaMin 0.001) so the
+      // simulation feels "alive" — graph rebalances smoothly after edits.
       .on('tick', () => onTick([...nodesRef.current]));
     simRef.current = sim;
     return () => {

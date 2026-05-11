@@ -73,7 +73,6 @@ export default function Home() {
   const [selectedHistoryId, setSelectedHistoryId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [topologyDraft, setTopologyDraft] = useSessionState<GeneratedGraph | undefined>('topologyDraft', undefined);
   const [boundaryDraft, setBoundaryDraft] = useSessionState<string>('boundaryDraft', '');
   const [toast, setToast] = useState<string | null>(null);
   // Transient edits to the currently-displayed graph (Graph mode).
@@ -118,19 +117,23 @@ export default function Home() {
     }
   }, [selectedDataset]);
 
-  const handleSendGraphToFloorplan = useCallback(async (graphItem: GraphHistoryItem) => {
+  const handleSendCurrentGraphToFloorplan = useCallback(async () => {
+    // Source: live-edited draft > selected sampled-graph item.
+    // If neither exists yet (user clicked before editing or sampling), bail.
+    const graphItem =
+      selectedItem?.kind === 'graph' ? (selectedItem as GraphHistoryItem) : null;
+    const sourceGraph = graphDraft ?? graphItem?.graph;
+    if (!sourceGraph) return;
     setLoading(true);
     setError(null);
     try {
-      // Use the live-edited draft if available, otherwise fall back to the original graph.
-      const sourceGraph = graphDraft ?? graphItem.graph;
       const rooms = sourceGraph.rooms;
       const adjacency =
         sourceGraph.adjacency.length > 0
           ? sourceGraph.adjacency
           : computeAdjacency(sourceGraph);
       const res = await generateTopology(rooms, adjacency);
-      const item = createFloorplanItem(selectedDataset, res.image, 'graph', graphItem.id);
+      const item = createFloorplanItem(selectedDataset, res.image, 'graph', graphItem?.id);
       setHistory((prev) => prependHistory(prev, item));
       setSelectedHistoryId(item.id);
     } catch (e) {
@@ -138,43 +141,18 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
-  }, [selectedDataset, graphDraft]);
-
-  const handleGenerateFloorplanFromTopology = useCallback(async () => {
-    if (!topologyDraft) return;
-    setLoading(true);
-    setError(null);
-    try {
-      const adjacency =
-        topologyDraft.adjacency.length > 0
-          ? topologyDraft.adjacency
-          : computeAdjacency(topologyDraft);
-      const res = await generateTopology(topologyDraft.rooms, adjacency);
-      const item = createFloorplanItem(selectedDataset, res.image, 'topology');
-      setHistory((prev) => prependHistory(prev, item));
-      setSelectedHistoryId(item.id);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Generation failed');
-    } finally {
-      setLoading(false);
-    }
-  }, [topologyDraft, selectedDataset]);
+  }, [selectedDataset, graphDraft, selectedItem]);
 
   const handleSelectHistory = useCallback((id: string) => {
     const item = findHistoryItem(history, id);
     if (!item) return;
-    // Auto-switch to a viewer mode that can render this item.
-    // Rules per spec §6.4 and §6.2:
-    //   • graph item → must be in Graph mode to see it
-    //   • floorplan item while in Graph mode → switch to Unconstrained (no editor there)
-    //   • floorplan item in Topology/Boundary mode → switch to Unconstrained
-    //     (the editor occupies the main viewer in those modes, so the floorplan can't display)
+    // Auto-switch to a viewer mode that can render this item:
+    //   • graph item → Graph mode (editable canvas)
+    //   • floorplan item while in Graph or Boundary mode → Unconstrained (the only floorplan viewer)
     let nextMode: GenerationMode = activeMode;
     if (item.kind === 'graph' && activeMode !== 'graph') {
       nextMode = 'graph';
-    } else if (item.kind === 'floorplan' && activeMode === 'graph') {
-      nextMode = 'unconstrained';
-    } else if (item.kind === 'floorplan' && (activeMode === 'topology' || activeMode === 'boundary')) {
+    } else if (item.kind === 'floorplan' && activeMode !== 'unconstrained') {
       nextMode = 'unconstrained';
     }
     if (nextMode !== activeMode) {
@@ -217,12 +195,7 @@ export default function Home() {
             {/* Mode-specific controls */}
             {activeMode === 'graph' && (
               <div className="rounded-xl border border-border/70 bg-background p-3 text-xs text-muted-foreground">
-                Sample bubble graphs from {selectedDatasetMeta.name}.
-              </div>
-            )}
-            {activeMode === 'topology' && (
-              <div className="rounded-xl border border-border/70 bg-background p-3 text-xs text-muted-foreground">
-                Edit the bubble graph in the workspace. Click empty space to add a room, drag from a node&apos;s edge to connect, right-click an edge to delete. Ctrl+Z/Y to undo/redo.
+                Edit the bubble graph in the workspace, or click <span className="font-medium text-foreground">Sample Graph</span> to populate it from {selectedDatasetMeta.name}. Use the canvas toolbar to add rooms / connect / reset.
               </div>
             )}
             {activeMode === 'boundary' && (
@@ -239,13 +212,11 @@ export default function Home() {
               onClick={() => {
                 if (activeMode === 'unconstrained') handleUnconstrained();
                 else if (activeMode === 'graph') handleSampleGraph();
-                else if (activeMode === 'topology') handleGenerateFloorplanFromTopology();
                 else if (activeMode === 'boundary') handleGenerateFloorplanFromBoundary();
               }}
               disabled={
                 activeMode !== 'unconstrained' &&
                 activeMode !== 'graph' &&
-                !(activeMode === 'topology' && topologyDraft !== undefined) &&
                 !(activeMode === 'boundary' && boundaryDraft !== '')
               }
             />
@@ -266,8 +237,6 @@ export default function Home() {
             loading={loading}
             error={error}
             dataset={selectedDataset}
-            topologyDraft={topologyDraft}
-            onTopologyChange={setTopologyDraft}
             boundaryDraft={boundaryDraft}
             onBoundaryChange={setBoundaryDraft}
             onGenerateBoundary={handleGenerateFloorplanFromBoundary}
@@ -279,8 +248,8 @@ export default function Home() {
             selectedId={selectedHistoryId}
             onSelect={handleSelectHistory}
             onClear={() => { setHistory([]); setSelectedHistoryId(null); }}
-            rightSlot={selectedItem?.kind === 'graph' ? (
-              <Button onClick={() => handleSendGraphToFloorplan(selectedItem)} disabled={loading} size="sm">
+            rightSlot={activeMode === 'graph' ? (
+              <Button onClick={handleSendCurrentGraphToFloorplan} disabled={loading} size="sm">
                 Send to Floorplan
               </Button>
             ) : null}

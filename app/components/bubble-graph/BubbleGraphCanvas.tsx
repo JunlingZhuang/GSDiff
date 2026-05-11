@@ -104,8 +104,10 @@ function reducer(state: EditState, action: EditAction): EditState {
         attr: action.attr,
         x: action.x,
         y: action.y,
-        fx: action.x,
-        fy: action.y,
+        // Leave fx/fy null so the simulation can position this node
+        // naturally based on its edges and the global force layout.
+        fx: null,
+        fy: null,
       };
       return { ...checkpointed, nodes: [...state.nodes, node] };
     }
@@ -161,15 +163,17 @@ function reducer(state: EditState, action: EditAction): EditState {
       };
     }
     case 'add-node-and-edge': {
-      // Single undo step: create node + edge
+      // Single undo step: create node + edge.
+      // Leave fx/fy null so the simulation can place the new node
+      // naturally given its connection to the source node.
       const newId = state.nodes.reduce((m, n) => Math.max(m, n.id), -1) + 1;
       const node: BubbleNodeState = {
         id: newId,
         attr: action.attr,
         x: action.x,
         y: action.y,
-        fx: action.x,
-        fy: action.y,
+        fx: null,
+        fy: null,
       };
       const edgeId = `${Math.min(action.sourceId, newId)}-${Math.max(action.sourceId, newId)}`;
       const edge: BubbleEdgeState = {
@@ -317,13 +321,24 @@ export function BubbleGraphCanvas({
     [editing],
   );
 
-  const { pinNode } = useForceSimulation({
+  const { pinNode, releaseNode, reheat } = useForceSimulation({
     nodes: initialNodes,
     edges: initialEdges,
     width,
     height,
     onTick: handleTick,
   });
+
+  // Dispatch wrapper that also bumps the simulation so the graph
+  // visibly rebalances after structural edits (add/delete/connect).
+  const dispatchAndReheat = useCallback(
+    (action: EditAction) => {
+      dispatch(action);
+      // Slight delay so the reducer's state update is in effect before reheat.
+      requestAnimationFrame(() => reheat());
+    },
+    [reheat],
+  );
 
   // ---------------------------------------------------------------------------
   // onChange emission
@@ -462,7 +477,9 @@ export function BubbleGraphCanvas({
     return () => container.removeEventListener('wheel', onWheel);
   }, [width, height]);
 
-  // Drag node to move it
+  // Drag node to move it. Pin during drag, release on drop so the node
+  // rejoins the force layout — gives a "free force graph" feel where
+  // letting go springs the node back into a natural equilibrium.
   const dragNode = (nodeId: number) => (e: React.PointerEvent) => {
     e.preventDefault();
     const svg = (e.currentTarget as SVGElement).ownerSVGElement;
@@ -475,6 +492,8 @@ export function BubbleGraphCanvas({
     const onUp = () => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
+      releaseNode(nodeId);
+      reheat();
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);

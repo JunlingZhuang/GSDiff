@@ -14,7 +14,6 @@ interface Props {
 const LABEL: Record<GenerationMode, string> = {
   unconstrained: 'Generate Floorplan',
   graph: 'Sample Graph',
-  topology: 'Generate Floorplan',
   boundary: 'Generate Floorplan',
 };
 

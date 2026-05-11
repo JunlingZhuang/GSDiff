@@ -85,14 +85,8 @@ export const GENERATION_MODES = [
   {
     id: 'graph' as const,
     name: 'Graph',
-    description: 'Sample a room graph before floorplan generation',
+    description: 'Sample, edit, or build a bubble graph; then generate a floorplan',
     icon: 'Network',
-  },
-  {
-    id: 'topology' as const,
-    name: 'Graph Editor',
-    description: 'Manually edit a bubble diagram, then generate a floorplan',
-    icon: 'Share2',
   },
   {
     id: 'boundary' as const,
