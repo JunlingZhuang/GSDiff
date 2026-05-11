@@ -1,20 +1,33 @@
 'use client';
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from 'react';
 import { DATASET_SPECS, type DatasetId } from '@/lib/constants';
 import type { GeneratedGraph } from '@/lib/types';
 import type { BubbleNodeState, BubbleEdgeState, BubbleSelection } from '@/lib/bubble-graph/types';
 import { useForceSimulation } from '@/lib/bubble-graph/use-force-simulation';
 import { BubbleNode } from './BubbleNode';
 import { BubbleEdge } from './BubbleEdge';
+import { EditorToolbar } from './EditorToolbar';
+import { NodeActionBar } from './NodeActionBar';
+import { EdgeActionBar } from './EdgeActionBar';
 
 interface Props {
   graph: GeneratedGraph;
   dataset: DatasetId;
   mode: 'view' | 'edit';
   onChange?: (next: GeneratedGraph) => void;
-  defaultNodeAttr?: number;
-  defaultEdgeType?: number;
+  /** Initial default room-type attr for newly created nodes (editor-internal after mount) */
+  defaultNodeAttrInitial?: number;
+  /** Initial default edge type for newly created edges (editor-internal after mount) */
+  defaultEdgeTypeInitial?: number;
   onSelectionChange?: (sel: BubbleSelection) => void;
   width?: number;
   height?: number;
@@ -33,7 +46,9 @@ type EditAction =
   | { type: 'change-node-attr'; id: number; attr: number }
   | { type: 'add-edge'; source: number; target: number; edgeType: number }
   | { type: 'delete-edge'; id: string }
-  | { type: 'cycle-edge-type'; id: string; nextType: number }
+  | { type: 'set-edge-type'; id: string; edgeType: number }
+  /** Compound: add a new node then connect source → new-node in ONE undo step */
+  | { type: 'add-node-and-edge'; attr: number; x: number; y: number; sourceId: number; edgeType: number }
   | { type: 'undo' }
   | { type: 'redo' }
   | { type: 'tick'; nodes: BubbleNodeState[] };
@@ -54,7 +69,6 @@ function pushPast(state: EditState): EditState {
 
 function reducer(state: EditState, action: EditAction): EditState {
   if (action.type === 'tick') {
-    // Position-only update from d3-force; not undoable
     return { ...state, nodes: action.nodes };
   }
   if (action.type === 'undo') {
@@ -129,12 +143,36 @@ function reducer(state: EditState, action: EditAction): EditState {
         edges: state.edges.filter((e) => e.id !== action.id),
       };
     }
-    case 'cycle-edge-type': {
+    case 'set-edge-type': {
       return {
         ...checkpointed,
         edges: state.edges.map((e) =>
-          e.id === action.id ? { ...e, edgeType: action.nextType } : e,
+          e.id === action.id ? { ...e, edgeType: action.edgeType } : e,
         ),
+      };
+    }
+    case 'add-node-and-edge': {
+      // Single undo step: create node + edge
+      const newId = state.nodes.reduce((m, n) => Math.max(m, n.id), -1) + 1;
+      const node: BubbleNodeState = {
+        id: newId,
+        attr: action.attr,
+        x: action.x,
+        y: action.y,
+        fx: action.x,
+        fy: action.y,
+      };
+      const edgeId = `${Math.min(action.sourceId, newId)}-${Math.max(action.sourceId, newId)}`;
+      const edge: BubbleEdgeState = {
+        id: edgeId,
+        source: action.sourceId,
+        target: newId,
+        edgeType: action.edgeType,
+      };
+      return {
+        ...checkpointed,
+        nodes: [...state.nodes, node],
+        edges: [...state.edges, edge],
       };
     }
   }
@@ -149,17 +187,19 @@ export function BubbleGraphCanvas({
   dataset,
   mode,
   onChange,
-  defaultNodeAttr = 0,
-  defaultEdgeType = 1,
+  defaultNodeAttrInitial = 0,
+  defaultEdgeTypeInitial = 1,
   onSelectionChange,
   width: widthProp,
   height: heightProp,
 }: Props) {
   const spec = DATASET_SPECS[dataset];
 
-  // Measure container so the SVG viewBox matches its actual aspect ratio.
-  // Without this, viewBox stays at a fixed 900x600 ratio and either letterboxes
-  // (gray rect floating inside SVG) or pillarboxes its content.
+  // Editor-internal toolbar state
+  const [defaultNodeAttr, setDefaultNodeAttr] = useState(defaultNodeAttrInitial);
+  const [defaultEdgeType, setDefaultEdgeType] = useState(defaultEdgeTypeInitial);
+
+  // Measure container
   const containerRef = useRef<HTMLDivElement>(null);
   const [measured, setMeasured] = useState({ width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT });
   useLayoutEffect(() => {
@@ -189,7 +229,7 @@ export function BubbleGraphCanvas({
         fx: null,
         fy: null,
       })),
-    // Re-init only when the graph identity changes, not on each render
+    // Re-init only when graph identity changes
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [graph.nodes.length, graph.nodes.map((n) => n.id).join(',')],
   );
@@ -207,13 +247,10 @@ export function BubbleGraphCanvas({
   );
 
   // ---------------------------------------------------------------------------
-  // View-mode state (original simple path)
+  // State
   // ---------------------------------------------------------------------------
   const [viewNodes, setViewNodes] = useState<BubbleNodeState[]>(initialNodes);
 
-  // ---------------------------------------------------------------------------
-  // Edit-mode state (reducer path)
-  // ---------------------------------------------------------------------------
   const [editState, dispatch] = useReducer(reducer, {
     nodes: initialNodes,
     edges: initialEdges,
@@ -227,13 +264,16 @@ export function BubbleGraphCanvas({
 
   const [selection, setSelection] = useState<BubbleSelection>({ nodeId: null, edgeId: null });
 
+  // Hover tracking for "+" handle
+  const [hoveredNodeId, setHoveredNodeId] = useState<number | null>(null);
+
   // Edge-creation rubber-band state (edit mode only)
   const [edgeDraft, setEdgeDraft] = useState<{
     sourceId: number;
     cursor: { x: number; y: number };
   } | null>(null);
 
-  // Keep a stable ref to the current nodes list for use in pointer event callbacks
+  // Keep stable ref to nodes for pointer callbacks
   const nodesRef = useRef<BubbleNodeState[]>(nodes);
   nodesRef.current = nodes;
 
@@ -261,7 +301,7 @@ export function BubbleGraphCanvas({
   });
 
   // ---------------------------------------------------------------------------
-  // onChange emission for edit mode
+  // onChange emission
   // ---------------------------------------------------------------------------
   useEffect(() => {
     if (!editing || !onChange) return;
@@ -294,12 +334,11 @@ export function BubbleGraphCanvas({
   }, [editing, editState.nodes, editState.edges]);
 
   // ---------------------------------------------------------------------------
-  // Keyboard handlers (edit mode only)
+  // Keyboard handlers
   // ---------------------------------------------------------------------------
   useEffect(() => {
     if (!editing) return;
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Don't fire if focus is on an input/textarea
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
 
@@ -332,13 +371,27 @@ export function BubbleGraphCanvas({
   // Helpers
   // ---------------------------------------------------------------------------
 
-  const updateSelection = (next: BubbleSelection) => {
-    setSelection(next);
-    onSelectionChange?.(next);
-  };
+  const updateSelection = useCallback(
+    (next: BubbleSelection) => {
+      setSelection(next);
+      onSelectionChange?.(next);
+    },
+    [onSelectionChange],
+  );
 
-  // Convert client coordinates to SVG viewBox coordinates.
-  // Accepts the SVG element's bounding rect.
+  // Convert SVG viewBox coords → container-relative pixels
+  const viewBoxToContainer = useCallback(
+    (vx: number, vy: number): { px: number; py: number } => {
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) return { px: vx, py: vy };
+      const scaleX = rect.width / width;
+      const scaleY = rect.height / height;
+      return { px: vx * scaleX, py: vy * scaleY };
+    },
+    [width, height],
+  );
+
+  // Convert client coordinates to SVG viewBox coordinates
   const clientToViewBox = (
     clientX: number,
     clientY: number,
@@ -348,7 +401,7 @@ export function BubbleGraphCanvas({
     y: ((clientY - rect.top) / rect.height) * height,
   });
 
-  // Drag node — moves pinNode in the force simulation.
+  // Drag node to move it
   const dragNode = (nodeId: number) => (e: React.PointerEvent) => {
     e.preventDefault();
     const svg = (e.currentTarget as SVGElement).ownerSVGElement;
@@ -366,52 +419,88 @@ export function BubbleGraphCanvas({
     window.addEventListener('pointerup', onUp);
   };
 
-  // Pointer-down handler for edit mode: distinguishes drag vs. edge-creation.
-  const handleNodePointerDown = (nodeId: number) => (e: React.PointerEvent) => {
-    if (!editing) return dragNode(nodeId)(e);
-
-    const target = nodesRef.current.find((n) => n.id === nodeId);
-    if (!target) return;
-
-    const svgEl = (e.currentTarget as SVGElement).ownerSVGElement;
+  // Start edge-drag from the "+" handle
+  const startEdgeDrag = (sourceId: number) => (e: React.PointerEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const svgEl = (e.currentTarget as SVGElement).closest('svg');
     if (!svgEl) return;
     const rect = svgEl.getBoundingClientRect();
-    const { x: px, y: py } = clientToViewBox(e.clientX, e.clientY, rect);
-    const dist = Math.hypot(px - target.x, py - target.y);
+    const startPos = clientToViewBox(e.clientX, e.clientY, rect);
+    setEdgeDraft({ sourceId, cursor: startPos });
 
-    if (dist > 30) {
-      // Start edge-drag from perimeter
-      e.preventDefault();
-      setEdgeDraft({ sourceId: nodeId, cursor: { x: px, y: py } });
+    const onMove = (ev: PointerEvent) => {
+      const pos = clientToViewBox(ev.clientX, ev.clientY, rect);
+      setEdgeDraft({ sourceId, cursor: pos });
+    };
+    const onUp = (ev: PointerEvent) => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      const pos = clientToViewBox(ev.clientX, ev.clientY, rect);
+      const hit = nodesRef.current.find(
+        (n) => n.id !== sourceId && Math.hypot(n.x - pos.x, n.y - pos.y) < 36,
+      );
+      if (hit) {
+        dispatch({
+          type: 'add-edge',
+          source: sourceId,
+          target: hit.id,
+          edgeType: defaultEdgeType,
+        });
+      } else {
+        // Drop on empty space → add node + edge as one undo step
+        dispatch({
+          type: 'add-node-and-edge',
+          attr: defaultNodeAttr,
+          x: pos.x,
+          y: pos.y,
+          sourceId,
+          edgeType: defaultEdgeType,
+        });
+      }
+      setEdgeDraft(null);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  };
 
-      const onMove = (ev: PointerEvent) => {
-        const pos = clientToViewBox(ev.clientX, ev.clientY, rect);
-        setEdgeDraft({ sourceId: nodeId, cursor: pos });
-      };
-      const onUp = (ev: PointerEvent) => {
-        window.removeEventListener('pointermove', onMove);
-        window.removeEventListener('pointerup', onUp);
-        const pos = clientToViewBox(ev.clientX, ev.clientY, rect);
-        const hit = nodesRef.current.find(
-          (n) => n.id !== nodeId && Math.hypot(n.x - pos.x, n.y - pos.y) < 36,
-        );
-        if (hit) {
-          dispatch({ type: 'add-edge', source: nodeId, target: hit.id, edgeType: defaultEdgeType });
-        }
-        setEdgeDraft(null);
-      };
-      window.addEventListener('pointermove', onMove);
-      window.addEventListener('pointerup', onUp);
-    } else {
-      dragNode(nodeId)(e);
-    }
+  const handleAddNodeAtCenter = () => {
+    dispatch({
+      type: 'add-node',
+      attr: defaultNodeAttr,
+      x: width / 2 + (Math.random() - 0.5) * 80,
+      y: height / 2 + (Math.random() - 0.5) * 80,
+    });
   };
 
   // ---------------------------------------------------------------------------
-  // Derived helpers
+  // Derived
   // ---------------------------------------------------------------------------
 
   const nodeIndex = new Map(nodes.map((n) => [n.id, n]));
+
+  // Selected node / edge objects for action bars
+  const selectedNode =
+    selection.nodeId !== null ? nodeIndex.get(selection.nodeId) ?? null : null;
+  const selectedEdge =
+    selection.edgeId !== null ? edges.find((e) => e.id === selection.edgeId) ?? null : null;
+
+  // Edge midpoint for EdgeActionBar
+  const edgeMidpoint = (() => {
+    if (!selectedEdge) return null;
+    const srcId =
+      typeof selectedEdge.source === 'object'
+        ? (selectedEdge.source as unknown as BubbleNodeState).id
+        : selectedEdge.source;
+    const tgtId =
+      typeof selectedEdge.target === 'object'
+        ? (selectedEdge.target as unknown as BubbleNodeState).id
+        : selectedEdge.target;
+    const src = nodeIndex.get(srcId);
+    const tgt = nodeIndex.get(tgtId);
+    if (!src || !tgt) return null;
+    return { x: (src.x + tgt.x) / 2, y: (src.y + tgt.y) / 2 };
+  })();
 
   // ---------------------------------------------------------------------------
   // Render
@@ -421,21 +510,76 @@ export function BubbleGraphCanvas({
     <div
       ref={containerRef}
       className="relative h-full w-full overflow-hidden rounded-2xl bg-[oklch(0.97_0_0)]"
+      onClick={() => {
+        // Clicking the container background deselects
+        // (SVG children stop propagation)
+      }}
     >
+      {/* Top toolbar (edit mode only) */}
       {editing && (
-        <div className="pointer-events-none absolute left-3 top-3 z-10 max-w-[420px] rounded-md bg-foreground/85 px-3 py-2 text-[11px] leading-snug text-background shadow-md backdrop-blur-sm">
-          <div className="font-semibold">Edit mode</div>
-          <div className="opacity-90">Click empty space to add room · drag node edge to another node to add connection</div>
-          <div className="opacity-90">Double-click node to change type · click edge to cycle · right-click to delete · DEL · Ctrl+Z/Y</div>
-        </div>
+        <EditorToolbar
+          roomTypes={spec.roomTypes}
+          edgeTypes={spec.edgeTypes}
+          defaultNodeAttr={defaultNodeAttr}
+          defaultEdgeType={defaultEdgeType}
+          onDefaultNodeAttrChange={setDefaultNodeAttr}
+          onDefaultEdgeTypeChange={setDefaultEdgeType}
+          canUndo={editState.past.length > 0}
+          canRedo={editState.future.length > 0}
+          onUndo={() => dispatch({ type: 'undo' })}
+          onRedo={() => dispatch({ type: 'redo' })}
+          onAddNode={handleAddNodeAtCenter}
+        />
       )}
+
+      {/* Selected node action bar */}
+      {editing && selectedNode && (() => {
+        const { px, py } = viewBoxToContainer(selectedNode.x, selectedNode.y);
+        return (
+          <NodeActionBar
+            nodeId={selectedNode.id}
+            currentAttr={selectedNode.attr}
+            roomTypes={spec.roomTypes}
+            px={px}
+            py={py}
+            onChangeAttr={(attr) => {
+              dispatch({ type: 'change-node-attr', id: selectedNode.id, attr });
+            }}
+            onDelete={() => {
+              dispatch({ type: 'delete-node', id: selectedNode.id });
+              updateSelection({ nodeId: null, edgeId: null });
+            }}
+          />
+        );
+      })()}
+
+      {/* Selected edge action bar */}
+      {editing && selectedEdge && edgeMidpoint && (() => {
+        const { px, py } = viewBoxToContainer(edgeMidpoint.x, edgeMidpoint.y);
+        return (
+          <EdgeActionBar
+            edgeId={selectedEdge.id}
+            currentType={selectedEdge.edgeType}
+            edgeTypes={spec.edgeTypes}
+            px={px}
+            py={py}
+            onChangeType={(et) => {
+              dispatch({ type: 'set-edge-type', id: selectedEdge.id, edgeType: et });
+            }}
+            onDelete={() => {
+              dispatch({ type: 'delete-edge', id: selectedEdge.id });
+              updateSelection({ nodeId: null, edgeId: null });
+            }}
+          />
+        );
+      })()}
+
       <svg
         viewBox={`0 0 ${width} ${height}`}
         className="block h-full w-full"
         role="img"
         aria-label="Bubble graph"
         onClick={(e) => {
-          // Empty-space click on SVG (children stop propagation when needed).
           if (e.target !== e.currentTarget) return;
           if (editing) {
             const rect = e.currentTarget.getBoundingClientRect();
@@ -446,111 +590,127 @@ export function BubbleGraphCanvas({
           }
         }}
       >
-      {/* Edges */}
-      <g>
-        {edges.map((edge) => {
-          // d3-force replaces source/target numeric ids with node object references
-          // after the simulation starts. Resolve to numeric id safely.
-          const sourceId =
-            typeof edge.source === 'object'
-              ? (edge.source as unknown as BubbleNodeState).id
-              : edge.source;
-          const targetId =
-            typeof edge.target === 'object'
-              ? (edge.target as unknown as BubbleNodeState).id
-              : edge.target;
-          const source = nodeIndex.get(sourceId);
-          const target = nodeIndex.get(targetId);
-          if (!source || !target) return null;
-          const meta = spec.edgeTypes.find((m) => m.id === edge.edgeType);
-          return (
-            <BubbleEdge
-              key={edge.id}
-              edge={edge}
-              source={source}
-              target={target}
-              meta={meta}
-              selected={selection.edgeId === edge.id}
-              onClick={
-                editing
-                  ? (e) => {
-                      e.stopPropagation();
-                      // Cycle to next non-none edge type
-                      const nonNoneTypes = spec.edgeTypes
-                        .filter((m) => m.id !== 0)
-                        .map((m) => m.id);
-                      const idx = nonNoneTypes.indexOf(edge.edgeType);
-                      const nextType = nonNoneTypes[(idx + 1) % nonNoneTypes.length];
-                      dispatch({ type: 'cycle-edge-type', id: edge.id, nextType });
-                      updateSelection({ nodeId: null, edgeId: edge.id });
-                    }
-                  : undefined
-              }
-              onContextMenu={
-                editing
-                  ? (e) => {
-                      e.preventDefault();
-                      dispatch({ type: 'delete-edge', id: edge.id });
-                      if (selection.edgeId === edge.id) {
-                        updateSelection({ nodeId: null, edgeId: null });
+        {/* Edges */}
+        <g>
+          {edges.map((edge) => {
+            const sourceId =
+              typeof edge.source === 'object'
+                ? (edge.source as unknown as BubbleNodeState).id
+                : edge.source;
+            const targetId =
+              typeof edge.target === 'object'
+                ? (edge.target as unknown as BubbleNodeState).id
+                : edge.target;
+            const source = nodeIndex.get(sourceId);
+            const target = nodeIndex.get(targetId);
+            if (!source || !target) return null;
+            const meta = spec.edgeTypes.find((m) => m.id === edge.edgeType);
+            return (
+              <BubbleEdge
+                key={edge.id}
+                edge={edge}
+                source={source}
+                target={target}
+                meta={meta}
+                selected={selection.edgeId === edge.id}
+                onClick={
+                  editing
+                    ? (e) => {
+                        e.stopPropagation();
+                        updateSelection({ nodeId: null, edgeId: edge.id });
                       }
-                    }
-                  : undefined
-              }
-            />
-          );
-        })}
-      </g>
-      {/* Rubber-band edge draft line */}
-      {edgeDraft && (() => {
-        const src = nodesRef.current.find((n) => n.id === edgeDraft.sourceId);
-        if (!src) return null;
-        return (
-          <line
-            x1={src.x}
-            y1={src.y}
-            x2={edgeDraft.cursor.x}
-            y2={edgeDraft.cursor.y}
-            stroke="#94a3b8"
-            strokeWidth="2"
-            strokeDasharray="4 4"
-            style={{ pointerEvents: 'none' }}
-          />
-        );
-      })()}
-      {/* Nodes */}
-      <g>
-        {nodes.map((node) => {
-          const meta = spec.roomTypes.find((m) => m.id === node.attr);
-          return (
-            <BubbleNode
-              key={node.id}
-              node={node}
-              meta={meta}
-              selected={selection.nodeId === node.id}
-              onPointerDown={handleNodePointerDown(node.id)}
-              onClick={
-                editing
-                  ? (e) => {
-                      e.stopPropagation();
-                      updateSelection({ nodeId: node.id, edgeId: null });
-                    }
-                  : undefined
-              }
-              onDoubleClick={
-                editing
-                  ? (e) => {
-                      e.stopPropagation();
-                      // Cycle attr to next room type
-                      const nextAttr = (node.attr + 1) % spec.roomTypes.length;
-                      dispatch({ type: 'change-node-attr', id: node.id, attr: nextAttr });
-                    }
-                  : undefined
-              }
-            />
-          );
-        })}
-      </g>
+                    : undefined
+                }
+                onContextMenu={
+                  editing
+                    ? (e) => {
+                        e.preventDefault();
+                        dispatch({ type: 'delete-edge', id: edge.id });
+                        if (selection.edgeId === edge.id) {
+                          updateSelection({ nodeId: null, edgeId: null });
+                        }
+                      }
+                    : undefined
+                }
+              />
+            );
+          })}
+        </g>
+
+        {/* Rubber-band edge draft line */}
+        {edgeDraft &&
+          (() => {
+            const src = nodesRef.current.find((n) => n.id === edgeDraft.sourceId);
+            if (!src) return null;
+            return (
+              <line
+                x1={src.x}
+                y1={src.y}
+                x2={edgeDraft.cursor.x}
+                y2={edgeDraft.cursor.y}
+                stroke="#94a3b8"
+                strokeWidth="2"
+                strokeDasharray="4 4"
+                style={{ pointerEvents: 'none' }}
+              />
+            );
+          })()}
+
+        {/* Nodes */}
+        <g>
+          {nodes.map((node) => {
+            const meta = spec.roomTypes.find((m) => m.id === node.attr);
+            const isHovered = editing && hoveredNodeId === node.id;
+            return (
+              <g key={node.id}>
+                <BubbleNode
+                  node={node}
+                  meta={meta}
+                  selected={selection.nodeId === node.id}
+                  onPointerDown={dragNode(node.id)}
+                  onPointerEnter={editing ? () => setHoveredNodeId(node.id) : undefined}
+                  onPointerLeave={editing ? () => setHoveredNodeId((prev) => prev === node.id ? null : prev) : undefined}
+                  onClick={
+                    editing
+                      ? (e) => {
+                          e.stopPropagation();
+                          updateSelection({ nodeId: node.id, edgeId: null });
+                        }
+                      : undefined
+                  }
+                />
+                {/* "+" handle: shown when hovered in edit mode */}
+                {isHovered && (
+                  <circle
+                    cx={node.x + 48}
+                    cy={node.y}
+                    r={10}
+                    fill="oklch(0.55 0.21 35)"
+                    stroke="white"
+                    strokeWidth={2}
+                    style={{ cursor: 'crosshair' }}
+                    onPointerDown={startEdgeDrag(node.id)}
+                    onPointerEnter={() => setHoveredNodeId(node.id)}
+                  />
+                )}
+                {isHovered && (
+                  <text
+                    x={node.x + 48}
+                    y={node.y}
+                    textAnchor="middle"
+                    dominantBaseline="middle"
+                    fontSize="14"
+                    fontWeight="bold"
+                    fill="white"
+                    style={{ pointerEvents: 'none', userSelect: 'none' }}
+                  >
+                    +
+                  </text>
+                )}
+              </g>
+            );
+          })}
+        </g>
       </svg>
     </div>
   );

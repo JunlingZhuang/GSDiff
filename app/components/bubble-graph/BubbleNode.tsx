@@ -8,11 +8,13 @@ interface Props {
   meta: RoomTypeMeta | undefined;
   selected: boolean;
   onPointerDown?: (e: React.PointerEvent) => void;
+  onPointerEnter?: (e: React.PointerEvent) => void;
+  onPointerLeave?: (e: React.PointerEvent) => void;
   onClick?: (e: React.MouseEvent) => void;
   onDoubleClick?: (e: React.MouseEvent) => void;
 }
 
-export function BubbleNode({ node, meta, selected, onPointerDown, onClick, onDoubleClick }: Props) {
+export function BubbleNode({ node, meta, selected, onPointerDown, onPointerEnter, onPointerLeave, onClick, onDoubleClick }: Props) {
   const fill = meta?.color ?? '#e5e7eb';
   const textColor = meta?.textColor ?? '#111827';
   const label = meta?.name ?? `class_${node.attr}`;
@@ -21,6 +23,8 @@ export function BubbleNode({ node, meta, selected, onPointerDown, onClick, onDou
       transform={`translate(${node.x},${node.y})`}
       style={{ cursor: onPointerDown ? 'grab' : 'default' }}
       onPointerDown={onPointerDown}
+      onPointerEnter={onPointerEnter}
+      onPointerLeave={onPointerLeave}
       onClick={onClick}
       onDoubleClick={onDoubleClick}
     >

@@ -8,8 +8,8 @@ import type { GeneratedGraph } from '@/lib/types';
 interface Props {
   dataset: DatasetId;
   initialGraph?: GeneratedGraph;
-  defaultNodeAttr?: number;
-  defaultEdgeType?: number;
+  defaultNodeAttrInitial?: number;
+  defaultEdgeTypeInitial?: number;
   onGraphChange: (graph: GeneratedGraph) => void;
 }
 
@@ -35,8 +35,8 @@ export const DEFAULT_TOPOLOGY_GRAPH: GeneratedGraph = {
 export function TopologyEditor({
   dataset,
   initialGraph,
-  defaultNodeAttr,
-  defaultEdgeType,
+  defaultNodeAttrInitial,
+  defaultEdgeTypeInitial,
   onGraphChange,
 }: Props) {
   const [graph, setGraph] = useState<GeneratedGraph>(initialGraph ?? DEFAULT_TOPOLOGY_GRAPH);
@@ -51,8 +51,8 @@ export function TopologyEditor({
       dataset={dataset}
       mode="edit"
       onChange={setGraph}
-      defaultNodeAttr={defaultNodeAttr}
-      defaultEdgeType={defaultEdgeType}
+      defaultNodeAttrInitial={defaultNodeAttrInitial}
+      defaultEdgeTypeInitial={defaultEdgeTypeInitial}
     />
   );
 }

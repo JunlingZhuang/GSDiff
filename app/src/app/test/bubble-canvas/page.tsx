@@ -46,8 +46,8 @@ function EditModeDemo() {
           dataset="rplan"
           mode="edit"
           onChange={setGraph}
-          defaultNodeAttr={1}
-          defaultEdgeType={1}
+          defaultNodeAttrInitial={1}
+          defaultEdgeTypeInitial={1}
         />
       </div>
       <pre className="mt-2 max-h-32 overflow-auto rounded bg-muted p-2 text-xs">

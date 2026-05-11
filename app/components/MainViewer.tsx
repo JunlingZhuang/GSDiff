@@ -19,6 +19,7 @@ interface Props {
   boundaryDraft?: string;
   onBoundaryChange?: (dataUrl: string) => void;
   onGenerateBoundary?: () => void;
+  onGraphDraftChange?: (g: GeneratedGraph) => void;
 }
 
 export function MainViewer({
@@ -32,6 +33,7 @@ export function MainViewer({
   boundaryDraft,
   onBoundaryChange,
   onGenerateBoundary,
+  onGraphDraftChange,
 }: Props) {
   // Boundary mode: always render the canvas regardless of selectedItem
   if (mode === 'boundary') {
@@ -82,7 +84,8 @@ export function MainViewer({
             <BubbleGraphCanvas
               graph={selectedItem.graph}
               dataset={selectedItem.dataset}
-              mode="view"
+              mode="edit"
+              onChange={onGraphDraftChange}
             />
           ) : (
             <img

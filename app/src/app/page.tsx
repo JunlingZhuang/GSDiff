@@ -76,6 +76,12 @@ export default function Home() {
   const [topologyDraft, setTopologyDraft] = useSessionState<GeneratedGraph | undefined>('topologyDraft', undefined);
   const [boundaryDraft, setBoundaryDraft] = useSessionState<string>('boundaryDraft', '');
   const [toast, setToast] = useState<string | null>(null);
+  // Transient edits to the currently-displayed graph (Graph mode).
+  // Resets to null whenever the selected history item changes.
+  const [graphDraft, setGraphDraft] = useState<GeneratedGraph | null>(null);
+  useEffect(() => {
+    setGraphDraft(null);
+  }, [selectedHistoryId]);
 
   const selectedDatasetMeta = DATASETS.find((dataset) => dataset.id === selectedDataset) ?? DATASETS[0];
   const selectedItem = findHistoryItem(history, selectedHistoryId);
@@ -116,7 +122,14 @@ export default function Home() {
     setLoading(true);
     setError(null);
     try {
-      const res = await generateTopology(graphItem.graph.rooms, graphItem.graph.adjacency);
+      // Use the live-edited draft if available, otherwise fall back to the original graph.
+      const sourceGraph = graphDraft ?? graphItem.graph;
+      const rooms = sourceGraph.rooms;
+      const adjacency =
+        sourceGraph.adjacency.length > 0
+          ? sourceGraph.adjacency
+          : computeAdjacency(sourceGraph);
+      const res = await generateTopology(rooms, adjacency);
       const item = createFloorplanItem(selectedDataset, res.image, 'graph', graphItem.id);
       setHistory((prev) => prependHistory(prev, item));
       setSelectedHistoryId(item.id);
@@ -125,7 +138,7 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
-  }, [selectedDataset]);
+  }, [selectedDataset, graphDraft]);
 
   const handleGenerateFloorplanFromTopology = useCallback(async () => {
     if (!topologyDraft) return;
@@ -258,6 +271,7 @@ export default function Home() {
             boundaryDraft={boundaryDraft}
             onBoundaryChange={setBoundaryDraft}
             onGenerateBoundary={handleGenerateFloorplanFromBoundary}
+            onGraphDraftChange={setGraphDraft}
           />
 
           <HistoryBar
