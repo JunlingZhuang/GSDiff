@@ -704,10 +704,74 @@ export function BubbleGraphCanvas({
                     +
                   </text>
                 )}
+                {/* Delete badge — selected node only, top-right of circle */}
+                {editing && selection.nodeId === node.id && (
+                  <g
+                    style={{ cursor: 'pointer' }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      dispatch({ type: 'delete-node', id: node.id });
+                      updateSelection({ nodeId: null, edgeId: null });
+                    }}
+                  >
+                    <circle
+                      cx={node.x + 26}
+                      cy={node.y - 26}
+                      r={11}
+                      fill="oklch(0.58 0.22 25)"
+                      stroke="white"
+                      strokeWidth={2}
+                    />
+                    <text
+                      x={node.x + 26}
+                      y={node.y - 26}
+                      textAnchor="middle"
+                      dominantBaseline="middle"
+                      fontSize="14"
+                      fontWeight="bold"
+                      fill="white"
+                      style={{ pointerEvents: 'none', userSelect: 'none' }}
+                    >
+                      ×
+                    </text>
+                  </g>
+                )}
               </g>
             );
           })}
         </g>
+        {/* Selected edge delete badge — sits at midpoint, offset down */}
+        {editing && selectedEdge && edgeMidpoint && (
+          <g
+            style={{ cursor: 'pointer' }}
+            onClick={(e) => {
+              e.stopPropagation();
+              dispatch({ type: 'delete-edge', id: selectedEdge.id });
+              updateSelection({ nodeId: null, edgeId: null });
+            }}
+          >
+            <circle
+              cx={edgeMidpoint.x}
+              cy={edgeMidpoint.y + 18}
+              r={10}
+              fill="oklch(0.58 0.22 25)"
+              stroke="white"
+              strokeWidth={2}
+            />
+            <text
+              x={edgeMidpoint.x}
+              y={edgeMidpoint.y + 18}
+              textAnchor="middle"
+              dominantBaseline="middle"
+              fontSize="13"
+              fontWeight="bold"
+              fill="white"
+              style={{ pointerEvents: 'none', userSelect: 'none' }}
+            >
+              ×
+            </text>
+          </g>
+        )}
       </svg>
     </div>
   );
