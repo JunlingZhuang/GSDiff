@@ -51,7 +51,7 @@ export function MainViewer({
   if (mode === 'topology') {
     return (
       <div className="flex flex-1 items-center justify-center overflow-hidden bg-background p-6">
-        <div className="h-full w-full max-w-[1200px]">
+        <div className="h-full w-full max-w-full">
           <TopologyEditor
             dataset={dataset}
             initialGraph={topologyDraft}
@@ -64,7 +64,7 @@ export function MainViewer({
 
   return (
     <div className="flex flex-1 items-center justify-center overflow-hidden bg-background p-6">
-      <div className="flex h-full w-full max-w-[1200px] items-center justify-center">
+      <div className="flex h-full w-full max-w-full items-center justify-center">
         {error && (
           <div className="rounded-xl border border-destructive/20 bg-destructive/5 px-4 py-3 text-sm text-destructive">
             {error}

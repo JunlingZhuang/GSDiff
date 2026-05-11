@@ -4,7 +4,6 @@ import { useState, useEffect, useCallback } from 'react';
 import { Header } from '@/components/Header';
 import { ModeSelector } from '@/components/ModeSelector';
 import { DatasetSelector } from '@/components/DatasetSelector';
-import { ModelStatusPanel } from '@/components/ModelStatusPanel';
 import { MainViewer } from '@/components/MainViewer';
 import { GenerateButton } from '@/components/GenerateButton';
 import {
@@ -201,7 +200,6 @@ export default function Home() {
           <div className="flex-1 space-y-4 overflow-auto p-4">
             <DatasetSelector value={selectedDataset} onChange={setSelectedDataset} />
             <ModeSelector activeMode={activeMode} onModeChange={setActiveMode} />
-            <ModelStatusPanel />
 
             {/* Mode-specific controls */}
             {activeMode === 'graph' && (

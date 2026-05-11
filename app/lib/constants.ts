@@ -83,8 +83,8 @@ export const GENERATION_MODES = [
   },
   {
     id: 'topology' as const,
-    name: 'Topology',
-    description: 'Define room adjacency as a bubble diagram',
+    name: 'Graph Editor',
+    description: 'Manually edit a bubble diagram, then generate a floorplan',
     icon: 'Share2',
   },
   {

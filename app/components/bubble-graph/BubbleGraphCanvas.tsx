@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { DATASET_SPECS, type DatasetId } from '@/lib/constants';
 import type { GeneratedGraph } from '@/lib/types';
 import type { BubbleNodeState, BubbleEdgeState, BubbleSelection } from '@/lib/bubble-graph/types';
@@ -152,10 +152,32 @@ export function BubbleGraphCanvas({
   defaultNodeAttr = 0,
   defaultEdgeType = 1,
   onSelectionChange,
-  width = DEFAULT_WIDTH,
-  height = DEFAULT_HEIGHT,
+  width: widthProp,
+  height: heightProp,
 }: Props) {
   const spec = DATASET_SPECS[dataset];
+
+  // Measure container so the SVG viewBox matches its actual aspect ratio.
+  // Without this, viewBox stays at a fixed 900x600 ratio and either letterboxes
+  // (gray rect floating inside SVG) or pillarboxes its content.
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [measured, setMeasured] = useState({ width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT });
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const update = () => {
+      const rect = el.getBoundingClientRect();
+      const w = Math.max(400, Math.round(rect.width));
+      const h = Math.max(300, Math.round(rect.height));
+      setMeasured((prev) => (prev.width === w && prev.height === h ? prev : { width: w, height: h }));
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+  const width = widthProp ?? measured.width;
+  const height = heightProp ?? measured.height;
 
   const initialNodes: BubbleNodeState[] = useMemo(
     () =>
@@ -396,24 +418,34 @@ export function BubbleGraphCanvas({
   // ---------------------------------------------------------------------------
 
   return (
-    <svg viewBox={`0 0 ${width} ${height}`} className="h-full w-full" role="img" aria-label="Bubble graph">
-      {/* Background — click-to-add-node in edit mode */}
-      <rect
-        width={width}
-        height={height}
-        fill="oklch(0.97 0 0)"
-        rx="18"
+    <div
+      ref={containerRef}
+      className="relative h-full w-full overflow-hidden rounded-2xl bg-[oklch(0.97_0_0)]"
+    >
+      {editing && (
+        <div className="pointer-events-none absolute left-3 top-3 z-10 max-w-[420px] rounded-md bg-foreground/85 px-3 py-2 text-[11px] leading-snug text-background shadow-md backdrop-blur-sm">
+          <div className="font-semibold">Edit mode</div>
+          <div className="opacity-90">Click empty space to add room · drag node edge to another node to add connection</div>
+          <div className="opacity-90">Double-click node to change type · click edge to cycle · right-click to delete · DEL · Ctrl+Z/Y</div>
+        </div>
+      )}
+      <svg
+        viewBox={`0 0 ${width} ${height}`}
+        className="block h-full w-full"
+        role="img"
+        aria-label="Bubble graph"
         onClick={(e) => {
+          // Empty-space click on SVG (children stop propagation when needed).
+          if (e.target !== e.currentTarget) return;
           if (editing) {
-            const svg = e.currentTarget.ownerSVGElement ?? (e.currentTarget as unknown as SVGSVGElement);
-            const rect = svg.getBoundingClientRect();
+            const rect = e.currentTarget.getBoundingClientRect();
             const { x, y } = clientToViewBox(e.clientX, e.clientY, rect);
             dispatch({ type: 'add-node', attr: defaultNodeAttr, x, y });
           } else {
             updateSelection({ nodeId: null, edgeId: null });
           }
         }}
-      />
+      >
       {/* Edges */}
       <g>
         {edges.map((edge) => {
@@ -519,6 +551,7 @@ export function BubbleGraphCanvas({
           );
         })}
       </g>
-    </svg>
+      </svg>
+    </div>
   );
 }
