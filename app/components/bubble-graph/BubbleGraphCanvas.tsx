@@ -502,22 +502,28 @@ export function BubbleGraphCanvas({
   }, [width, height]);
 
   // Drag node to move it. Pin during drag, release on drop so the node
-  // rejoins the force layout — gives a "free force graph" feel where
-  // letting go springs the node back into a natural equilibrium.
+  // rejoins the force layout — gives a "free force graph" feel.
+  // Important: only reheat if the user *actually* dragged. A bare click
+  // must not perturb the layout (otherwise selecting a node visibly
+  // resettles the whole graph).
   const dragNode = (nodeId: number) => (e: React.PointerEvent) => {
     e.preventDefault();
     const svg = (e.currentTarget as SVGElement).ownerSVGElement;
     if (!svg) return;
     const rect = svg.getBoundingClientRect();
+    let didDrag = false;
     const onMove = (ev: PointerEvent) => {
+      didDrag = true;
       const { x, y } = clientToViewBox(ev.clientX, ev.clientY, rect);
       pinNode(nodeId, x, y);
     };
     const onUp = () => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
-      releaseNode(nodeId);
-      reheat();
+      if (didDrag) {
+        releaseNode(nodeId);
+        reheat();
+      }
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
