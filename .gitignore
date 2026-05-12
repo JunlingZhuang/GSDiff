@@ -25,5 +25,16 @@ GRAN/inspect_out/
 *.tar
 *.zip
 
+# Local browser / Playwright debugging artifacts
+.playwright-mcp/
+playwright-report/
+test-results/
+*-graph-mode.png
+*-after-*.png
+after-fix-*.png
+app-initial.png
+current-after-*.png
+debug-*.png
+
 # Claude Code local settings
 .claude/settings.local.json

@@ -1,0 +1,29 @@
+name: msd
+datadir: 'data/msd_wall/'
+graphs_path: 'data/msd_wall/graphs.p'
+split_seed: 0
+train_ratio: 0.8
+val_ratio: 0.1
+min_nodes: 2
+max_nodes: 64
+node_count_bins: 300
+node_label_key: 'room_type'
+edge_label_key: 'connectivity'
+node_decoder:
+  - Bedroom
+  - Livingroom
+  - Kitchen
+  - Dining
+  - Corridor
+  - Stairs
+  - Storeroom
+  - Bathroom
+  - Balcony
+edge_decoder:
+  - none
+  - wall
+  - passage
+  - door
+  - entrance
+remove_h: null
+pin_memory: False

@@ -1,8 +1,14 @@
 """DiGress graph sampling service.
 
-The API keeps the generated graph format aligned with the topology-conditioned
-GSDiff endpoint: `rooms` is the node type list and `adjacency` is a binary room
-adjacency matrix.
+Supports multiple datasets (rplan, msd_wall) via per-dataset spec dispatch.
+Each dataset has its own:
+  - Hydra config name (dataset + experiment)
+  - DiGress datamodule / dataset_infos pair (rplan vs msd shape are different)
+  - Room-type and edge-type vocabularies, surfaced to the frontend per-sample
+
+Room types and edge types are read directly from `cfg.dataset.node_decoder` /
+`cfg.dataset.edge_decoder` at model load time, so the backend stays in sync
+when the digress config files change.
 """
 
 from __future__ import annotations
@@ -24,13 +30,21 @@ from app.services.model_status import model_status
 DIGRESS_ROOT = Path(PROJECT_ROOT) / "digress"
 DIGRESS_SRC = DIGRESS_ROOT / "src"
 
-ROOM_TYPES = ["living", "bedroom", "bathroom", "kitchen", "balcony", "storage"]
-EDGE_TYPES = ["none", "wall", "door"]
 
+# Frontend dataset id → Hydra config selectors + which datamodule family to
+# import. The "datamodule" key matches the dataset_config["name"] dispatch key
+# inside digress/src/main.py — both `msd` and `msd_wall` share the MSD
+# datamodule because their dataset config name is "msd".
 DATASET_CONFIGS = {
     "rplan": {
         "dataset": "rplan",
         "experiment": "rplan.yaml",
+        "datamodule": "rplan",
+    },
+    "msd_wall": {
+        "dataset": "msd_wall",
+        "experiment": "msd_wall.yaml",
+        "datamodule": "msd",
     },
 }
 
@@ -61,15 +75,36 @@ def _resolve_checkpoint(path_value: str) -> Path:
     return path
 
 
-def _sample_to_record(sample: tuple[torch.Tensor, torch.Tensor]) -> dict[str, Any]:
-    node_types, edge_types = sample
+def _datamodule_factory(name: str):
+    """Defer the heavy DiGress imports until first use of a given dataset."""
+    if name == "rplan":
+        from datasets.rplan_dataset import RPlanDataModule, RPlanDatasetInfos
+        return RPlanDataModule, RPlanDatasetInfos
+    if name == "msd":
+        from datasets.msd_dataset import MSDDataModule, MSDDatasetInfos
+        return MSDDataModule, MSDDatasetInfos
+    raise ValueError(f"Unknown DiGress datamodule family: {name!r}")
+
+
+def _sample_to_record(
+    sample: tuple[torch.Tensor, torch.Tensor],
+    room_types: list[str],
+    edge_types: list[str],
+) -> dict[str, Any]:
+    node_types, edge_type_tensor = sample
     node_type_values = node_types.detach().cpu().long().tolist()
-    edge_type_tensor = edge_types.detach().cpu().long()
+    edge_type_tensor = edge_type_tensor.detach().cpu().long()
     n_nodes = len(node_type_values)
 
     adjacency = [[0 for _ in range(n_nodes)] for _ in range(n_nodes)]
     edge_type_matrix = [[0 for _ in range(n_nodes)] for _ in range(n_nodes)]
     edges = []
+
+    def edge_label(edge_type: int) -> str:
+        return edge_types[edge_type] if 0 <= edge_type < len(edge_types) else f"class_{edge_type}"
+
+    def room_label(node_type: int) -> str:
+        return room_types[node_type] if 0 <= node_type < len(room_types) else f"class_{node_type}"
 
     for i in range(edge_type_tensor.shape[0]):
         for j in range(i + 1, edge_type_tensor.shape[1]):
@@ -80,14 +115,12 @@ def _sample_to_record(sample: tuple[torch.Tensor, torch.Tensor]) -> dict[str, An
             adjacency[j][i] = 1
             edge_type_matrix[i][j] = edge_type
             edge_type_matrix[j][i] = edge_type
-            edges.append(
-                {
-                    "source": i,
-                    "target": j,
-                    "edge_type": edge_type,
-                    "edge_label": EDGE_TYPES[edge_type],
-                }
-            )
+            edges.append({
+                "source": i,
+                "target": j,
+                "edge_type": edge_type,
+                "edge_label": edge_label(edge_type),
+            })
 
     return {
         "num_nodes": n_nodes,
@@ -99,7 +132,7 @@ def _sample_to_record(sample: tuple[torch.Tensor, torch.Tensor]) -> dict[str, An
             {
                 "id": idx,
                 "attr": int(node_type),
-                "room_type": ROOM_TYPES[int(node_type)],
+                "room_type": room_label(int(node_type)),
             }
             for idx, node_type in enumerate(node_type_values)
         ],
@@ -112,6 +145,8 @@ class LoadedGraphModel:
     cfg: Any
     model: Any
     checkpoint: Path
+    room_types: list[str]
+    edge_types: list[str]
 
 
 class DigressGraphGenerator:
@@ -127,6 +162,12 @@ class DigressGraphGenerator:
 
     def supported_datasets(self) -> list[str]:
         return sorted(DATASET_CONFIGS.keys())
+
+    def max_num_nodes(self, dataset: str) -> int:
+        """Per-dataset upper bound for the optional num_nodes parameter."""
+        if dataset not in DATASET_CONFIGS:
+            return 16
+        return 64 if dataset == "msd_wall" else 16
 
     def generate(
         self,
@@ -165,12 +206,17 @@ class DigressGraphGenerator:
             torch.cuda.synchronize()
         elapsed_seconds = time.perf_counter() - start_time
 
-        graphs = [_sample_to_record(sample) for sample in samples]
+        graphs = [
+            _sample_to_record(sample, loaded.room_types, loaded.edge_types)
+            for sample in samples
+        ]
         return {
             "dataset": dataset,
             "checkpoint": str(loaded.checkpoint),
             "inference_seconds": elapsed_seconds,
             "graphs": graphs,
+            "room_types": loaded.room_types,
+            "edge_types": loaded.edge_types,
         }
 
     def _load(self, dataset: str) -> LoadedGraphModel:
@@ -184,23 +230,24 @@ class DigressGraphGenerator:
 
         try:
             import hydra
-            from datasets.rplan_dataset import RPlanDataModule, RPlanDatasetInfos
             from diffusion.extra_features import DummyExtraFeatures, ExtraFeatures
             from diffusion_model_discrete import DiscreteDenoisingDiffusion
             from metrics.abstract_metrics import TrainAbstractMetricsDiscrete
 
-            dataset_cfg = DATASET_CONFIGS[dataset]
+            spec = DATASET_CONFIGS[dataset]
             overrides = [
-                f"dataset={dataset_cfg['dataset']}",
-                f"+experiment={dataset_cfg['experiment']}",
+                f"dataset={spec['dataset']}",
+                f"+experiment={spec['experiment']}",
             ]
             with hydra.initialize_config_dir(config_dir=str(DIGRESS_ROOT / "configs"), version_base="1.3"):
                 cfg = hydra.compose(config_name="config", overrides=overrides)
 
             cfg.general.wandb = "disabled"
 
-            datamodule = RPlanDataModule(cfg)
-            dataset_infos = RPlanDatasetInfos(datamodule, cfg.dataset)
+            datamodule_cls, dataset_infos_cls = _datamodule_factory(spec["datamodule"])
+            datamodule = datamodule_cls(cfg)
+            dataset_infos = dataset_infos_cls(datamodule, cfg.dataset)
+
             extra_features = (
                 ExtraFeatures(cfg.model.extra_features, dataset_info=dataset_infos)
                 if cfg.model.type == "discrete" and cfg.model.extra_features is not None
@@ -229,7 +276,16 @@ class DigressGraphGenerator:
             for parameter in model.parameters():
                 parameter.requires_grad = False
 
-            loaded = LoadedGraphModel(cfg=cfg, model=model, checkpoint=checkpoint)
+            room_types = list(cfg.dataset.get("node_decoder") or getattr(dataset_infos, "node_decoder", []))
+            edge_types = list(cfg.dataset.get("edge_decoder") or getattr(dataset_infos, "edge_decoder", []))
+
+            loaded = LoadedGraphModel(
+                cfg=cfg,
+                model=model,
+                checkpoint=checkpoint,
+                room_types=room_types,
+                edge_types=edge_types,
+            )
             self._models[dataset] = loaded
             model_status.loaded(status_key)
             return loaded

@@ -57,6 +57,88 @@ Note: graph_tool and torch_geometric currently seem to conflict on MacOS, I have
   - To run the discrete model: `python3 main.py`
   - You can specify the dataset with `python3 main.py dataset=guacamol`. Look at `configs/dataset` for the list
 of datasets that are currently available
+
+## MSD phase-1 floorplan graph baseline
+
+This repository includes a vanilla unconditional DiGress baseline for Modified Swiss Dwellings (MSD). It uses only the access graph (`graph_out`) and does not condition on geometry or partial layouts.
+
+### Quick start: wall-augmented MSD
+
+Authenticate Kaggle first. The script uses `kaggle` if it is installed, otherwise it falls back to `uvx kaggle`.
+
+```powershell
+cd D:\Github\GSDiff\digress
+
+# Prepare the wall-augmented graph dataset.
+# Defaults: wall_contact_eps=0.01, wall_min_contact_length=0.02, wall_segment_gap=0.45.
+.\.venv\Scripts\python.exe scripts\download_msd_dataset.py --prepare --add-wall-edges
+
+# Train the wall-augmented unconditional DiGress graph model.
+.\.venv\Scripts\python.exe src\main.py dataset=msd_wall +experiment=msd_wall.yaml
+
+# Resume training from a checkpoint if needed.
+.\.venv\Scripts\python.exe src\main.py dataset=msd_wall +experiment=msd_wall.yaml general.resume="outputs/<run>/checkpoints/msd_wall/last.ckpt"
+
+# Generate wall-augmented test graphs and the combined sample PNG.
+.\.venv\Scripts\python.exe scripts\test_graph_generation.py msd_wall
+```
+
+The preprocessing command overwrites `data/msd_wall/*` and clears its processed cache. It does not delete `../datasets/msd/raw/*`.
+
+### Download and prepare
+
+For the access-only baseline, use the original MSD access graph:
+
+```powershell
+cd digress
+
+# Download raw Kaggle data to ../datasets/msd/raw.
+.\.venv\Scripts\python.exe scripts\download_msd_dataset.py
+
+# Or download and immediately build DiGress graphs plus sample visualizations.
+.\.venv\Scripts\python.exe scripts\download_msd_dataset.py --prepare
+
+```
+
+The prepared files are:
+- `data/msd/graphs.p`: NetworkX graphs consumed by `dataset=msd`
+- `data/msd/dataset_stats.json`: node/edge counts, type proportions, and room area statistics
+- `data/msd/sample_graphs.png`: combined quick-look graph grid
+- `data/msd/vis/sample_*.png`: RPLAN-style 2x3 dataset diagnostics
+
+If the raw Kaggle data already exists, `--prepare` skips re-downloading and rebuilds the DiGress graph pickle from `train/graph_out`.
+For `--add-wall-edges`, the script uses the raw MSD CSV because `WALL` polygons are not present in `graph_out`. Wall edges are inferred from local wall-room contact segments: each room must have enough boundary contact with the same `WALL` polygon, the contact segments must be locally close on that wall, and the rooms must lie on opposite sides of the wall.
+
+### Train and test
+
+```powershell
+cd digress
+
+# Train the unconditional MSD graph model.
+.\.venv\Scripts\python.exe src\main.py dataset=msd +experiment=msd.yaml
+
+# Train the wall-augmented unconditional MSD graph model.
+.\.venv\Scripts\python.exe src\main.py dataset=msd_wall +experiment=msd_wall.yaml
+
+# Generate samples using the checkpoint from the same config family.
+.\.venv\Scripts\python.exe scripts\test_graph_generation.py msd
+
+# Generate samples from the wall-augmented checkpoint.
+.\.venv\Scripts\python.exe scripts\test_graph_generation.py msd_wall
+```
+
+The same generic graph test entrypoint works for RPLAN:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\test_graph_generation.py rplan
+```
+
+Compatibility wrappers are kept, so `scripts/test_rplan.py` and `scripts/test_msd.py` still work.
+
+Useful overrides:
+- `train.batch_size=4`: lower memory use on larger MSD graphs
+- `dataset.max_nodes=32`: filter to smaller graphs for smoke tests
+- `train.n_epochs=2`: short pipeline validation run
     
 ## Checkpoints
 

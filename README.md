@@ -74,6 +74,38 @@ After `rplan-extract.py`, intermediate folders (`1-channel-semantics-256`, `3-ch
 
 Create path `datasets/lifulldata` and follow the data request process of [Raster-to-Graph](https://github.com/SizheHu/Raster-to-Graph) to place the data there. The data contains 10,804 images and corresponding annotations.
 
+### MSD Dataset for DiGress
+
+The DiGress MSD baseline uses the Kaggle Modified Swiss Dwellings dataset and trains an unconditional graph generator.
+
+Authenticate Kaggle first, then run from `digress/`:
+
+```powershell
+cd digress
+
+# Quick start: prepare the wall-augmented graph dataset.
+# Defaults: wall_contact_eps=0.01, wall_min_contact_length=0.02, wall_segment_gap=0.45.
+.\.venv\Scripts\python.exe scripts\download_msd_dataset.py --prepare --add-wall-edges
+
+# Train the wall-augmented unconditional DiGress graph model.
+.\.venv\Scripts\python.exe src\main.py dataset=msd_wall +experiment=msd_wall.yaml
+
+# Resume training from a checkpoint if needed.
+.\.venv\Scripts\python.exe src\main.py dataset=msd_wall +experiment=msd_wall.yaml general.resume="outputs/<run>/checkpoints/msd_wall/last.ckpt"
+
+# Generate wall-augmented test graphs and the combined sample PNG.
+.\.venv\Scripts\python.exe scripts\test_graph_generation.py msd_wall
+```
+
+Outputs:
+- Raw Kaggle data: `datasets/msd/raw/modified-swiss-dwellings-v2/`
+- Wall-augmented graph pickle: `digress/data/msd_wall/graphs.p`
+- Dataset statistics: `digress/data/msd_wall/dataset_stats.json`
+- Dataset visual checks: `digress/data/msd_wall/sample_graphs.png` and `digress/data/msd_wall/vis/`
+- Training checkpoints and curves: `digress/outputs/.../checkpoints/msd_wall/`
+
+The wall preprocessing command overwrites `digress/data/msd_wall/*` and clears its processed cache. It does not delete `datasets/msd/raw/*`.
+
 ## Pretrained Weights
 
 Download and extract into `scripts/outputs/`:

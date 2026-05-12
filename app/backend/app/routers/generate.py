@@ -61,6 +61,8 @@ class GraphResponse(BaseModel):
     checkpoint: str
     inference_seconds: float
     graphs: list[GeneratedGraph]
+    room_types: list[str]
+    edge_types: list[str]
 
 
 def _pil_to_data_uri(img) -> str:
@@ -83,8 +85,10 @@ def unconstrained():
 def graph(req: GraphRequest):
     if req.num_samples < 1 or req.num_samples > 8:
         raise HTTPException(400, "num_samples must be 1-8")
-    if req.num_nodes is not None and (req.num_nodes < 1 or req.num_nodes > 16):
-        raise HTTPException(400, "num_nodes must be 1-16")
+    if req.num_nodes is not None:
+        max_nodes = graph_generator.max_num_nodes(req.dataset)
+        if req.num_nodes < 1 or req.num_nodes > max_nodes:
+            raise HTTPException(400, f"num_nodes must be 1-{max_nodes} for {req.dataset}")
     try:
         return graph_generator.generate(
             dataset=req.dataset,
