@@ -64,8 +64,20 @@ interface EditState {
 
 const MAX_UNDO = 50;
 
+function endpointId(endpoint: number | BubbleNodeState): number {
+  return typeof endpoint === 'object' ? endpoint.id : endpoint;
+}
+
+function normalizeEdges(edges: BubbleEdgeState[]): BubbleEdgeState[] {
+  return edges.map((edge) => ({
+    ...edge,
+    source: endpointId(edge.source as number | BubbleNodeState),
+    target: endpointId(edge.target as number | BubbleNodeState),
+  }));
+}
+
 function pushPast(state: EditState): EditState {
-  const past = [...state.past, { nodes: state.nodes, edges: state.edges }].slice(-MAX_UNDO);
+  const past = [...state.past, { nodes: state.nodes, edges: normalizeEdges(state.edges) }].slice(-MAX_UNDO);
   return { ...state, past, future: [] };
 }
 
@@ -93,9 +105,9 @@ function reducer(state: EditState, action: EditAction): EditState {
     return {
       ...state,
       nodes: prev.nodes,
-      edges: prev.edges,
+      edges: normalizeEdges(prev.edges),
       past: state.past.slice(0, -1),
-      future: [{ nodes: state.nodes, edges: state.edges }, ...state.future],
+      future: [{ nodes: state.nodes, edges: normalizeEdges(state.edges) }, ...state.future],
     };
   }
   if (action.type === 'redo') {
@@ -104,8 +116,8 @@ function reducer(state: EditState, action: EditAction): EditState {
     return {
       ...state,
       nodes: next.nodes,
-      edges: next.edges,
-      past: [...state.past, { nodes: state.nodes, edges: state.edges }].slice(-MAX_UNDO),
+      edges: normalizeEdges(next.edges),
+      past: [...state.past, { nodes: state.nodes, edges: normalizeEdges(state.edges) }].slice(-MAX_UNDO),
       future: state.future.slice(1),
     };
   }
@@ -131,9 +143,9 @@ function reducer(state: EditState, action: EditAction): EditState {
         nodes: state.nodes.filter((n) => n.id !== action.id),
         edges: state.edges.filter((e) => {
           const srcId =
-            typeof e.source === 'object' ? (e.source as unknown as BubbleNodeState).id : e.source;
+            endpointId(e.source as number | BubbleNodeState);
           const tgtId =
-            typeof e.target === 'object' ? (e.target as unknown as BubbleNodeState).id : e.target;
+            endpointId(e.target as number | BubbleNodeState);
           return srcId !== action.id && tgtId !== action.id;
         }),
       };
@@ -173,7 +185,7 @@ function reducer(state: EditState, action: EditAction): EditState {
       return {
         ...checkpointed,
         nodes: action.nodes.map((n) => ({ ...n })),
-        edges: action.edges.map((e) => ({ ...e })),
+        edges: normalizeEdges(action.edges),
       };
     }
     case 'add-node-and-edge': {
@@ -551,7 +563,7 @@ export function BubbleGraphCanvas({
         (n) => n.id !== sourceId && Math.hypot(n.x - pos.x, n.y - pos.y) < 36,
       );
       if (hit) {
-        dispatch({
+        dispatchAndReheat({
           type: 'add-edge',
           source: sourceId,
           target: hit.id,
@@ -559,7 +571,7 @@ export function BubbleGraphCanvas({
         });
       } else {
         // Drop on empty space → add node + edge as one undo step
-        dispatch({
+        dispatchAndReheat({
           type: 'add-node-and-edge',
           attr: defaultNodeAttr,
           x: pos.x,
@@ -575,7 +587,7 @@ export function BubbleGraphCanvas({
   };
 
   const handleAddNodeAtCenter = () => {
-    dispatch({
+    dispatchAndReheat({
       type: 'add-node',
       attr: defaultNodeAttr,
       x: width / 2 + (Math.random() - 0.5) * 80,

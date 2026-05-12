@@ -10,6 +10,7 @@ import {
   type Simulation,
 } from 'd3-force';
 import type { BubbleNodeState, BubbleEdgeState } from './types';
+import { FORCE_LAYOUT_CONFIG } from './config/force-layout';
 
 interface UseForceSimulationParams {
   nodes: BubbleNodeState[];
@@ -31,12 +32,21 @@ interface UseForceSimulationParams {
  * mutated in place and we apply a small alpha bump (0.3) so just the
  * affected element nudges into place.
  */
-// Per-node charge strength: connected nodes repel each other strongly to
-// produce a clean spread; isolated (degree-zero) nodes get almost no charge
-// so they don't push the rest of the graph apart when they're sitting in
-// the middle waiting to be wired up.
-const CHARGE_CONNECTED = -450;
-const CHARGE_ISOLATED = -30;
+function endpointId(endpoint: number | BubbleNodeState): number {
+  return typeof endpoint === 'object' ? endpoint.id : endpoint;
+}
+
+function cloneLinksForSimulation(edges: BubbleEdgeState[]): BubbleEdgeState[] {
+  return edges.map((edge) => ({
+    ...edge,
+    // d3.forceLink mutates source/target from ids into node references.
+    // Keep that mutation inside these throwaway link objects; never let it
+    // leak into React reducer state, or old links can keep pointing at stale
+    // node objects after ticks rebuild node arrays.
+    source: endpointId(edge.source as number | BubbleNodeState),
+    target: endpointId(edge.target as number | BubbleNodeState),
+  }));
+}
 
 function computeDegrees(
   nodes: BubbleNodeState[],
@@ -45,8 +55,8 @@ function computeDegrees(
   const map = new Map<number, number>();
   for (const n of nodes) map.set(n.id, 0);
   for (const e of edges) {
-    const s = typeof e.source === 'object' ? (e.source as unknown as BubbleNodeState).id : e.source;
-    const t = typeof e.target === 'object' ? (e.target as unknown as BubbleNodeState).id : e.target;
+    const s = endpointId(e.source as number | BubbleNodeState);
+    const t = endpointId(e.target as number | BubbleNodeState);
     map.set(s, (map.get(s) ?? 0) + 1);
     map.set(t, (map.get(t) ?? 0) + 1);
   }
@@ -75,7 +85,23 @@ export function useForceSimulation({
   const degreesRef = useRef<Map<number, number>>(computeDegrees(nodes, edges));
   const chargeStrengthFn = (d: BubbleNodeState): number => {
     const deg = degreesRef.current.get(d.id) ?? 0;
-    return deg > 0 ? CHARGE_CONNECTED : CHARGE_ISOLATED;
+    return deg > 0
+      ? FORCE_LAYOUT_CONFIG.connectedChargeStrength
+      : FORCE_LAYOUT_CONFIG.isolatedChargeStrength;
+  };
+  const linkStrengthFn = (link: BubbleEdgeState): number => {
+    const sourceId = endpointId(link.source as number | BubbleNodeState);
+    const targetId = endpointId(link.target as number | BubbleNodeState);
+    const sourceDegree = degreesRef.current.get(sourceId) ?? 1;
+    const targetDegree = degreesRef.current.get(targetId) ?? 1;
+    const maxDegree = Math.max(sourceDegree, targetDegree);
+    // Hub links need to be stiffer; otherwise a star graph's leaves repel each
+    // other and stretch the older links much longer than newly-added links.
+    return Math.min(
+      FORCE_LAYOUT_CONFIG.linkMaxStrength,
+      FORCE_LAYOUT_CONFIG.linkBaseStrength
+        + maxDegree * FORCE_LAYOUT_CONFIG.linkStrengthPerDegree,
+    );
   };
 
   // -------------------------------------------------------------------------
@@ -84,28 +110,33 @@ export function useForceSimulation({
   // -------------------------------------------------------------------------
   useEffect(() => {
     nodesRef.current = nodes;
+    const simulationLinks = cloneLinksForSimulation(edges);
     const sim = forceSimulation<BubbleNodeState>(nodes)
       .force(
         'link',
-        forceLink<BubbleNodeState, BubbleEdgeState>(edges)
+        forceLink<BubbleNodeState, BubbleEdgeState>(simulationLinks)
           .id((d) => d.id)
           // distance + strength tuned together: stiff springs at moderate
           // distance keep edges visually uniform. Tweaking these is the
           // primary lever for "tighter" vs "looser" layout.
-          .distance(105)
-          .strength(0.9),
+          .distance(FORCE_LAYOUT_CONFIG.linkDistance)
+          .strength(linkStrengthFn)
+          // D3's documented way to make link distance constraints more rigid.
+          // This is important for hub-and-spoke floorplan graphs where a
+          // newly-added leaf should not make older hub links stretch out.
+          .iterations(FORCE_LAYOUT_CONFIG.linkIterations),
       )
       .force(
         'charge',
         forceManyBody<BubbleNodeState>()
           .strength(chargeStrengthFn)
-          .distanceMax(500),
+          .distanceMax(FORCE_LAYOUT_CONFIG.chargeDistanceMax),
       )
       .force(
         'center',
-        forceCenter(width / 2, height / 2).strength(0.05),
+        forceCenter(width / 2, height / 2).strength(FORCE_LAYOUT_CONFIG.centerStrength),
       )
-      .force('collide', forceCollide<BubbleNodeState>(44))
+      .force('collide', forceCollide<BubbleNodeState>(FORCE_LAYOUT_CONFIG.collideRadius))
       .on('tick', () => onTickRef.current([...nodesRef.current]));
     simRef.current = sim;
     return () => {
@@ -128,18 +159,25 @@ export function useForceSimulation({
     nodesRef.current = nodes;
     sim.nodes(nodes);
     const linkForce = sim.force('link') as ForceLink<BubbleNodeState, BubbleEdgeState> | undefined;
-    if (linkForce) linkForce.links(edges);
+    const simulationLinks = cloneLinksForSimulation(edges);
+    if (linkForce) linkForce.links(simulationLinks);
     // Refresh per-node degrees so the charge force re-evaluates isolated vs
     // connected. d3-force caches strength values from the function, so we
     // must re-set .strength() to make it pick up the new degrees.
     degreesRef.current = computeDegrees(nodes, edges);
+    if (linkForce) {
+      linkForce
+        .distance(FORCE_LAYOUT_CONFIG.linkDistance)
+        .strength(linkStrengthFn)
+        .iterations(FORCE_LAYOUT_CONFIG.linkIterations);
+    }
     const charge = sim.force('charge') as {
       strength: (fn: (d: BubbleNodeState) => number) => void;
     } | undefined;
     if (charge) charge.strength(chargeStrengthFn);
     // Mild reheat so the new/removed element settles into place without
     // throwing the rest of the graph around.
-    sim.alpha(0.3).restart();
+    sim.alpha(FORCE_LAYOUT_CONFIG.structuralReheatAlpha).restart();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodes.length, edges.length]);
 
@@ -156,7 +194,7 @@ export function useForceSimulation({
     }
   }, [width, height]);
 
-  const reheat = () => simRef.current?.alpha(0.3).restart();
+  const reheat = () => simRef.current?.alpha(FORCE_LAYOUT_CONFIG.structuralReheatAlpha).restart();
 
   const pinNode = (nodeId: number, x: number, y: number) => {
     const node = nodesRef.current.find((n) => n.id === nodeId);
@@ -167,7 +205,7 @@ export function useForceSimulation({
     node.y = y;
     // Tiny alpha so the render reflects the new position without
     // disturbing other nodes.
-    simRef.current?.alpha(0.05).restart();
+    simRef.current?.alpha(FORCE_LAYOUT_CONFIG.dragReheatAlpha).restart();
   };
 
   const releaseNode = (nodeId: number) => {
