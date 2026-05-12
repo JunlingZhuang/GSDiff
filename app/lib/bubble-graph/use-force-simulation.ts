@@ -31,6 +31,28 @@ interface UseForceSimulationParams {
  * mutated in place and we apply a small alpha bump (0.3) so just the
  * affected element nudges into place.
  */
+// Per-node charge strength: connected nodes repel each other strongly to
+// produce a clean spread; isolated (degree-zero) nodes get almost no charge
+// so they don't push the rest of the graph apart when they're sitting in
+// the middle waiting to be wired up.
+const CHARGE_CONNECTED = -450;
+const CHARGE_ISOLATED = -30;
+
+function computeDegrees(
+  nodes: BubbleNodeState[],
+  edges: BubbleEdgeState[],
+): Map<number, number> {
+  const map = new Map<number, number>();
+  for (const n of nodes) map.set(n.id, 0);
+  for (const e of edges) {
+    const s = typeof e.source === 'object' ? (e.source as unknown as BubbleNodeState).id : e.source;
+    const t = typeof e.target === 'object' ? (e.target as unknown as BubbleNodeState).id : e.target;
+    map.set(s, (map.get(s) ?? 0) + 1);
+    map.set(t, (map.get(t) ?? 0) + 1);
+  }
+  return map;
+}
+
 export function useForceSimulation({
   nodes,
   edges,
@@ -46,6 +68,15 @@ export function useForceSimulation({
   const nodesRef = useRef<BubbleNodeState[]>(nodes);
   const onTickRef = useRef(onTick);
   onTickRef.current = onTick;
+
+  // Degrees by node id — read by the charge strength function. Re-computed
+  // every time the graph structure changes; the closure reads from this
+  // ref so the strength function stays current.
+  const degreesRef = useRef<Map<number, number>>(computeDegrees(nodes, edges));
+  const chargeStrengthFn = (d: BubbleNodeState): number => {
+    const deg = degreesRef.current.get(d.id) ?? 0;
+    return deg > 0 ? CHARGE_CONNECTED : CHARGE_ISOLATED;
+  };
 
   // -------------------------------------------------------------------------
   // Lifecycle — create / destroy simulation. Runs only when canvas size
@@ -66,7 +97,9 @@ export function useForceSimulation({
       )
       .force(
         'charge',
-        forceManyBody<BubbleNodeState>().strength(-450).distanceMax(500),
+        forceManyBody<BubbleNodeState>()
+          .strength(chargeStrengthFn)
+          .distanceMax(500),
       )
       .force(
         'center',
@@ -96,6 +129,14 @@ export function useForceSimulation({
     sim.nodes(nodes);
     const linkForce = sim.force('link') as ForceLink<BubbleNodeState, BubbleEdgeState> | undefined;
     if (linkForce) linkForce.links(edges);
+    // Refresh per-node degrees so the charge force re-evaluates isolated vs
+    // connected. d3-force caches strength values from the function, so we
+    // must re-set .strength() to make it pick up the new degrees.
+    degreesRef.current = computeDegrees(nodes, edges);
+    const charge = sim.force('charge') as {
+      strength: (fn: (d: BubbleNodeState) => number) => void;
+    } | undefined;
+    if (charge) charge.strength(chargeStrengthFn);
     // Mild reheat so the new/removed element settles into place without
     // throwing the rest of the graph around.
     sim.alpha(0.3).restart();
