@@ -361,3 +361,111 @@ py_compile: passed
 CPU fast_dev_run: passed
 untrained sample_batch smoke: passed, no final [MASK] tokens
 ```
+
+## Experiment Log: Absorbing V2
+
+Run directory:
+
+```text
+digress/outputs/2026-05-14/14-47-40-msd_wall_absorbing_v2/
+```
+
+Best checkpoint used for test:
+
+```text
+digress/outputs/2026-05-14/14-47-40-msd_wall_absorbing_v2/checkpoints/msd_wall_absorbing_v2/best.ckpt
+```
+
+Test output:
+
+```text
+digress/outputs/2026-05-14/14-47-40-msd_wall_absorbing_v2/test_samples/
+```
+
+### V2 Training Results
+
+V2 was stopped around epoch 146 after validation stopped improving. The best
+validation checkpoint was epoch 100.
+
+| Epoch | Split | Total masked loss | Node CE | Edge CE | Notes |
+|---:|---|---:|---:|---:|---|
+| 10 | val | 2.099 | 1.613 | 0.486 | First validation |
+| 50 | val | 1.997 | 1.530 | 0.466 | Clear improvement |
+| 80 | val | 1.963 | 1.493 | 0.470 | Still improving |
+| 100 | val | 1.932 | 1.473 | 0.459 | Best checkpoint |
+| 140 | val | 2.007 | 1.545 | 0.462 | Worse than best |
+
+Compared with V1, V2 reaches a similar or better node/edge CE much earlier,
+while using mask-aware structural features. This confirms that restoring
+structural features did not break absorbing training.
+
+### V2 Generation Test Results
+
+Generated 32 samples on CUDA.
+
+| Metric | V1 Generated | V2 Generated | Reference MSD-wall | V2 Delta |
+|---|---:|---:|---:|---:|
+| Average nodes | 26.63 | 26.34 | 27.60 | -1.26 |
+| Average edges | 67.09 | 42.88 | 58.10 | -15.22 |
+| Connected fraction | 0.969 | 0.688 | 0.946 | -0.258 |
+| Seconds per sample | 0.050 | 0.061 | n/a | n/a |
+
+Node distribution deltas:
+
+| Node type | Generated | Reference | Delta |
+|---|---:|---:|---:|
+| Bedroom | 0.2835 | 0.2595 | +0.0240 |
+| Livingroom | 0.0676 | 0.0828 | -0.0152 |
+| Kitchen | 0.1246 | 0.1088 | +0.0157 |
+| Dining | 0.0083 | 0.0033 | +0.0050 |
+| Corridor | 0.1732 | 0.1562 | +0.0170 |
+| Stairs | 0.0558 | 0.0579 | -0.0021 |
+| Storeroom | 0.0214 | 0.0417 | -0.0204 |
+| Bathroom | 0.1815 | 0.1692 | +0.0123 |
+| Balcony | 0.0842 | 0.1206 | -0.0364 |
+
+Edge distribution deltas:
+
+| Edge type | Generated | Reference | Delta |
+|---|---:|---:|---:|
+| none | 0.8856 | 0.8639 | +0.0217 |
+| wall | 0.0518 | 0.0704 | -0.0187 |
+| passage | 0.0076 | 0.0083 | -0.0007 |
+| door | 0.0458 | 0.0496 | -0.0038 |
+| entrance | 0.0093 | 0.0078 | +0.0015 |
+
+### V2 Verdict
+
+V2 fixed one problem but over-corrected another.
+
+What improved:
+
+- Edge type proportions are much closer to reference than V1.
+- `door` and `passage` are now well calibrated.
+- `none` is no longer underproduced.
+- Training loss is better than V1 and uses mask-aware structural features.
+
+What got worse:
+
+- Generated graphs are now too sparse: 42.88 edges vs 58.10 reference.
+- Connectivity drops badly: 0.688 vs 0.946 reference.
+- The sampling-only `edge_none_logit_bias=0.4` is too strong.
+- Lowering `lambda_train` from 2 to 1 may also reduce edge reconstruction
+  pressure too much.
+
+Conclusion:
+
+```text
+V1 was too dense.
+V2 is too sparse.
+The next version should keep mask-aware structural features but reduce the
+none-edge correction.
+```
+
+Recommended V3 direction:
+
+- Keep `extra_features: all`.
+- Keep mask-aware adjacency.
+- Set `edge_none_logit_bias` to `0.0` or at most `0.15`.
+- Consider restoring `lambda_train` to `[2, 0]`, or try `[1.5, 0]`.
+- Re-test generation density before training a full long run.
