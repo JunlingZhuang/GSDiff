@@ -272,10 +272,35 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
             return remaining
         return max(1, math.ceil(remaining / steps_left))
 
-    def _maskgit_unmask_step(self, X, E, pred, node_mask, step: int, total_steps: int):
+    def _maskgit_unmask_step(
+        self,
+        X,
+        E,
+        pred,
+        node_mask,
+        step: int,
+        total_steps: int,
+        anchor_X=None,
+        anchor_E=None,
+    ):
+        """Fill a subset of currently masked variables, optionally preserving anchors.
+
+        Completion uses the same denoising network as unconditional generation.
+        The only difference is that user-provided node/edge values are anchors:
+        they enter the network as context, but they are never selected as
+        candidates to be re-sampled.
+        """
         X_idx = X.argmax(dim=-1)
         E_idx = E.argmax(dim=-1)
         bs, n = X_idx.shape
+        if anchor_X is None:
+            anchor_X = torch.zeros_like(X_idx, dtype=torch.bool)
+        else:
+            anchor_X = anchor_X.to(device=X.device, dtype=torch.bool)
+        if anchor_E is None:
+            anchor_E = torch.zeros_like(E_idx, dtype=torch.bool)
+        else:
+            anchor_E = anchor_E.to(device=X.device, dtype=torch.bool)
 
         prob_X = F.softmax(pred.X[..., :self.base_Xdim_output], dim=-1)
         edge_logits = pred.E[..., :self.base_Edim_output].clone()
@@ -292,7 +317,10 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
         conf_E = prob_E.max(dim=-1).values
 
         for b in range(bs):
-            node_candidates = torch.nonzero((X_idx[b] == self.mask_idx_X) & node_mask[b], as_tuple=False).flatten()
+            node_candidates = torch.nonzero(
+                (X_idx[b] == self.mask_idx_X) & node_mask[b] & (~anchor_X[b]),
+                as_tuple=False,
+            ).flatten()
             k_nodes = self._num_to_unmask(int(node_candidates.numel()), step, total_steps)
             if k_nodes > 0:
                 selected = node_candidates[torch.topk(conf_X[b, node_candidates], k=k_nodes).indices]
@@ -300,7 +328,7 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
 
             valid_edges = node_mask[b].unsqueeze(0) & node_mask[b].unsqueeze(1)
             edge_candidates = torch.nonzero(
-                torch.triu((E_idx[b] == self.mask_idx_E) & valid_edges, diagonal=1),
+                torch.triu((E_idx[b] == self.mask_idx_E) & valid_edges & (~anchor_E[b]), diagonal=1),
                 as_tuple=False,
             )
             k_edges = self._num_to_unmask(int(edge_candidates.size(0)), step, total_steps)
@@ -314,6 +342,85 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
         X_next = F.one_hot(X_idx, num_classes=self.Xdim_output).float()
         E_next = F.one_hot(E_idx, num_classes=self.Edim_output).float()
         return utils.PlaceHolder(X=X_next, E=E_next, y=torch.zeros(bs, 0, device=X.device)).mask(node_mask)
+
+    @torch.no_grad()
+    def complete_batch(self, X_idx, E_idx, node_mask, anchor_X, anchor_E):
+        """Complete partially observed graphs with the absorbing sampler.
+
+        Args:
+            X_idx: Long tensor ``[batch, n]``. Anchor positions contain known
+                node classes; non-anchor valid positions are ignored and reset
+                to the node mask token.
+            E_idx: Long tensor ``[batch, n, n]``. Anchor edge slots contain
+                known edge classes, including class 0 for known non-edges.
+            node_mask: Bool tensor marking real graph nodes versus padding.
+            anchor_X: Bool tensor marking known node types.
+            anchor_E: Bool tensor marking known edge slots. For graph
+                completion this is usually the known-node subgraph.
+
+        Returns:
+            A list of completed ``[node_type_tensor, edge_type_tensor]``
+            samples with the absorbing mask class stripped out, matching
+            ``sample_batch`` output.
+        """
+        X_idx = X_idx.to(self.device, dtype=torch.long).clone()
+        E_idx = E_idx.to(self.device, dtype=torch.long).clone()
+        node_mask = node_mask.to(self.device, dtype=torch.bool)
+        anchor_X = anchor_X.to(self.device, dtype=torch.bool) & node_mask
+        anchor_E = anchor_E.to(self.device, dtype=torch.bool)
+
+        bs, n = X_idx.shape
+        valid_edges = node_mask.unsqueeze(1) & node_mask.unsqueeze(2)
+        diagonal = torch.eye(n, device=self.device, dtype=torch.bool).unsqueeze(0).expand(bs, -1, -1)
+        anchor_E = anchor_E & valid_edges
+        anchor_E[diagonal] = True
+
+        # Unknown valid variables start as [MASK]. Known anchors keep their
+        # provided class values and act as conditioning context at every step.
+        X_idx[(~anchor_X) & node_mask] = self.mask_idx_X
+        X_idx[~node_mask] = 0
+        E_idx[(~anchor_E) & valid_edges] = self.mask_idx_E
+        E_idx[~valid_edges] = 0
+        E_idx[diagonal] = 0
+
+        state = utils.PlaceHolder(
+            X=F.one_hot(X_idx, num_classes=self.Xdim_output).float(),
+            E=F.one_hot(E_idx, num_classes=self.Edim_output).float(),
+            y=torch.zeros(bs, 0, device=self.device),
+        ).mask(node_mask)
+
+        steps = max(1, int(self.cfg.model.get("maskgit_steps", 16)))
+        for step in range(steps):
+            t_value = 1.0 - (step / steps)
+            t = torch.full((bs, 1), t_value, device=self.device)
+            noisy_data = {
+                "X_t": state.X,
+                "E_t": state.E,
+                "y_t": state.y,
+                "t": t,
+                "node_mask": node_mask,
+                "mask_idx_E": self.mask_idx_E,
+            }
+            extra_data = self.compute_extra_data(noisy_data)
+            pred = self.forward(noisy_data, extra_data, node_mask)
+            state = self._maskgit_unmask_step(
+                state.X,
+                state.E,
+                pred,
+                node_mask,
+                step,
+                steps,
+                anchor_X=anchor_X,
+                anchor_E=anchor_E,
+            )
+
+        final = state.mask(node_mask, collapse=True)
+        samples = []
+        for i in range(bs):
+            n_i = int(node_mask[i].sum().item())
+            sample = [final.X[i, :n_i].cpu(), final.E[i, :n_i, :n_i].cpu()]
+            samples.append(strip_mask_class_from_sample(sample, self.mask_idx_X, self.mask_idx_E))
+        return samples
 
     @torch.no_grad()
     def sample_batch(self, batch_id: int, batch_size: int, keep_chain: int, number_chain_steps: int,

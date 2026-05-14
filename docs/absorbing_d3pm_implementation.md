@@ -24,9 +24,9 @@ This is the foundation for three tasks with one model:
 - Partial graph completion: known slots stay fixed, unknown slots are `[MASK]`.
 - Node attribute prediction: the target node type is `[MASK]`, edges stay known.
 
-The first implementation focuses on the core absorbing objective and
-unconditional all-mask sampling. Partial completion and node-type prediction can
-be added on top of the same model with anchor masks.
+The first implementation focused on the core absorbing objective and
+unconditional all-mask sampling. The current implementation also includes a
+partial graph completion test path using anchor masks.
 
 ## Compatibility
 
@@ -91,6 +91,13 @@ sets `model.extra_features: null` because the old cycle/spectral features treat
 all non-zero edge classes as observed edges. With a `[MASK]` edge class, that
 would incorrectly treat unknown edges as real graph structure.
 
+`digress/scripts/test_graph_completion.py`
+
+Config-driven partial graph completion evaluator. It loads an absorbing
+checkpoint, hides a fraction of nodes and edge slots from real test graphs,
+keeps the visible subgraph fixed with anchor masks, and asks the model to fill
+the unknown node/edge classes.
+
 ## Changed Files
 
 `digress/src/main.py`
@@ -115,6 +122,10 @@ only used by absorbing configs and does not affect old marginal configs.
 Adds absorbing checkpoint loading support. The same config-driven test script
 can now load either vanilla or absorbing DiGress checkpoints.
 
+`digress/configs/experiment/msd_wall_absorbing_v2.yaml`
+
+Adds the `completion` config block used by `test_graph_completion.py`.
+
 `app/backend/app/services/graph_generation.py`
 
 Adds absorbing checkpoint loading support for the backend graph generation
@@ -138,6 +149,84 @@ The logged training values mean:
 - `masked_node_CE`: cross entropy for masked node types only.
 - `masked_edge_CE`: cross entropy for masked edge types only.
 - `avg_masked_nodes`: average number of masked node positions per batch.
+
+## Partial Graph Completion
+
+Completion is an inference-only mode on the same absorbing checkpoint. It does
+not require a separate model architecture.
+
+Mechanism:
+
+- Known node types are passed in as normal class IDs.
+- Known edge slots are passed in as normal edge class IDs, including class `0`
+  for known non-edges.
+- Unknown valid node/edge slots are replaced with the internal `[MASK]` class.
+- Anchor masks mark known slots. During MaskGIT-style sampling, anchor slots
+  are visible to the network but are never selected for re-sampling.
+
+Current evaluator:
+
+```powershell
+cd D:\Github\GSDiff\digress
+.\.venv\Scripts\python.exe scripts\test_graph_completion.py msd_wall_absorbing_v2 completion.checkpoint=outputs/2026-05-14/14-47-40-msd_wall_absorbing_v2/checkpoints/msd_wall_absorbing_v2/best.ckpt
+```
+
+Useful overrides:
+
+```powershell
+completion.num_samples=64
+completion.known_ratio=0.5
+completion.grid_samples=12
+completion.out_dir=outputs/msd_wall_completion_eval
+model.edge_none_logit_bias=-0.05
+```
+
+Outputs:
+
+```text
+completion_samples.json   # partial input, model completion, reference graph
+completion_metrics.json   # accuracy, graph statistics, distribution deltas
+completion_grid.png       # one row per case: partial / completed / reference
+```
+
+Important limitation:
+
+```text
+The current completion script fixes the target node count from the reference
+test graph. It evaluates type/edge completion quality, not automatic graph-size
+growth from an arbitrary user sketch.
+```
+
+Primary metrics:
+
+- `node_unknown_accuracy`: node type accuracy only on hidden nodes.
+- `edge_masked_accuracy_all`: edge type accuracy on all hidden edge slots,
+  including the many `none` slots.
+- `edge_masked_accuracy_present`: edge type accuracy only where the reference
+  hidden edge is a real edge. This is stricter and more useful for checking
+  whether the model recovers wall/door/passage/entrance edges.
+
+Initial smoke result on the V2 unconditional checkpoint:
+
+```text
+num_samples=8
+known_ratio=0.5
+node_unknown_accuracy=0.1513
+edge_masked_accuracy_all=0.8038
+edge_masked_accuracy_present=0.0754
+completed avg_edges=62.00
+reference avg_edges=60.88
+```
+
+Interpretation:
+
+```text
+The unconditional V2 checkpoint can preserve graph-level density during
+completion, but it is weak at recovering the exact hidden room types and exact
+real edge classes. For serious partial-completion quality, the next training
+run should use a completion-style masking curriculum instead of only random
+independent absorbing masks.
+```
 - `avg_masked_edges`: average number of masked edge positions per batch.
 
 ## Test Command

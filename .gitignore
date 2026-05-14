@@ -38,3 +38,6 @@ debug-*.png
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Local Serena coding-agent metadata
+.serena/
