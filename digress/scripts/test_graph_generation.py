@@ -513,6 +513,12 @@ def main():
     datamodule = model_kwargs["dataset_infos"].datamodule
     model_cls = AbsorbingDenoisingDiffusion if is_absorbing_transition(cfg) else DiscreteDenoisingDiffusion
     model = model_cls.load_from_checkpoint(str(ckpt_path), **model_kwargs)
+    # Lightning restores the training-time cfg from the checkpoint. Re-apply
+    # sampling-only fields from the composed test cfg so command-line overrides
+    # such as `model.edge_none_logit_bias=0.0` actually affect generation.
+    if is_absorbing_transition(cfg):
+        model.cfg.model.edge_none_logit_bias = cfg.model.get("edge_none_logit_bias", 0.0)
+        model.cfg.model.maskgit_steps = cfg.model.get("maskgit_steps", model.cfg.model.get("maskgit_steps", 16))
     model.cfg.general.wandb = "disabled"
     model.visualization_tools = None
     model.eval()

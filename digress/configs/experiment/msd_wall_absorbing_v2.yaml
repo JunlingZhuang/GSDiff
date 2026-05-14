@@ -36,9 +36,10 @@ model:
     # mask-aware: it computes adjacency from edge_type != none AND edge_type !=
     # [MASK], so unknown edges do not pollute cycles/spectral features.
     extra_features: 'all'
-    # Sampling-only calibration. Positive value makes edge class 0 ("none")
-    # more likely and is intended to pull avg_edges back toward the reference.
-    edge_none_logit_bias: 0.4
+    # Sampling-only calibration. Positive values make edge class 0 ("none")
+    # more likely; negative values make real edges more likely. This value was
+    # calibrated on the V2 checkpoint with 256 generated samples.
+    edge_none_logit_bias: -0.05
     hidden_mlp_dims: {'X': 128, 'E': 64, 'y': 128}
     hidden_dims: {'dx': 256, 'de': 64, 'dy': 64, 'n_head': 8, 'dim_ffX': 256, 'dim_ffE': 64, 'dim_ffy': 256}
 test:

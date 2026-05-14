@@ -275,6 +275,12 @@ class DigressGraphGenerator:
                 extra_features=extra_features,
                 domain_features=domain_features,
             )
+            if is_absorbing_transition(cfg):
+                model.cfg.model.edge_none_logit_bias = cfg.model.get("edge_none_logit_bias", 0.0)
+                model.cfg.model.maskgit_steps = cfg.model.get(
+                    "maskgit_steps",
+                    model.cfg.model.get("maskgit_steps", 16),
+                )
             model.cfg.general.wandb = "disabled"
             model.visualization_tools = None
             model.eval()

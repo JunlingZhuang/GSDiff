@@ -469,3 +469,83 @@ Recommended V3 direction:
 - Set `edge_none_logit_bias` to `0.0` or at most `0.15`.
 - Consider restoring `lambda_train` to `[2, 0]`, or try `[1.5, 0]`.
 - Re-test generation density before training a full long run.
+
+### V2 Sampling Calibration Follow-Up
+
+After the initial V2 test, we found that command-line overrides such as
+`model.edge_none_logit_bias=0.0` were not being applied after loading a
+checkpoint. Lightning restores the training-time `cfg` stored inside the
+checkpoint, so the test script and backend loader now re-apply sampling-only
+fields after `load_from_checkpoint`.
+
+Changed files:
+
+```text
+digress/scripts/test_graph_generation.py
+app/backend/app/services/graph_generation.py
+```
+
+The corrected sweep used the epoch-200 V2 `best.ckpt`.
+
+| edge_none_logit_bias | Samples | Avg nodes | Avg edges | Connected frac | Interpretation |
+|---:|---:|---:|---:|---:|---|
+| 0.0 | 128 | 25.71 | 51.91 | 0.883 | Too sparse |
+| -0.2 | 128 | 29.41 | 66.87 | 0.977 | Too dense |
+| -0.1 | 128 | 27.91 | 60.62 | 0.930 | Close |
+| -0.075 | 256 | 29.89 | 64.25 | 0.941 | Too dense |
+| -0.05 | 256 | 28.46 | 59.70 | 0.926 | Best current calibration |
+
+Reference:
+
+```text
+avg_nodes=27.60
+avg_edges=58.10
+connected_frac=0.946
+test split connected_frac=0.920
+```
+
+Selected default:
+
+```yaml
+model:
+  lambda_train: [1, 0]
+  edge_none_logit_bias: -0.05
+```
+
+Why keep `lambda_train: [1, 0]` for now:
+
+- V2 with mask-aware structural features reached better validation loss than V1.
+- With calibrated sampling (`edge_none_logit_bias=-0.05`), average edge count
+  is close to reference: 59.70 vs 58.10.
+- Edge type distribution is also close:
+
+| Edge type | Generated | Reference | Delta |
+|---|---:|---:|---:|
+| none | 0.8702 | 0.8639 | +0.0063 |
+| wall | 0.0636 | 0.0704 | -0.0068 |
+| passage | 0.0062 | 0.0083 | -0.0021 |
+| door | 0.0518 | 0.0496 | +0.0022 |
+| entrance | 0.0081 | 0.0078 | +0.0004 |
+
+Current recommendation:
+
+```text
+Do not retrain immediately just to change lambda_train.
+Use V2 best checkpoint with edge_none_logit_bias=-0.05 as the current best
+absorbing unconditional baseline.
+```
+
+If future partial-completion tests show missing edges or disconnected
+completion, then train V3 with `lambda_train: [1.5, 0]` while keeping
+mask-aware structural features.
+
+Calibration rule for future models/datasets:
+
+```text
+Train-time hyperparameters such as lambda_train must be selected per dataset
+and usually require retraining.
+
+Sampling-only calibration such as edge_none_logit_bias must be selected per
+checkpoint/dataset pair, because every checkpoint can have a different edge
+density bias.
+```
