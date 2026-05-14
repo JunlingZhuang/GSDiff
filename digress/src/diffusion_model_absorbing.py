@@ -98,6 +98,9 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
             "E_t": z_t.E,
             "y_t": z_t.y,
             "node_mask": node_mask,
+            # ExtraFeatures uses this to avoid treating [MASK] as a real edge
+            # when computing cycles/spectral features.
+            "mask_idx_E": self.mask_idx_E,
         }
 
     def _masked_ce_loss(self, pred, noisy_data, true_X, true_E, node_mask):
@@ -275,7 +278,14 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
         bs, n = X_idx.shape
 
         prob_X = F.softmax(pred.X[..., :self.base_Xdim_output], dim=-1)
-        prob_E = F.softmax(pred.E[..., :self.base_Edim_output], dim=-1)
+        edge_logits = pred.E[..., :self.base_Edim_output].clone()
+        none_bias = float(self.cfg.model.get("edge_none_logit_bias", 0.0))
+        if none_bias != 0.0:
+            # V1 generated graphs that were too dense. A positive bias makes
+            # the sampler more conservative by increasing the logit of edge
+            # class 0 ("none") without changing the trained checkpoint.
+            edge_logits[..., 0] = edge_logits[..., 0] + none_bias
+        prob_E = F.softmax(edge_logits, dim=-1)
         sample_X = prob_X.reshape(-1, self.base_Xdim_output).multinomial(1).reshape(bs, n)
         sample_E = prob_E.reshape(-1, self.base_Edim_output).multinomial(1).reshape(bs, n, n)
         conf_X = prob_X.max(dim=-1).values
@@ -336,7 +346,14 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
         for step in range(steps):
             t_value = 1.0 - (step / steps)
             t = torch.full((batch_size, 1), t_value, device=self.device)
-            noisy_data = {"X_t": state.X, "E_t": state.E, "y_t": state.y, "t": t, "node_mask": node_mask}
+            noisy_data = {
+                "X_t": state.X,
+                "E_t": state.E,
+                "y_t": state.y,
+                "t": t,
+                "node_mask": node_mask,
+                "mask_idx_E": self.mask_idx_E,
+            }
             extra_data = self.compute_extra_data(noisy_data)
             pred = self.forward(noisy_data, extra_data, node_mask)
             state = self._maskgit_unmask_step(state.X, state.E, pred, node_mask, step, steps)

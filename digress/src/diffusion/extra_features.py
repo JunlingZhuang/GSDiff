@@ -2,6 +2,26 @@ import torch
 from src import utils
 
 
+def observed_adjacency_from_noisy_data(noisy_data):
+    """Return adjacency made only from observed real edges.
+
+    Original DiGress uses `E[..., 1:]` because class 0 is "no edge" and every
+    other class is a real edge. Absorbing D3PM adds a final [MASK] edge class.
+    [MASK] means "unknown", not "connected", so it must be excluded from graph
+    structure features such as cycles and Laplacian eigenvectors.
+    """
+    E_t = noisy_data['E_t']
+    node_mask = noisy_data['node_mask']
+    edge_type = E_t.argmax(dim=-1)
+    observed = edge_type != 0
+
+    mask_idx_E = noisy_data.get('mask_idx_E', None)
+    if mask_idx_E is not None:
+        observed = observed & (edge_type != int(mask_idx_E))
+
+    return observed.float().type_as(E_t) * node_mask.unsqueeze(1) * node_mask.unsqueeze(2)
+
+
 class DummyExtraFeatures:
     def __init__(self):
         """ This class does not compute anything, just returns empty tensors."""
@@ -59,7 +79,7 @@ class NodeCycleFeatures:
         self.kcycles = KNodeCycles()
 
     def __call__(self, noisy_data):
-        adj_matrix = noisy_data['E_t'][..., 1:].sum(dim=-1).float()
+        adj_matrix = observed_adjacency_from_noisy_data(noisy_data)
 
         x_cycles, y_cycles = self.kcycles.k_cycles(adj_matrix=adj_matrix)   # (bs, n_cycles)
         x_cycles = x_cycles.type_as(adj_matrix) * noisy_data['node_mask'].unsqueeze(-1)
@@ -80,9 +100,8 @@ class EigenFeatures:
         self.mode = mode
 
     def __call__(self, noisy_data):
-        E_t = noisy_data['E_t']
         mask = noisy_data['node_mask']
-        A = E_t[..., 1:].sum(dim=-1).float() * mask.unsqueeze(1) * mask.unsqueeze(2)
+        A = observed_adjacency_from_noisy_data(noisy_data)
         L = compute_laplacian(A, normalize=False)
         mask_diag = 2 * L.shape[-1] * torch.eye(A.shape[-1]).type_as(L).unsqueeze(0)
         mask_diag = mask_diag * (~mask.unsqueeze(1)) * (~mask.unsqueeze(2))

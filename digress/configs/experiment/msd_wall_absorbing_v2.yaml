@@ -1,0 +1,52 @@
+# @package _global_
+general:
+    name: 'msd_wall_absorbing_v2'
+    gpus: 1
+    strategy: 'auto'
+    matmul_precision: 'high'
+    wandb: 'disabled'
+    check_val_every_n_epochs: 10
+    sample_every_val: 2
+    samples_to_generate: 16
+    samples_to_save: 8
+    chains_to_save: 0
+    final_model_samples_to_generate: 128
+    final_model_samples_to_save: 32
+    final_model_chains_to_save: 0
+train:
+    n_epochs: 200
+    batch_size: 8
+    lr: 0.0001
+    weight_decay: 1e-12
+    clip_grad: null
+    ema_decay: 0
+    num_workers: 0
+    num_sanity_val_steps: 0
+    save_model: True
+model:
+    transition: 'absorbing'
+    diffusion_steps: 500
+    maskgit_steps: 16
+    n_layers: 5
+    # V1 generated graphs were too dense. Lowering edge weight reduces the
+    # pressure to over-fit every edge slot and gives node type reconstruction
+    # more influence during training.
+    lambda_train: [1, 0]
+    # V2 restores DiGress structural features. The feature code is now
+    # mask-aware: it computes adjacency from edge_type != none AND edge_type !=
+    # [MASK], so unknown edges do not pollute cycles/spectral features.
+    extra_features: 'all'
+    # Sampling-only calibration. Positive value makes edge class 0 ("none")
+    # more likely and is intended to pull avg_edges back toward the reference.
+    edge_none_logit_bias: 0.4
+    hidden_mlp_dims: {'X': 128, 'E': 64, 'y': 128}
+    hidden_dims: {'dx': 256, 'de': 64, 'dy': 64, 'n_head': 8, 'dim_ffX': 256, 'dim_ffE': 64, 'dim_ffy': 256}
+test:
+    checkpoint: null
+    out_dir: null
+    num_samples: 32
+    batch_size: 8
+    num_nodes: null
+    grid_samples: 24
+    grid_cols: 4
+    device: 'auto'

@@ -292,19 +292,30 @@ What failed or needs improvement:
 - V1 disables DiGress structural features, so the model loses useful graph
   topology signal.
 
-## Next Architecture Adjustment
+## V2 Architecture Adjustment
 
-The next model should not start from scratch conceptually. It should keep the
-absorbing objective and change the parts that caused dense graphs.
+V2 keeps the absorbing objective and changes the parts that caused dense graphs.
 
-Planned V2 changes:
+Implemented V2 changes:
 
 - Add mask-aware structural features.
 - Restore cycle/spectral features using only observed real edges.
 - Exclude `[MASK]` edges from the adjacency matrix.
 - Reduce or recalibrate edge pressure so the model predicts more `none` edges.
-- Consider an edge sampling `none` bias if training loss alone does not fix
-  density.
+- Add a sampling-only `none` edge logit bias.
+
+New config:
+
+```text
+digress/configs/experiment/msd_wall_absorbing_v2.yaml
+```
+
+Training command:
+
+```powershell
+cd D:\Github\GSDiff\digress
+.\.venv\Scripts\python.exe src\main.py dataset=msd_wall +experiment=msd_wall_absorbing_v2.yaml
+```
 
 Mask-aware adjacency rule:
 
@@ -323,4 +334,30 @@ V2 success target:
 Average generated edges should move from 67.09 toward the reference 58.10.
 The edge none/wall/door distribution should become closer to reference.
 Node distribution should not regress substantially.
+```
+
+V2 changed files:
+
+```text
+digress/src/diffusion/extra_features.py
+digress/src/diffusion_model_absorbing.py
+digress/configs/experiment/msd_wall_absorbing_v2.yaml
+```
+
+Code behavior:
+
+- `extra_features.py` now uses `observed_adjacency_from_noisy_data`.
+- Vanilla DiGress behavior is unchanged because normal configs do not pass a
+  `mask_idx_E`.
+- Absorbing runs pass `mask_idx_E` in `noisy_data`, so structural features can
+  distinguish real edges from unknown `[MASK]` edges.
+- `edge_none_logit_bias` only affects sampling. It does not change the training
+  loss or the checkpoint weights.
+
+Initial smoke checks:
+
+```text
+py_compile: passed
+CPU fast_dev_run: passed
+untrained sample_batch smoke: passed, no final [MASK] tokens
 ```
