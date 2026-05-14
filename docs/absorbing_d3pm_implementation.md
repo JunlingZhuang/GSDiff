@@ -175,3 +175,152 @@ Not implemented yet:
 - True MaskGIT confidence schedule tuning.
 
 Those are the next layers after the absorbing training objective is validated.
+
+## Experiment Log: Absorbing MVP V1
+
+Run directory:
+
+```text
+digress/outputs/2026-05-13/16-55-13-msd_wall_absorbing/
+```
+
+Best checkpoint:
+
+```text
+digress/outputs/2026-05-13/16-55-13-msd_wall_absorbing/checkpoints/msd_wall_absorbing/best.ckpt
+```
+
+Training command:
+
+```powershell
+cd D:\Github\GSDiff\digress
+.\.venv\Scripts\python.exe src\main.py dataset=msd_wall +experiment=msd_wall_absorbing.yaml
+```
+
+Test command:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\test_graph_generation.py msd_wall_absorbing test.checkpoint=outputs/2026-05-13/16-55-13-msd_wall_absorbing/checkpoints/msd_wall_absorbing/best.ckpt
+```
+
+### Training Results
+
+The model trained for 200 epochs. The best validation checkpoint was saved at
+epoch 170.
+
+| Epoch | Split | Total masked loss | Node CE | Edge CE | Notes |
+|---:|---|---:|---:|---:|---|
+| 1 | train | 3.126 | 1.966 | 0.580 | Initial learning point |
+| 10 | val | 2.633 | 1.627 | 0.503 | First validation |
+| 90 | val | 2.446 | 1.486 | 0.480 | Earlier best region |
+| 170 | val | 2.394 | 1.469 | 0.463 | Best checkpoint |
+| 200 | val | 2.471 | 1.515 | 0.478 | Final epoch, worse than best |
+
+Interpretation:
+
+- The absorbing objective learns: both node CE and edge CE are below random
+  guessing baselines.
+- Node type prediction is still the harder part.
+- Validation improves until around epoch 170, then becomes worse. The final
+  checkpoint should not be used over `best.ckpt`.
+
+Reference random CE levels:
+
+```text
+node random baseline: ln(9 room types)  = 2.197
+edge random baseline: ln(5 edge types)  = 1.609
+```
+
+### Generation Test Results
+
+Test output:
+
+```text
+digress/outputs/2026-05-13/16-55-13-msd_wall_absorbing/test_samples/
+```
+
+Generated 32 samples on CUDA.
+
+| Metric | Generated | Reference MSD-wall | Delta |
+|---|---:|---:|---:|
+| Average nodes | 26.63 | 27.60 | -0.98 |
+| Average edges | 67.09 | 58.10 | +9.00 |
+| Connected fraction | 0.969 | 0.946 | +0.023 |
+| Seconds per sample | 0.050 | n/a | n/a |
+
+Node distribution deltas:
+
+| Node type | Generated | Reference | Delta |
+|---|---:|---:|---:|
+| Bedroom | 0.2805 | 0.2595 | +0.0210 |
+| Livingroom | 0.0833 | 0.0828 | +0.0005 |
+| Kitchen | 0.0915 | 0.1088 | -0.0173 |
+| Dining | 0.0012 | 0.0033 | -0.0021 |
+| Corridor | 0.1338 | 0.1562 | -0.0224 |
+| Stairs | 0.0528 | 0.0579 | -0.0051 |
+| Storeroom | 0.0246 | 0.0417 | -0.0171 |
+| Bathroom | 0.1854 | 0.1692 | +0.0163 |
+| Balcony | 0.1467 | 0.1206 | +0.0261 |
+
+Edge distribution deltas:
+
+| Edge type | Generated | Reference | Delta |
+|---|---:|---:|---:|
+| none | 0.8313 | 0.8639 | -0.0326 |
+| wall | 0.0885 | 0.0704 | +0.0181 |
+| passage | 0.0068 | 0.0083 | -0.0015 |
+| door | 0.0663 | 0.0496 | +0.0167 |
+| entrance | 0.0070 | 0.0078 | -0.0008 |
+
+### V1 Verdict
+
+Absorbing MVP V1 is a successful sanity check, but it is not the final model.
+
+What worked:
+
+- The code path trains end to end.
+- The model learns a non-random masked reconstruction objective.
+- The sampler produces connected graphs with reasonable node counts.
+- The same test script can load either vanilla or absorbing checkpoints.
+
+What failed or needs improvement:
+
+- Generated graphs are too dense: about 9 extra edges per graph.
+- `none` edge is underproduced, while `wall` and `door` are overproduced.
+- Some node classes are biased: `Balcony`, `Bedroom`, and `Bathroom` are high;
+  `Corridor`, `Kitchen`, and `Storeroom` are low.
+- V1 disables DiGress structural features, so the model loses useful graph
+  topology signal.
+
+## Next Architecture Adjustment
+
+The next model should not start from scratch conceptually. It should keep the
+absorbing objective and change the parts that caused dense graphs.
+
+Planned V2 changes:
+
+- Add mask-aware structural features.
+- Restore cycle/spectral features using only observed real edges.
+- Exclude `[MASK]` edges from the adjacency matrix.
+- Reduce or recalibrate edge pressure so the model predicts more `none` edges.
+- Consider an edge sampling `none` bias if training loss alone does not fix
+  density.
+
+Mask-aware adjacency rule:
+
+```python
+observed_real_edge = edge_type != none and edge_type != mask
+```
+
+This matters because the original DiGress feature code treats every non-zero
+edge class as a real edge. In absorbing D3PM, `[MASK]` is also non-zero, but it
+means "unknown", not "connected". If `[MASK]` is counted as an edge, cycle and
+spectral features become polluted by fake structure.
+
+V2 success target:
+
+```text
+Average generated edges should move from 67.09 toward the reference 58.10.
+The edge none/wall/door distribution should become closer to reference.
+Node distribution should not regress substantially.
+```
