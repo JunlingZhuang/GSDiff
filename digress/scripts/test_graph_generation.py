@@ -20,6 +20,8 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from diffusion.extra_features import DummyExtraFeatures, ExtraFeatures  # noqa: E402
+from diffusion.absorbing_utils import is_absorbing_transition, prepare_absorbing_dataset_infos  # noqa: E402
+from diffusion_model_absorbing import AbsorbingDenoisingDiffusion  # noqa: E402
 from diffusion_model_discrete import DiscreteDenoisingDiffusion  # noqa: E402
 from metrics.abstract_metrics import TrainAbstractMetricsDiscrete  # noqa: E402
 
@@ -123,7 +125,10 @@ def normalize_experiment_config(config_arg):
 
 
 def infer_dataset_name(config_arg):
-    return Path(normalize_experiment_config(config_arg)).stem
+    stem = Path(normalize_experiment_config(config_arg)).stem
+    if stem.startswith("msd_wall"):
+        return "msd_wall"
+    return stem
 
 
 def build_cfg(config_arg, overrides):
@@ -157,6 +162,8 @@ def build_model_kwargs(cfg, spec):
         extra_features=extra_features,
         domain_features=domain_features,
     )
+    if is_absorbing_transition(cfg):
+        prepare_absorbing_dataset_infos(dataset_infos)
     return {
         "dataset_infos": dataset_infos,
         "train_metrics": TrainAbstractMetricsDiscrete(),
@@ -504,7 +511,8 @@ def main():
 
     model_kwargs = build_model_kwargs(cfg, spec)
     datamodule = model_kwargs["dataset_infos"].datamodule
-    model = DiscreteDenoisingDiffusion.load_from_checkpoint(str(ckpt_path), **model_kwargs)
+    model_cls = AbsorbingDenoisingDiffusion if is_absorbing_transition(cfg) else DiscreteDenoisingDiffusion
+    model = model_cls.load_from_checkpoint(str(ckpt_path), **model_kwargs)
     model.cfg.general.wandb = "disabled"
     model.visualization_tools = None
     model.eval()

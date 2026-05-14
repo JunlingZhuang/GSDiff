@@ -15,6 +15,8 @@ from metrics.abstract_metrics import TrainAbstractMetricsDiscrete, TrainAbstract
 
 from diffusion_model import LiftedDenoisingDiffusion
 from diffusion_model_discrete import DiscreteDenoisingDiffusion
+from diffusion_model_absorbing import AbsorbingDenoisingDiffusion
+from diffusion.absorbing_utils import is_absorbing_transition, prepare_absorbing_dataset_infos
 from diffusion.extra_features import DummyExtraFeatures, ExtraFeatures
 
 
@@ -33,12 +35,17 @@ def resolve_checkpoint_path(path):
     return os.path.join(project_root, path)
 
 
+def discrete_model_class(cfg):
+    """Select the LightningModule without changing old DiGress configs."""
+    return AbsorbingDenoisingDiffusion if is_absorbing_transition(cfg) else DiscreteDenoisingDiffusion
+
+
 def get_resume(cfg, model_kwargs):
     """ Resumes a run. It loads previous config without allowing to update keys (used for testing). """
     saved_cfg = cfg.copy()
     resume = resolve_checkpoint_path(cfg.general.test_only)
     if cfg.model.type == 'discrete':
-        model = DiscreteDenoisingDiffusion.load_from_checkpoint(resume, **model_kwargs)
+        model = discrete_model_class(cfg).load_from_checkpoint(resume, **model_kwargs)
     else:
         model = LiftedDenoisingDiffusion.load_from_checkpoint(resume, **model_kwargs)
     cfg = model.cfg
@@ -53,7 +60,7 @@ def get_resume_adaptive(cfg, model_kwargs):
     resume_path = resolve_checkpoint_path(cfg.general.resume)
 
     if cfg.model.type == 'discrete':
-        model = DiscreteDenoisingDiffusion.load_from_checkpoint(resume_path, **model_kwargs)
+        model = discrete_model_class(cfg).load_from_checkpoint(resume_path, **model_kwargs)
     else:
         model = LiftedDenoisingDiffusion.load_from_checkpoint(resume_path, **model_kwargs)
     new_cfg = model.cfg
@@ -94,6 +101,8 @@ def main(cfg: DictConfig):
 
         dataset_infos.compute_input_output_dims(datamodule=datamodule, extra_features=extra_features,
                                                 domain_features=domain_features)
+        if is_absorbing_transition(cfg):
+            prepare_absorbing_dataset_infos(dataset_infos)
 
         model_kwargs = {'dataset_infos': dataset_infos, 'train_metrics': train_metrics,
                         'sampling_metrics': sampling_metrics, 'visualization_tools': visualization_tools,
@@ -117,6 +126,8 @@ def main(cfg: DictConfig):
 
         dataset_infos.compute_input_output_dims(datamodule=datamodule, extra_features=extra_features,
                                                 domain_features=domain_features)
+        if is_absorbing_transition(cfg):
+            prepare_absorbing_dataset_infos(dataset_infos)
 
         model_kwargs = {'dataset_infos': dataset_infos, 'train_metrics': train_metrics,
                         'sampling_metrics': sampling_metrics, 'visualization_tools': visualization_tools,
@@ -147,6 +158,8 @@ def main(cfg: DictConfig):
 
         dataset_infos.compute_input_output_dims(datamodule=datamodule, extra_features=extra_features,
                                                 domain_features=domain_features)
+        if is_absorbing_transition(cfg):
+            prepare_absorbing_dataset_infos(dataset_infos)
 
         model_kwargs = {'dataset_infos': dataset_infos, 'train_metrics': train_metrics,
                         'sampling_metrics': sampling_metrics, 'visualization_tools': visualization_tools,
@@ -187,6 +200,8 @@ def main(cfg: DictConfig):
 
         dataset_infos.compute_input_output_dims(datamodule=datamodule, extra_features=extra_features,
                                                 domain_features=domain_features)
+        if is_absorbing_transition(cfg):
+            prepare_absorbing_dataset_infos(dataset_infos)
 
         if cfg.model.type == 'discrete':
             train_metrics = TrainMolecularMetricsDiscrete(dataset_infos)
@@ -215,7 +230,7 @@ def main(cfg: DictConfig):
     utils.create_folders(cfg)
 
     if cfg.model.type == 'discrete':
-        model = DiscreteDenoisingDiffusion(cfg=cfg, **model_kwargs)
+        model = discrete_model_class(cfg)(cfg=cfg, **model_kwargs)
     else:
         model = LiftedDenoisingDiffusion(cfg=cfg, **model_kwargs)
 

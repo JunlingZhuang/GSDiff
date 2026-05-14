@@ -231,6 +231,8 @@ class DigressGraphGenerator:
         try:
             import hydra
             from diffusion.extra_features import DummyExtraFeatures, ExtraFeatures
+            from diffusion.absorbing_utils import is_absorbing_transition, prepare_absorbing_dataset_infos
+            from diffusion_model_absorbing import AbsorbingDenoisingDiffusion
             from diffusion_model_discrete import DiscreteDenoisingDiffusion
             from metrics.abstract_metrics import TrainAbstractMetricsDiscrete
 
@@ -259,9 +261,12 @@ class DigressGraphGenerator:
                 extra_features=extra_features,
                 domain_features=domain_features,
             )
+            if is_absorbing_transition(cfg):
+                prepare_absorbing_dataset_infos(dataset_infos)
 
             checkpoint = _resolve_checkpoint(cfg.test.checkpoint)
-            model = DiscreteDenoisingDiffusion.load_from_checkpoint(
+            model_cls = AbsorbingDenoisingDiffusion if is_absorbing_transition(cfg) else DiscreteDenoisingDiffusion
+            model = model_cls.load_from_checkpoint(
                 str(checkpoint),
                 dataset_infos=dataset_infos,
                 train_metrics=TrainAbstractMetricsDiscrete(),

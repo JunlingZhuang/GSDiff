@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 from models.transformer_model import GraphTransformer
 from diffusion.noise_schedule import DiscreteUniformTransition, PredefinedNoiseScheduleDiscrete,\
     MarginalUniformTransition
+from diffusion.absorbing_transition import AbsorbingGraphTransition
 from src.diffusion import diffusion_utils
 from metrics.train_metrics import TrainLossDiscrete
 from metrics.abstract_metrics import SumExceptBatchMetric, SumExceptBatchKL, NLL
@@ -94,6 +95,27 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
                                                               y_classes=self.ydim_output)
             self.limit_dist = utils.PlaceHolder(X=x_marginals, E=e_marginals,
                                                 y=torch.ones(self.ydim_output) / self.ydim_output)
+        elif cfg.model.transition == 'absorbing':
+            # Absorbing D3PM has one extra internal class: [MASK]. The limit
+            # distribution is deterministic at [MASK], so unconditional
+            # sampling starts from a graph where every node/edge is unknown.
+            self.mask_idx_X = self.Xdim_output - 1
+            self.mask_idx_E = self.Edim_output - 1
+            self.transition_model = AbsorbingGraphTransition(
+                x_classes=self.Xdim_output,
+                e_classes=self.Edim_output,
+                y_classes=self.ydim_output,
+                x_mask_index=self.mask_idx_X,
+                e_mask_index=self.mask_idx_E,
+            )
+            x_limit = torch.zeros(self.Xdim_output)
+            e_limit = torch.zeros(self.Edim_output)
+            x_limit[self.mask_idx_X] = 1.0
+            e_limit[self.mask_idx_E] = 1.0
+            y_limit = torch.ones(self.ydim_output) / self.ydim_output if self.ydim_output > 0 else torch.zeros(0)
+            self.limit_dist = utils.PlaceHolder(X=x_limit, E=e_limit, y=y_limit)
+        else:
+            raise ValueError(f"Unknown discrete transition '{cfg.model.transition}'")
 
         self.save_hyperparameters(ignore=[
             'dataset_infos',
