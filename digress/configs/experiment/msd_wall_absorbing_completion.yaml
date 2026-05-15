@@ -1,0 +1,71 @@
+# @package _global_
+general:
+    name: 'msd_wall_absorbing_completion'
+    gpus: 1
+    strategy: 'auto'
+    matmul_precision: 'high'
+    wandb: 'disabled'
+    check_val_every_n_epochs: 10
+    sample_every_val: 2
+    samples_to_generate: 16
+    samples_to_save: 8
+    chains_to_save: 0
+    final_model_samples_to_generate: 128
+    final_model_samples_to_save: 32
+    final_model_chains_to_save: 0
+train:
+    n_epochs: 200
+    batch_size: 8
+    lr: 0.0001
+    weight_decay: 1e-12
+    clip_grad: null
+    ema_decay: 0
+    num_workers: 0
+    num_sanity_val_steps: 0
+    save_model: True
+model:
+    transition: 'absorbing'
+    diffusion_steps: 500
+    maskgit_steps: 16
+    n_layers: 5
+    # Completion masks hide many more edges than nodes. A moderate edge weight
+    # keeps topology learning visible without letting the many "none" edges
+    # dominate node type learning.
+    lambda_train: [1.5, 0]
+    extra_features: 'all'
+    # Keep the best V2 sampling calibration as the initial default. Re-sweep
+    # this after the completion-tuned checkpoint finishes training.
+    edge_none_logit_bias: -0.05
+    absorbing_masking:
+        # Mixed = train on both old random absorbing masks and task-shaped
+        # partial-completion masks. This reduces train/test mismatch for
+        # completion while preserving some unconditional generation ability.
+        strategy: 'mixed'
+        eval_strategy: 'completion'
+        completion_probability: 0.7
+        # Curriculum: start with easier partial graphs, then hide more nodes.
+        known_ratio_start: 0.8
+        known_ratio_end: 0.5
+        eval_known_ratio: 0.5
+        curriculum_epochs: 120
+        known_ratio_jitter: 0.1
+    hidden_mlp_dims: {'X': 128, 'E': 64, 'y': 128}
+    hidden_dims: {'dx': 256, 'de': 64, 'dy': 64, 'n_head': 8, 'dim_ffX': 256, 'dim_ffE': 64, 'dim_ffy': 256}
+test:
+    checkpoint: null
+    out_dir: null
+    num_samples: 32
+    batch_size: 8
+    num_nodes: null
+    grid_samples: 24
+    grid_cols: 4
+    device: 'auto'
+completion:
+    checkpoint: null
+    out_dir: null
+    num_samples: 32
+    batch_size: 1
+    known_ratio: 0.5
+    grid_samples: 12
+    seed: 0
+    device: 'auto'

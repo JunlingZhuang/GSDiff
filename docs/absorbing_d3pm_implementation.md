@@ -98,6 +98,11 @@ checkpoint, hides a fraction of nodes and edge slots from real test graphs,
 keeps the visible subgraph fixed with anchor masks, and asks the model to fill
 the unknown node/edge classes.
 
+`digress/configs/experiment/msd_wall_absorbing_completion.yaml`
+
+Task-tuned absorbing training config for partial graph completion. It uses a
+mixed curriculum of random absorbing masks and completion-shaped masks.
+
 ## Changed Files
 
 `digress/src/main.py`
@@ -149,6 +154,71 @@ The logged training values mean:
 - `masked_node_CE`: cross entropy for masked node types only.
 - `masked_edge_CE`: cross entropy for masked edge types only.
 - `avg_masked_nodes`: average number of masked node positions per batch.
+- `avg_masked_edges`: average number of masked edge positions per batch.
+- `completion_batches`: fraction of logged batches that used the
+  completion-style mask in the current epoch.
+
+### Completion-Style Masking Curriculum
+
+The original V2 absorbing model was trained with random independent masks. That
+is enough for unconditional generation, but it has train/test mismatch for the
+product task: users provide a partial graph and expect the model to complete
+the unknown part.
+
+The completion-tuned config adds a task-shaped masking strategy:
+
+```yaml
+model:
+  absorbing_masking:
+    strategy: mixed
+    eval_strategy: completion
+    completion_probability: 0.7
+    known_ratio_start: 0.8
+    known_ratio_end: 0.5
+    eval_known_ratio: 0.5
+    curriculum_epochs: 120
+    known_ratio_jitter: 0.1
+```
+
+Meaning:
+
+- `strategy: mixed`: training batches are sampled from both random absorbing
+  masks and partial-completion masks.
+- `completion_probability: 0.7`: 70% of training batches use completion masks;
+  30% keep the old random absorbing objective to preserve unconditional ability.
+- `known_ratio_start -> known_ratio_end`: early training gives the model easier
+  partial graphs with more known nodes, then gradually hides more nodes.
+- `eval_strategy: completion`: validation loss measures the actual completion
+  task, not random reconstruction.
+
+Completion mask shape:
+
+```text
+Known nodes: keep true room type.
+Known-known edges: keep true edge class, including none.
+Unknown nodes: [MASK].
+Known-unknown and unknown-unknown edges: [MASK].
+```
+
+New training config:
+
+```text
+digress/configs/experiment/msd_wall_absorbing_completion.yaml
+```
+
+Training command:
+
+```powershell
+cd D:\Github\GSDiff\digress
+.\.venv\Scripts\python.exe src\main.py dataset=msd_wall +experiment=msd_wall_absorbing_completion.yaml
+```
+
+After training, test both modes:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\test_graph_generation.py msd_wall_absorbing_completion test.checkpoint=outputs/.../checkpoints/msd_wall_absorbing_completion/best.ckpt
+.\.venv\Scripts\python.exe scripts\test_graph_completion.py msd_wall_absorbing_completion completion.checkpoint=outputs/.../checkpoints/msd_wall_absorbing_completion/best.ckpt
+```
 
 ## Partial Graph Completion
 
@@ -227,7 +297,6 @@ real edge classes. For serious partial-completion quality, the next training
 run should use a completion-style masking curriculum instead of only random
 independent absorbing masks.
 ```
-- `avg_masked_edges`: average number of masked edge positions per batch.
 
 ## Test Command
 
@@ -254,13 +323,14 @@ Implemented now:
 - Absorbing transition.
 - Masked-position training/validation loss.
 - All-mask unconditional sampling.
+- Anchor-aware partial graph completion sampling.
+- Completion-style masking curriculum for training.
 - Test script/backend loading compatibility.
 
 Not implemented yet:
 
-- Anchor-aware partial graph completion.
 - Single-node attribute prediction endpoint.
-- Mask-aware cycle/spectral/centrality features.
+- Graphormer-style centrality encoding.
 - True MaskGIT confidence schedule tuning.
 
 Those are the next layers after the absorbing training objective is validated.
