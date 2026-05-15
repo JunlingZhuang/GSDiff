@@ -37,13 +37,15 @@ model:
     # this after the completion-tuned checkpoint finishes training.
     edge_none_logit_bias: -0.05
     absorbing_masking:
-        # Mixed = train on both old random absorbing masks and task-shaped
-        # partial-completion masks. This reduces train/test mismatch for
-        # completion while preserving some unconditional generation ability.
+        # Mixed = train on several task-shaped masks. This model is optimized
+        # for partial graph completion, not pure unconditional generation.
         strategy: 'mixed'
-        eval_strategy: 'completion'
-        completion_probability: 0.7
-        # Curriculum: start with easier partial graphs, then hide more nodes.
+        eval_strategy: 'full_completion'
+        random_probability: 0.1
+        full_completion_probability: 0.4
+        next_node_probability: 0.5
+        # Full-completion curriculum: start with easier partial graphs, then
+        # hide more nodes. Next-node masks always hide exactly one target node.
         known_ratio_start: 0.8
         known_ratio_end: 0.5
         eval_known_ratio: 0.5

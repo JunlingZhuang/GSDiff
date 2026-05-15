@@ -155,8 +155,10 @@ The logged training values mean:
 - `masked_edge_CE`: cross entropy for masked edge types only.
 - `avg_masked_nodes`: average number of masked node positions per batch.
 - `avg_masked_edges`: average number of masked edge positions per batch.
-- `completion_batches`: fraction of logged batches that used the
-  completion-style mask in the current epoch.
+- `full_completion_batches`: fraction of logged batches that used full graph
+  completion masks in the current epoch.
+- `next_node_batches`: fraction of logged batches that used next-node masks in
+  the current epoch.
 
 ### Completion-Style Masking Curriculum
 
@@ -171,8 +173,10 @@ The completion-tuned config adds a task-shaped masking strategy:
 model:
   absorbing_masking:
     strategy: mixed
-    eval_strategy: completion
-    completion_probability: 0.7
+    eval_strategy: full_completion
+    random_probability: 0.1
+    full_completion_probability: 0.4
+    next_node_probability: 0.5
     known_ratio_start: 0.8
     known_ratio_end: 0.5
     eval_known_ratio: 0.5
@@ -182,14 +186,21 @@ model:
 
 Meaning:
 
-- `strategy: mixed`: training batches are sampled from both random absorbing
-  masks and partial-completion masks.
-- `completion_probability: 0.7`: 70% of training batches use completion masks;
-  30% keep the old random absorbing objective to preserve unconditional ability.
+- `strategy: mixed`: training batches are sampled from several task-shaped mask
+  patterns.
+- `random_probability: 0.1`: 10% of batches keep the old random absorbing
+  objective as regularization.
+- `full_completion_probability: 0.4`: 40% of batches hide an unknown subgraph
+  and train full graph completion.
+- `next_node_probability: 0.5`: 50% of batches hide one target node and all of
+  its target-to-known edge classes. This directly trains "add one room and
+  decide its connections".
 - `known_ratio_start -> known_ratio_end`: early training gives the model easier
-  partial graphs with more known nodes, then gradually hides more nodes.
-- `eval_strategy: completion`: validation loss measures the actual completion
-  task, not random reconstruction.
+  full-completion partial graphs with more known nodes, then gradually hides
+  more nodes.
+- `eval_strategy: full_completion`: validation loss measures full completion by
+  default. Override to `next_node` when selecting a checkpoint for interactive
+  one-node expansion.
 
 Completion mask shape:
 
@@ -198,6 +209,17 @@ Known nodes: keep true room type.
 Known-known edges: keep true edge class, including none.
 Unknown nodes: [MASK].
 Known-unknown and unknown-unknown edges: [MASK].
+```
+
+Next-node mask shape:
+
+```text
+Known graph: keep all existing node types and existing-existing edge types.
+Target next node: node type = [MASK].
+Target-to-known edges: edge type = [MASK].
+Loss: target node type CE + target-to-known edge type CE.
+edge_type=none means "do not connect"; non-none classes mean the predicted
+connection type.
 ```
 
 New training config:

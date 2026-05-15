@@ -43,13 +43,23 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
             "x_masked": 0.0,
             "e_masked": 0.0,
             "random_batches": 0.0,
-            "completion_batches": 0.0,
+            "full_completion_batches": 0.0,
+            "next_node_batches": 0.0,
             "batches": 0.0,
         })
 
     def _accumulate_absorbing_stats(self, split: str, stats: dict[str, torch.Tensor | float]) -> None:
         bucket = getattr(self, f"_{split}_absorbing_stats")
-        for key in ["loss", "x_ce", "e_ce", "x_masked", "e_masked", "random_batches", "completion_batches"]:
+        for key in [
+            "loss",
+            "x_ce",
+            "e_ce",
+            "x_masked",
+            "e_masked",
+            "random_batches",
+            "full_completion_batches",
+            "next_node_batches",
+        ]:
             value = stats[key]
             bucket[key] += float(value.detach().cpu()) if isinstance(value, torch.Tensor) else float(value)
         bucket["batches"] += 1.0
@@ -59,7 +69,16 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
         denom = max(1.0, bucket["batches"])
         return {
             key: bucket[key] / denom
-            for key in ["loss", "x_ce", "e_ce", "x_masked", "e_masked", "random_batches", "completion_batches"]
+            for key in [
+                "loss",
+                "x_ce",
+                "e_ce",
+                "x_masked",
+                "e_masked",
+                "random_batches",
+                "full_completion_batches",
+                "next_node_batches",
+            ]
         }
 
     def _clean_to_absorbing_space(self, X: torch.Tensor, E: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -73,23 +92,55 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
     def _selected_masking_strategy(self, split: str) -> str:
         """Choose the training/eval masking strategy from config.
 
-        `random` is the original absorbing D3PM objective. `completion` matches
-        the application task: known nodes and known-known edges stay visible,
-        while all unknown nodes and cross/unknown edges are masked.
+        `random` is the original absorbing D3PM objective. `full_completion`
+        masks an arbitrary unknown subgraph. `next_node` masks exactly one
+        target node plus its edges to the known graph, matching interactive
+        "add one room" use cases.
         """
         masking_cfg = self._masking_cfg()
         strategy = masking_cfg.get("strategy", "random")
         if split != "train":
             strategy = masking_cfg.get("eval_strategy", strategy)
             if strategy == "mixed":
-                strategy = "completion"
+                strategy = "full_completion"
 
         if strategy == "mixed":
-            completion_prob = float(masking_cfg.get("completion_probability", 0.5))
-            return "completion" if torch.rand((), device=self.device).item() < completion_prob else "random"
-        if strategy not in {"random", "completion"}:
+            return self._sample_mixed_masking_strategy(masking_cfg)
+        if strategy == "completion":
+            strategy = "full_completion"
+        if strategy not in {"random", "full_completion", "next_node"}:
             raise ValueError(f"Unsupported absorbing_masking.strategy='{strategy}'")
         return strategy
+
+    def _sample_mixed_masking_strategy(self, masking_cfg) -> str:
+        """Sample a task from configured probabilities.
+
+        Backward compatibility: older configs with only
+        `completion_probability` still map to full-completion vs random.
+        New configs can explicitly set random/full/next-node probabilities.
+        """
+        if any(
+            key in masking_cfg
+            for key in ["random_probability", "full_completion_probability", "next_node_probability"]
+        ):
+            weights = [
+                float(masking_cfg.get("random_probability", 0.0)),
+                float(masking_cfg.get("full_completion_probability", 0.0)),
+                float(masking_cfg.get("next_node_probability", 0.0)),
+            ]
+        else:
+            completion_prob = float(masking_cfg.get("completion_probability", 0.5))
+            weights = [max(0.0, 1.0 - completion_prob), max(0.0, completion_prob), 0.0]
+
+        total = sum(max(0.0, weight) for weight in weights)
+        if total <= 0.0:
+            raise ValueError("At least one absorbing masking probability must be positive.")
+        draw = torch.rand((), device=self.device).item() * total
+        if draw < weights[0]:
+            return "random"
+        if draw < weights[0] + weights[1]:
+            return "full_completion"
+        return "next_node"
 
     def _completion_known_ratio(self, split: str) -> float:
         """Return the visible-node ratio for completion-style masking.
@@ -149,8 +200,8 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
         z_t = utils.PlaceHolder(X=X_t, E=E_t, y=y).type_as(X_t).mask(node_mask)
         return z_t, t_int, t_float, beta_t, alpha_s_bar, alpha_t_bar
 
-    def _apply_completion_absorbing_noise(self, X, E, y, node_mask, split: str):
-        """Mask graphs in the same shape used by partial-completion inference."""
+    def _apply_full_completion_absorbing_noise(self, X, E, y, node_mask, split: str):
+        """Mask an unknown subgraph for full partial-completion training."""
         bs, n = node_mask.shape
         X_idx = X.argmax(dim=-1).clone()
         E_idx = E.argmax(dim=-1).clone()
@@ -186,17 +237,61 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
         t_fields = self._time_fields_from_mask_fraction(x_positions, e_positions, node_mask)
         return (z_t, *t_fields)
 
+    def _apply_next_node_absorbing_noise(self, X, E, y, node_mask):
+        """Mask one target node and all target-to-known edge classes.
+
+        The target node remains present in the graph as a [MASK] node. Its edge
+        slots to existing nodes are also [MASK]. The loss therefore trains the
+        model to predict both "what room type is next?" and "which existing
+        rooms does it connect to, with which edge type?".
+        """
+        bs, n = node_mask.shape
+        X_idx = X.argmax(dim=-1).clone()
+        E_idx = E.argmax(dim=-1).clone()
+        x_positions = torch.zeros_like(node_mask, dtype=torch.bool)
+        e_positions = torch.zeros((bs, n, n), device=X.device, dtype=torch.bool)
+
+        for b in range(bs):
+            valid = torch.nonzero(node_mask[b], as_tuple=False).flatten()
+            num_valid = int(valid.numel())
+            if num_valid == 0:
+                continue
+            target = valid[torch.randint(num_valid, size=(1,), device=X.device)].item()
+            known = node_mask[b].clone()
+            known[target] = False
+            x_positions[b, target] = True
+            e_positions[b, target, known] = True
+            e_positions[b, known, target] = True
+
+        diagonal = torch.eye(n, device=X.device, dtype=torch.bool).unsqueeze(0)
+        valid_edges = node_mask.unsqueeze(1) & node_mask.unsqueeze(2) & ~diagonal
+        e_positions = e_positions & valid_edges
+
+        X_idx[x_positions] = self.mask_idx_X
+        E_idx[e_positions] = self.mask_idx_E
+        E_idx[~valid_edges] = 0
+        E_idx[diagonal.expand(bs, -1, -1)] = 0
+
+        X_t = F.one_hot(X_idx, num_classes=self.Xdim_output).float()
+        E_t = F.one_hot(E_idx, num_classes=self.Edim_output).float()
+        z_t = utils.PlaceHolder(X=X_t, E=E_t, y=y).type_as(X_t).mask(node_mask)
+        t_fields = self._time_fields_from_mask_fraction(x_positions, e_positions, node_mask)
+        return (z_t, *t_fields)
+
     def apply_noise(self, X, E, y, node_mask, split: str = "train"):
         """Mask clean graph positions according to the configured strategy.
 
-        Random absorbing noising remains the default. Completion-style masking
-        directly simulates the app task: a partial graph is visible, and the
-        model learns to recover the hidden node/edge classes.
+        Random absorbing noising remains available as a compatibility baseline.
+        Full-completion and next-node masks directly simulate the app tasks.
         """
         strategy = self._selected_masking_strategy(split)
-        if strategy == "completion":
-            z_t, t_int, t_float, beta_t, alpha_s_bar, alpha_t_bar = self._apply_completion_absorbing_noise(
+        if strategy == "full_completion":
+            z_t, t_int, t_float, beta_t, alpha_s_bar, alpha_t_bar = self._apply_full_completion_absorbing_noise(
                 X, E, y, node_mask, split
+            )
+        elif strategy == "next_node":
+            z_t, t_int, t_float, beta_t, alpha_s_bar, alpha_t_bar = self._apply_next_node_absorbing_noise(
+                X, E, y, node_mask
             )
         else:
             z_t, t_int, t_float, beta_t, alpha_s_bar, alpha_t_bar = self._apply_random_absorbing_noise(
@@ -267,7 +362,8 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
         pred = self.forward(noisy_data, extra_data, node_mask)
         loss, stats = self._masked_ce_loss(pred, noisy_data, X, E, node_mask)
         stats["random_batches"] = 1.0 if noisy_data["mask_strategy"] == "random" else 0.0
-        stats["completion_batches"] = 1.0 if noisy_data["mask_strategy"] == "completion" else 0.0
+        stats["full_completion_batches"] = 1.0 if noisy_data["mask_strategy"] == "full_completion" else 0.0
+        stats["next_node_batches"] = 1.0 if noisy_data["mask_strategy"] == "next_node" else 0.0
         self._accumulate_absorbing_stats(split, stats)
         self.log(f"{split}/absorbing_masked_loss", loss, sync_dist=True)
         return {"loss": loss}
@@ -296,7 +392,8 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
             f"masked_edge_CE={stats['e_ce']:.3f}, "
             f"avg_masked_nodes={stats['x_masked']:.1f}, "
             f"avg_masked_edges={stats['e_masked']:.1f}, "
-            f"completion_batches={stats['completion_batches']:.2f}) "
+            f"full_completion_batches={stats['full_completion_batches']:.2f}, "
+            f"next_node_batches={stats['next_node_batches']:.2f}) "
             f"-- {time.time() - self.start_epoch_time:.1f}s"
         )
         self._append_history({
@@ -307,7 +404,8 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
             "train_x_ce": stats["x_ce"],
             "train_e_ce": stats["e_ce"],
             "train_y_ce": "",
-            "train_completion_batches": stats["completion_batches"],
+            "train_full_completion_batches": stats["full_completion_batches"],
+            "train_next_node_batches": stats["next_node_batches"],
             "train_random_batches": stats["random_batches"],
             "train_seconds": time.time() - self.start_epoch_time,
         })
@@ -335,7 +433,8 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
             f"Epoch {display_epoch}: val_masked_loss={val_loss:.4f} "
             f"(masked_node_CE={stats['x_ce']:.3f}, "
             f"masked_edge_CE={stats['e_ce']:.3f}, "
-            f"completion_batches={stats['completion_batches']:.2f}, "
+            f"full_completion_batches={stats['full_completion_batches']:.2f}, "
+            f"next_node_batches={stats['next_node_batches']:.2f}, "
             f"best_val_masked_loss={self.best_val_nll:.4f})\n"
         )
         self._append_history({
@@ -345,7 +444,8 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
             "val_nll": val_loss,
             "val_x_kl": stats["x_ce"],
             "val_e_kl": stats["e_ce"],
-            "val_completion_batches": stats["completion_batches"],
+            "val_full_completion_batches": stats["full_completion_batches"],
+            "val_next_node_batches": stats["next_node_batches"],
             "val_random_batches": stats["random_batches"],
             "best_val_nll": self.best_val_nll,
         })
