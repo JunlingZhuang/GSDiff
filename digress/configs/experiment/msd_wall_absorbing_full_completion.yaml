@@ -1,0 +1,76 @@
+# @package _global_
+general:
+    name: 'msd_wall_absorbing_full_completion'
+    gpus: 1
+    strategy: 'auto'
+    matmul_precision: 'high'
+    wandb: 'disabled'
+    check_val_every_n_epochs: 10
+    sample_every_val: 2
+    samples_to_generate: 16
+    samples_to_save: 8
+    chains_to_save: 0
+    final_model_samples_to_generate: 128
+    final_model_samples_to_save: 32
+    final_model_chains_to_save: 0
+train:
+    n_epochs: 200
+    batch_size: 8
+    lr: 0.0001
+    weight_decay: 1e-12
+    clip_grad: null
+    ema_decay: 0
+    num_workers: 0
+    num_sanity_val_steps: 0
+    save_model: True
+model:
+    transition: 'absorbing'
+    diffusion_steps: 500
+    maskgit_steps: 16
+    n_layers: 5
+    # Full completion failed mostly on connectivity / true edge recovery, so
+    # this config gives topology slightly more weight than the unified model.
+    lambda_train: [2.0, 0]
+    extra_features: 'all'
+    edge_none_logit_bias: -0.05
+    absorbing_masking:
+        strategy: 'mixed'
+        eval_strategy: 'full_completion'
+        random_probability: 0.05
+        full_completion_probability: 0.90
+        next_node_probability: 0.05
+        # Full-completion validation uses 0.5 known ratio. Train approaches
+        # that difficulty faster than the unified config to reduce mismatch.
+        known_ratio_start: 0.7
+        known_ratio_end: 0.5
+        eval_known_ratio: 0.5
+        curriculum_epochs: 80
+        known_ratio_jitter: 0.1
+    hidden_mlp_dims: {'X': 128, 'E': 64, 'y': 128}
+    hidden_dims: {'dx': 256, 'de': 64, 'dy': 64, 'n_head': 8, 'dim_ffX': 256, 'dim_ffE': 64, 'dim_ffy': 256}
+test:
+    checkpoint: null
+    out_dir: null
+    num_samples: 32
+    batch_size: 8
+    num_nodes: null
+    grid_samples: 24
+    grid_cols: 4
+    device: 'auto'
+completion:
+    checkpoint: null
+    out_dir: null
+    num_samples: 32
+    batch_size: 1
+    known_ratio: 0.5
+    grid_samples: 12
+    seed: 0
+    device: 'auto'
+next_node:
+    checkpoint: null
+    out_dir: null
+    num_samples: 32
+    batch_size: 1
+    grid_samples: 12
+    seed: 0
+    device: 'auto'

@@ -288,6 +288,84 @@ close to the reference. However, room type accuracy and exact true-connection
 recovery are still weak, so this is not a final interaction-quality model.
 ```
 
+### Multi-Checkpoint Model Plan
+
+The current product direction uses multiple task-specific checkpoints instead
+of forcing one checkpoint to be optimal for every task. This avoids needing a
+task-type embedding right now and makes app behavior easier to tune.
+
+Required checkpoints:
+
+```text
+msd_wall_absorbing_v2
+  Purpose: unconditional graph generation baseline.
+  Status: trained.
+
+msd_wall_absorbing_completion
+  Purpose: unified research baseline for full completion + next-node.
+  Status: trained.
+
+msd_wall_absorbing_next_node
+  Purpose: app interaction, "add one room" and predict its target-to-known
+  edge types.
+  Status: config ready; train next.
+
+msd_wall_absorbing_full_completion
+  Purpose: one-click completion from a partial input graph to a full graph.
+  Status: config ready; train in parallel only if a second GPU is available,
+  otherwise run after next-node.
+```
+
+Next-node-specialized training:
+
+```powershell
+cd D:\Github\GSDiff\digress
+.\.venv\Scripts\python.exe src\main.py dataset=msd_wall +experiment=msd_wall_absorbing_next_node.yaml
+```
+
+Next-node-specialized testing:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\test_next_node_completion.py msd_wall_absorbing_next_node next_node.checkpoint=outputs/.../checkpoints/msd_wall_absorbing_next_node/best.ckpt
+```
+
+Full-completion-specialized training:
+
+```powershell
+cd D:\Github\GSDiff\digress
+.\.venv\Scripts\python.exe src\main.py dataset=msd_wall +experiment=msd_wall_absorbing_full_completion.yaml
+```
+
+Full-completion-specialized testing:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\test_graph_completion.py msd_wall_absorbing_full_completion completion.checkpoint=outputs/.../checkpoints/msd_wall_absorbing_full_completion/best.ckpt
+```
+
+Initial specialized config choices:
+
+```text
+next_node:
+  random=0.05, full_completion=0.10, next_node=0.85
+  eval_strategy=next_node
+  lambda_train=[1.5, 0]
+
+full_completion:
+  random=0.05, full_completion=0.90, next_node=0.05
+  eval_strategy=full_completion
+  lambda_train=[2.0, 0]
+  known_ratio_start=0.7, known_ratio_end=0.5, curriculum_epochs=80
+```
+
+Why no task conditioning here:
+
+```text
+Task conditioning is most useful when one unified checkpoint must handle many
+tasks equally well. With task-specific checkpoints, the task is already defined
+by the checkpoint and the training distribution, so task conditioning is not
+the highest-priority change.
+```
+
 ## Partial Graph Completion
 
 Completion is an inference-only mode on the same absorbing checkpoint. It does
