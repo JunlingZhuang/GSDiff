@@ -71,3 +71,11 @@ completion:
     grid_samples: 12
     seed: 0
     device: 'auto'
+next_node:
+    checkpoint: null
+    out_dir: null
+    num_samples: 32
+    batch_size: 1
+    grid_samples: 12
+    seed: 0
+    device: 'auto'

@@ -240,6 +240,52 @@ After training, test both modes:
 ```powershell
 .\.venv\Scripts\python.exe scripts\test_graph_generation.py msd_wall_absorbing_completion test.checkpoint=outputs/.../checkpoints/msd_wall_absorbing_completion/best.ckpt
 .\.venv\Scripts\python.exe scripts\test_graph_completion.py msd_wall_absorbing_completion completion.checkpoint=outputs/.../checkpoints/msd_wall_absorbing_completion/best.ckpt
+.\.venv\Scripts\python.exe scripts\test_next_node_completion.py msd_wall_absorbing_completion next_node.checkpoint=outputs/.../checkpoints/msd_wall_absorbing_completion/best.ckpt
+```
+
+Next-node evaluator outputs:
+
+```text
+next_node_samples.json   # input graph, model next-node completion, reference
+next_node_metrics.json   # target-node and target-edge metrics
+next_node_grid.png       # one row per case: input / completed / reference
+```
+
+The key next-node metrics are:
+
+- `target_node_accuracy`: whether the masked next room type is correct.
+- `target_edge_accuracy_all`: edge type accuracy for target-to-known slots,
+  including many `none` slots.
+- `target_edge_accuracy_present`: edge type accuracy only on true non-none
+  target connections.
+- `connection_precision/recall/f1`: whether the model chooses the same existing
+  nodes to connect to, ignoring edge type.
+- `predicted_connected_to_known_frac`: how often the predicted target node has
+  at least one non-none edge back to the known graph.
+
+Initial result for the epoch-200 completion checkpoint:
+
+```text
+num_samples=32
+target_node_accuracy=0.250
+target_edge_accuracy_all=0.817
+target_edge_accuracy_present=0.277
+connection_f1=0.364
+predicted_connected_to_known_frac=0.906
+reference_connected_to_known_frac=1.000
+avg_predicted_target_degree=3.66
+avg_reference_target_degree=4.06
+completed connected_frac=0.875
+reference connected_frac=0.938
+```
+
+Interpretation:
+
+```text
+Next-node behavior is substantially more usable than full-completion behavior:
+the target node usually reconnects to the known graph and average degree is
+close to the reference. However, room type accuracy and exact true-connection
+recovery are still weak, so this is not a final interaction-quality model.
 ```
 
 ## Partial Graph Completion
