@@ -339,11 +339,23 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
             if x_positions.any()
             else zero
         )
-        loss_E = (
-            F.cross_entropy(pred_E[e_positions], true_E_idx[e_positions])
-            if e_positions.any()
-            else zero
-        )
+        loss_E = zero
+        if e_positions.any():
+            edge_present_weight = float(self.cfg.model.get("edge_present_loss_weight", 1.0))
+            if edge_present_weight == 1.0:
+                loss_E = F.cross_entropy(pred_E[e_positions], true_E_idx[e_positions])
+            else:
+                # Edge class 0 is "none"; all non-zero edge classes represent
+                # real target connections. MSD has many more none edge slots
+                # than real edges, so this optional weight makes missed wall /
+                # door / passage / entrance edges more expensive.
+                edge_weights = torch.ones(self.base_Edim_output, device=pred_E.device, dtype=pred_E.dtype)
+                edge_weights[1:] = edge_present_weight
+                loss_E = F.cross_entropy(
+                    pred_E[e_positions],
+                    true_E_idx[e_positions],
+                    weight=edge_weights,
+                )
         total = loss_X + float(self.cfg.model.lambda_train[0]) * loss_E
         return total, {
             "loss": total.detach(),

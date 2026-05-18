@@ -349,11 +349,13 @@ next_node:
   random=0.05, full_completion=0.10, next_node=0.85
   eval_strategy=next_node
   lambda_train=[1.5, 0]
+  edge_present_loss_weight=3.0
 
 full_completion:
   random=0.05, full_completion=0.90, next_node=0.05
   eval_strategy=full_completion
   lambda_train=[2.0, 0]
+  edge_present_loss_weight=3.0
   known_ratio_start=0.7, known_ratio_end=0.5, curriculum_epochs=80
 ```
 
@@ -364,6 +366,39 @@ Task conditioning is most useful when one unified checkpoint must handle many
 tasks equally well. With task-specific checkpoints, the task is already defined
 by the checkpoint and the training distribution, so task conditioning is not
 the highest-priority change.
+```
+
+### Edge-Present Weighted Loss
+
+The specialized configs enable `edge_present_loss_weight`:
+
+```yaml
+model:
+  edge_present_loss_weight: 3.0
+```
+
+This modifies only absorbing edge CE:
+
+```text
+true edge class == 0 ("none")        -> CE weight 1.0
+true edge class > 0 (real relation)  -> CE weight edge_present_loss_weight
+```
+
+Why this is needed:
+
+```text
+MSD graphs have many more none edge slots than real edge slots. Without
+reweighting, a model can get good all-slot edge accuracy by predicting many
+none edges while still missing the true wall / door / passage / entrance
+connections. That failure hurts next-node connection F1 and full-completion
+connectedness.
+```
+
+Important:
+
+```text
+This is a training loss change. Old checkpoints are unchanged. Configs that do
+not set edge_present_loss_weight default to 1.0 and keep the old behavior.
 ```
 
 ## Partial Graph Completion

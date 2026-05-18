@@ -31,6 +31,9 @@ model:
     # Full completion failed mostly on connectivity / true edge recovery, so
     # this config gives topology slightly more weight than the unified model.
     lambda_train: [2.0, 0]
+    # Full completion has many none edge slots. Upweight real connections to
+    # reduce disconnected outputs and improve true edge recovery.
+    edge_present_loss_weight: 3.0
     extra_features: 'all'
     edge_none_logit_bias: -0.05
     absorbing_masking:

@@ -32,6 +32,10 @@ model:
     # edge classes. Keep edge weight moderate until we add class-balanced edge
     # loss; pushing it too high can overfit the many none edges.
     lambda_train: [1.5, 0]
+    # Target-to-known edge slots are dominated by "none". Upweight real
+    # connection classes so next-node training optimizes connection F1 rather
+    # than only all-slot edge accuracy.
+    edge_present_loss_weight: 3.0
     extra_features: 'all'
     edge_none_logit_bias: -0.05
     absorbing_masking:
