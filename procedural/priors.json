@@ -1,0 +1,775 @@
+{
+  "source": "digress/data/msd_wall_v6/graphs.p",
+  "graph_count": 5372,
+  "edge_kind_totals": {
+    "wall": 160629,
+    "door": 126135,
+    "passage": 21813,
+    "entrance": 20222
+  },
+  "apartment": {
+    "nodes_per_graph": {
+      "p10": 17.0,
+      "p25": 19.0,
+      "p50": 25.0,
+      "p75": 35.0,
+      "p90": 49.0
+    },
+    "edges_per_graph": {
+      "p10": 31.0,
+      "p25": 37.0,
+      "p50": 49.0,
+      "p75": 71.0,
+      "p90": 101.0
+    }
+  },
+  "room_priors": {
+    "Bedroom": {
+      "n": 42584,
+      "area_m2": {
+        "p10": 10.597,
+        "p25": 12.07,
+        "p50": 14.347,
+        "p75": 16.242,
+        "p90": 18.962
+      },
+      "aspect": {
+        "p10": 1.074,
+        "p25": 1.184,
+        "p50": 1.377,
+        "p75": 1.602,
+        "p90": 1.811
+      },
+      "vertices": {
+        "p10": 4.0,
+        "p25": 4.0,
+        "p50": 6.0,
+        "p75": 8.0,
+        "p90": 12.0
+      },
+      "convexity": {
+        "p10": 0.955,
+        "p25": 0.993,
+        "p50": 1.0,
+        "p75": 1.0,
+        "p90": 1.0
+      },
+      "rect_fraction": 0.456,
+      "degree_total": {
+        "p10": 3.0,
+        "p25": 3.0,
+        "p50": 4.0,
+        "p75": 4.0,
+        "p90": 5.0
+      },
+      "degree_wall": {
+        "p10": 1.0,
+        "p25": 2.0,
+        "p50": 2.0,
+        "p75": 3.0,
+        "p90": 4.0
+      },
+      "degree_door": {
+        "p10": 1.0,
+        "p25": 1.0,
+        "p50": 1.0,
+        "p75": 2.0,
+        "p90": 2.0
+      }
+    },
+    "Livingroom": {
+      "n": 13492,
+      "area_m2": {
+        "p10": 17.935,
+        "p25": 21.398,
+        "p50": 27.612,
+        "p75": 33.008,
+        "p90": 39.538
+      },
+      "aspect": {
+        "p10": 1.055,
+        "p25": 1.157,
+        "p50": 1.374,
+        "p75": 1.646,
+        "p90": 2.106
+      },
+      "vertices": {
+        "p10": 6.0,
+        "p25": 8.0,
+        "p50": 13.0,
+        "p75": 18.0,
+        "p90": 25.0
+      },
+      "convexity": {
+        "p10": 0.808,
+        "p25": 0.882,
+        "p50": 0.948,
+        "p75": 0.995,
+        "p90": 1.0
+      },
+      "rect_fraction": 0.084,
+      "degree_total": {
+        "p10": 4.0,
+        "p25": 4.0,
+        "p50": 5.0,
+        "p75": 6.0,
+        "p90": 8.0
+      },
+      "degree_wall": {
+        "p10": 1.0,
+        "p25": 2.0,
+        "p50": 2.0,
+        "p75": 3.0,
+        "p90": 4.0
+      },
+      "degree_door": {
+        "p10": 1.0,
+        "p25": 1.0,
+        "p50": 2.0,
+        "p75": 2.0,
+        "p90": 3.0
+      }
+    },
+    "Kitchen": {
+      "n": 18000,
+      "area_m2": {
+        "p10": 5.401,
+        "p25": 6.568,
+        "p50": 7.951,
+        "p75": 9.996,
+        "p90": 12.288
+      },
+      "aspect": {
+        "p10": 1.08,
+        "p25": 1.208,
+        "p50": 1.439,
+        "p75": 1.73,
+        "p90": 2.134
+      },
+      "vertices": {
+        "p10": 4.0,
+        "p25": 6.0,
+        "p50": 8.0,
+        "p75": 10.0,
+        "p90": 14.0
+      },
+      "convexity": {
+        "p10": 0.935,
+        "p25": 0.972,
+        "p50": 0.992,
+        "p75": 1.0,
+        "p90": 1.0
+      },
+      "rect_fraction": 0.242,
+      "degree_total": {
+        "p10": 2.0,
+        "p25": 3.0,
+        "p50": 3.0,
+        "p75": 4.0,
+        "p90": 5.0
+      },
+      "degree_wall": {
+        "p10": 1.0,
+        "p25": 1.0,
+        "p50": 2.0,
+        "p75": 3.0,
+        "p90": 3.0
+      },
+      "degree_door": {
+        "p10": 0.0,
+        "p25": 0.0,
+        "p50": 1.0,
+        "p75": 1.0,
+        "p90": 2.0
+      }
+    },
+    "Dining": {
+      "n": 540,
+      "area_m2": {
+        "p10": 6.262,
+        "p25": 7.826,
+        "p50": 10.402,
+        "p75": 13.818,
+        "p90": 17.582
+      },
+      "aspect": {
+        "p10": 1.058,
+        "p25": 1.139,
+        "p50": 1.284,
+        "p75": 1.591,
+        "p90": 1.776
+      },
+      "vertices": {
+        "p10": 4.0,
+        "p25": 6.0,
+        "p50": 8.0,
+        "p75": 11.0,
+        "p90": 16.0
+      },
+      "convexity": {
+        "p10": 0.949,
+        "p25": 0.982,
+        "p50": 0.996,
+        "p75": 1.0,
+        "p90": 1.0
+      },
+      "rect_fraction": 0.193,
+      "degree_total": {
+        "p10": 3.0,
+        "p25": 3.0,
+        "p50": 4.0,
+        "p75": 5.0,
+        "p90": 6.0
+      },
+      "degree_wall": {
+        "p10": 0.0,
+        "p25": 1.0,
+        "p50": 1.0,
+        "p75": 2.0,
+        "p90": 3.0
+      },
+      "degree_door": {
+        "p10": 0.0,
+        "p25": 0.0,
+        "p50": 1.0,
+        "p75": 2.0,
+        "p90": 2.0
+      }
+    },
+    "Corridor": {
+      "n": 25738,
+      "area_m2": {
+        "p10": 2.92,
+        "p25": 4.704,
+        "p50": 8.168,
+        "p75": 12.403,
+        "p90": 16.84
+      },
+      "aspect": {
+        "p10": 1.115,
+        "p25": 1.325,
+        "p50": 1.754,
+        "p75": 2.438,
+        "p90": 3.366
+      },
+      "vertices": {
+        "p10": 4.0,
+        "p25": 6.0,
+        "p50": 10.0,
+        "p75": 16.0,
+        "p90": 22.0
+      },
+      "convexity": {
+        "p10": 0.723,
+        "p25": 0.822,
+        "p50": 0.939,
+        "p75": 0.998,
+        "p90": 1.0
+      },
+      "rect_fraction": 0.151,
+      "degree_total": {
+        "p10": 4.0,
+        "p25": 5.0,
+        "p50": 6.0,
+        "p75": 7.0,
+        "p90": 9.0
+      },
+      "degree_wall": {
+        "p10": 0.0,
+        "p25": 0.0,
+        "p50": 1.0,
+        "p75": 2.0,
+        "p90": 3.0
+      },
+      "degree_door": {
+        "p10": 0.0,
+        "p25": 1.0,
+        "p50": 3.0,
+        "p75": 5.0,
+        "p90": 6.0
+      }
+    },
+    "Stairs": {
+      "n": 9561,
+      "area_m2": {
+        "p10": 1.718,
+        "p25": 2.527,
+        "p50": 4.828,
+        "p75": 12.555,
+        "p90": 18.86
+      },
+      "aspect": {
+        "p10": 1.03,
+        "p25": 1.089,
+        "p50": 1.294,
+        "p75": 1.839,
+        "p90": 2.429
+      },
+      "vertices": {
+        "p10": 4.0,
+        "p25": 4.0,
+        "p50": 4.0,
+        "p75": 9.0,
+        "p90": 16.0
+      },
+      "convexity": {
+        "p10": 0.878,
+        "p25": 0.99,
+        "p50": 1.0,
+        "p75": 1.0,
+        "p90": 1.0
+      },
+      "rect_fraction": 0.519,
+      "degree_total": {
+        "p10": 1.0,
+        "p25": 3.0,
+        "p50": 4.0,
+        "p75": 5.0,
+        "p90": 7.0
+      },
+      "degree_wall": {
+        "p10": 0.0,
+        "p25": 2.0,
+        "p50": 2.0,
+        "p75": 3.0,
+        "p90": 4.0
+      },
+      "degree_door": {
+        "p10": 0.0,
+        "p25": 0.0,
+        "p50": 0.0,
+        "p75": 1.0,
+        "p90": 1.0
+      }
+    },
+    "Storeroom": {
+      "n": 7367,
+      "area_m2": {
+        "p10": 0.93,
+        "p25": 1.552,
+        "p50": 2.479,
+        "p75": 4.244,
+        "p90": 9.092
+      },
+      "aspect": {
+        "p10": 1.077,
+        "p25": 1.205,
+        "p50": 1.5,
+        "p75": 1.917,
+        "p90": 2.39
+      },
+      "vertices": {
+        "p10": 4.0,
+        "p25": 4.0,
+        "p50": 4.0,
+        "p75": 6.0,
+        "p90": 9.0
+      },
+      "convexity": {
+        "p10": 0.938,
+        "p25": 0.997,
+        "p50": 1.0,
+        "p75": 1.0,
+        "p90": 1.0
+      },
+      "rect_fraction": 0.605,
+      "degree_total": {
+        "p10": 2.0,
+        "p25": 3.0,
+        "p50": 3.0,
+        "p75": 4.0,
+        "p90": 4.0
+      },
+      "degree_wall": {
+        "p10": 1.0,
+        "p25": 2.0,
+        "p50": 2.0,
+        "p75": 3.0,
+        "p90": 3.0
+      },
+      "degree_door": {
+        "p10": 0.0,
+        "p25": 1.0,
+        "p50": 1.0,
+        "p75": 1.0,
+        "p90": 1.0
+      }
+    },
+    "Bathroom": {
+      "n": 28276,
+      "area_m2": {
+        "p10": 1.777,
+        "p25": 2.837,
+        "p50": 3.794,
+        "p75": 4.633,
+        "p90": 5.627
+      },
+      "aspect": {
+        "p10": 1.098,
+        "p25": 1.246,
+        "p50": 1.421,
+        "p75": 1.697,
+        "p90": 1.973
+      },
+      "vertices": {
+        "p10": 4.0,
+        "p25": 4.0,
+        "p50": 6.0,
+        "p75": 8.0,
+        "p90": 10.0
+      },
+      "convexity": {
+        "p10": 0.932,
+        "p25": 0.965,
+        "p50": 1.0,
+        "p75": 1.0,
+        "p90": 1.0
+      },
+      "rect_fraction": 0.479,
+      "degree_total": {
+        "p10": 2.0,
+        "p25": 3.0,
+        "p50": 3.0,
+        "p75": 4.0,
+        "p90": 4.0
+      },
+      "degree_wall": {
+        "p10": 1.0,
+        "p25": 2.0,
+        "p50": 2.0,
+        "p75": 3.0,
+        "p90": 3.0
+      },
+      "degree_door": {
+        "p10": 1.0,
+        "p25": 1.0,
+        "p50": 1.0,
+        "p75": 1.0,
+        "p90": 1.0
+      }
+    },
+    "Balcony": {
+      "n": 19783,
+      "area_m2": {
+        "p10": 2.985,
+        "p25": 4.841,
+        "p50": 7.739,
+        "p75": 11.934,
+        "p90": 18.778
+      },
+      "aspect": {
+        "p10": 1.316,
+        "p25": 1.71,
+        "p50": 2.351,
+        "p75": 3.309,
+        "p90": 4.647
+      },
+      "vertices": {
+        "p10": 4.0,
+        "p25": 4.0,
+        "p50": 8.0,
+        "p75": 10.0,
+        "p90": 15.0
+      },
+      "convexity": {
+        "p10": 0.888,
+        "p25": 0.98,
+        "p50": 0.998,
+        "p75": 1.0,
+        "p90": 1.0
+      },
+      "rect_fraction": 0.271,
+      "degree_total": {
+        "p10": 1.0,
+        "p25": 1.0,
+        "p50": 2.0,
+        "p75": 3.0,
+        "p90": 3.0
+      },
+      "degree_wall": {
+        "p10": 0.0,
+        "p25": 0.0,
+        "p50": 1.0,
+        "p75": 1.0,
+        "p90": 2.0
+      },
+      "degree_door": {
+        "p10": 1.0,
+        "p25": 1.0,
+        "p50": 1.0,
+        "p75": 2.0,
+        "p90": 2.0
+      }
+    }
+  },
+  "adjacency_priors": {
+    "wall_pairs": {
+      "Bedroom|Bedroom": {
+        "count": 23030
+      },
+      "Bathroom|Bedroom": {
+        "count": 17330
+      },
+      "Bedroom|Livingroom": {
+        "count": 10224
+      },
+      "Bathroom|Kitchen": {
+        "count": 9979
+      },
+      "Bedroom|Kitchen": {
+        "count": 8609
+      },
+      "Bedroom|Corridor": {
+        "count": 6662
+      },
+      "Bathroom|Corridor": {
+        "count": 6438
+      },
+      "Bathroom|Bathroom": {
+        "count": 6387
+      },
+      "Balcony|Bedroom": {
+        "count": 6334
+      },
+      "Bathroom|Livingroom": {
+        "count": 6250
+      },
+      "Bedroom|Stairs": {
+        "count": 6140
+      },
+      "Corridor|Kitchen": {
+        "count": 4840
+      },
+      "Bathroom|Stairs": {
+        "count": 4620
+      },
+      "Corridor|Stairs": {
+        "count": 3513
+      },
+      "Bedroom|Storeroom": {
+        "count": 3372
+      },
+      "Livingroom|Livingroom": {
+        "count": 2900
+      },
+      "Corridor|Corridor": {
+        "count": 2771
+      },
+      "Bathroom|Storeroom": {
+        "count": 2759
+      },
+      "Kitchen|Stairs": {
+        "count": 2681
+      },
+      "Kitchen|Livingroom": {
+        "count": 2622
+      },
+      "Livingroom|Stairs": {
+        "count": 2361
+      },
+      "Balcony|Kitchen": {
+        "count": 2291
+      },
+      "Kitchen|Kitchen": {
+        "count": 2157
+      },
+      "Corridor|Livingroom": {
+        "count": 2119
+      },
+      "Corridor|Storeroom": {
+        "count": 2050
+      },
+      "Stairs|Storeroom": {
+        "count": 1835
+      },
+      "Storeroom|Storeroom": {
+        "count": 1578
+      },
+      "Balcony|Balcony": {
+        "count": 1479
+      },
+      "Livingroom|Storeroom": {
+        "count": 1359
+      },
+      "Balcony|Livingroom": {
+        "count": 1283
+      },
+      "Kitchen|Storeroom": {
+        "count": 1055
+      },
+      "Balcony|Bathroom": {
+        "count": 1027
+      },
+      "Balcony|Stairs": {
+        "count": 630
+      },
+      "Stairs|Stairs": {
+        "count": 496
+      },
+      "Balcony|Corridor": {
+        "count": 414
+      },
+      "Balcony|Storeroom": {
+        "count": 256
+      },
+      "Bedroom|Dining": {
+        "count": 222
+      },
+      "Dining|Kitchen": {
+        "count": 103
+      },
+      "Bathroom|Dining": {
+        "count": 100
+      },
+      "Dining|Stairs": {
+        "count": 96
+      },
+      "Corridor|Dining": {
+        "count": 71
+      },
+      "Balcony|Dining": {
+        "count": 62
+      },
+      "Dining|Livingroom": {
+        "count": 46
+      },
+      "Dining|Storeroom": {
+        "count": 42
+      },
+      "Dining|Dining": {
+        "count": 36
+      }
+    },
+    "access_pairs": {
+      "Bedroom|Corridor": {
+        "count": 38384
+      },
+      "Bathroom|Corridor": {
+        "count": 24948
+      },
+      "Corridor|Livingroom": {
+        "count": 14389
+      },
+      "Balcony|Livingroom": {
+        "count": 11941
+      },
+      "Corridor|Stairs": {
+        "count": 11374
+      },
+      "Corridor|Kitchen": {
+        "count": 11161
+      },
+      "Corridor|Corridor": {
+        "count": 10352
+      },
+      "Balcony|Bedroom": {
+        "count": 9642
+      },
+      "Kitchen|Livingroom": {
+        "count": 9034
+      },
+      "Corridor|Storeroom": {
+        "count": 5306
+      },
+      "Balcony|Kitchen": {
+        "count": 3714
+      },
+      "Bedroom|Livingroom": {
+        "count": 3645
+      },
+      "Stairs|Stairs": {
+        "count": 2116
+      },
+      "Bedroom|Kitchen": {
+        "count": 1689
+      },
+      "Bathroom|Bedroom": {
+        "count": 1603
+      },
+      "Bathroom|Livingroom": {
+        "count": 1449
+      },
+      "Bedroom|Bedroom": {
+        "count": 1386
+      },
+      "Balcony|Corridor": {
+        "count": 503
+      },
+      "Livingroom|Storeroom": {
+        "count": 487
+      },
+      "Bedroom|Storeroom": {
+        "count": 436
+      },
+      "Livingroom|Stairs": {
+        "count": 403
+      },
+      "Stairs|Storeroom": {
+        "count": 398
+      },
+      "Corridor|Dining": {
+        "count": 394
+      },
+      "Kitchen|Storeroom": {
+        "count": 376
+      },
+      "Bathroom|Kitchen": {
+        "count": 361
+      },
+      "Bathroom|Bathroom": {
+        "count": 359
+      },
+      "Dining|Kitchen": {
+        "count": 339
+      },
+      "Balcony|Storeroom": {
+        "count": 333
+      },
+      "Dining|Livingroom": {
+        "count": 277
+      },
+      "Bathroom|Storeroom": {
+        "count": 250
+      },
+      "Bedroom|Stairs": {
+        "count": 213
+      },
+      "Balcony|Dining": {
+        "count": 189
+      },
+      "Storeroom|Storeroom": {
+        "count": 149
+      },
+      "Balcony|Stairs": {
+        "count": 119
+      },
+      "Kitchen|Stairs": {
+        "count": 105
+      },
+      "Bedroom|Dining": {
+        "count": 89
+      },
+      "Balcony|Bathroom": {
+        "count": 78
+      },
+      "Balcony|Balcony": {
+        "count": 75
+      },
+      "Bathroom|Stairs": {
+        "count": 61
+      },
+      "Dining|Storeroom": {
+        "count": 16
+      },
+      "Livingroom|Livingroom": {
+        "count": 15
+      },
+      "Bathroom|Dining": {
+        "count": 10
+      },
+      "Dining|Stairs": {
+        "count": 2
+      }
+    }
+  }
+}
