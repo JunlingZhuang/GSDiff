@@ -7,7 +7,7 @@ export interface Wall {
   id: string;
   a: Pt;
   b: Pt;
-  thickness: number;
+  thickness: number; // metres
 }
 
 export type OpeningKind = 'door' | 'window' | 'passage';
@@ -20,6 +20,8 @@ export interface Opening {
   kind: OpeningKind;
 }
 
+// Canonical room types. The backend room_type is a raw string, so a value
+// outside this union is possible; renderers should fall back to a default.
 export type RoomType =
   | 'Bedroom' | 'Livingroom' | 'Kitchen' | 'Dining' | 'Corridor'
   | 'Stairs' | 'Storeroom' | 'Bathroom' | 'Balcony';
@@ -36,7 +38,7 @@ export interface AxisGrid {
   originY: number;
   spacingX: number;
   spacingY: number;
-  angleDeg: number;
+  angleDeg: number; // building dominant-axis angle, degrees
 }
 
 export interface Plan {
