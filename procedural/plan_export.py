@@ -46,3 +46,51 @@ def derive_walls(rooms: dict[str, list[tuple[float, float]]],
     for i, (_, ab) in enumerate(seen.items()):
         walls.append({"id": f"w{i}", "a": ab["a"], "b": ab["b"], "thickness": thickness})
     return walls
+
+
+ACCESS_KINDS = {"door", "passage", "entrance"}
+OPENING_WIDTH = {"door": 0.9, "passage": 1.2, "entrance": 1.0, "window": 1.0}
+
+
+def _room_edge_keys(poly) -> set:
+    keys = set()
+    for i in range(len(poly) - 1):
+        a, b = poly[i], poly[i + 1]
+        keys.add(_seg_key(a, b))
+    return keys
+
+
+def derive_openings(rooms: dict[str, list[tuple[float, float]]],
+                    walls: list[dict],
+                    edges: list[dict]) -> list[dict]:
+    """One opening per access edge (door/passage/entrance) on the wall shared by
+    the two rooms. wall-type edges produce nothing. If the two rooms share no
+    coincident wall (adjacency not realised geometrically), the edge is skipped.
+    """
+    wall_by_key = {_seg_key(w["a"], w["b"]): w for w in walls}
+    openings: list[dict] = []
+    idx = 0
+    for e in edges:
+        kind = e.get("connectivity")
+        if kind not in ACCESS_KINDS:
+            continue
+        ra, rb = e.get("source"), e.get("target")
+        if ra not in rooms or rb not in rooms:
+            continue
+        shared = _room_edge_keys(rooms[ra]) & _room_edge_keys(rooms[rb])
+        wall = None
+        for k in shared:
+            if k in wall_by_key:
+                wall = wall_by_key[k]
+                break
+        if wall is None:
+            continue  # adjacency not realised — designer fixes by hand later
+        openings.append({
+            "id": f"o{idx}",
+            "wallId": wall["id"],
+            "t": 0.5,
+            "width": OPENING_WIDTH.get(kind, 0.9),
+            "kind": "door" if kind in ("door", "entrance") else "passage",
+        })
+        idx += 1
+    return openings
