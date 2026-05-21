@@ -12,6 +12,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname
 from app.services.model_manager import manager
 from app.routers.generate import router as generate_router
 from app.routers.models import router as models_router
+from app.routers.procedural import router as procedural_router
 
 
 @asynccontextmanager
@@ -34,6 +35,7 @@ app.add_middleware(
 
 app.include_router(generate_router)
 app.include_router(models_router)
+app.include_router(procedural_router)
 
 
 @app.get("/health")
