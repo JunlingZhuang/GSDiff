@@ -11,6 +11,11 @@ from __future__ import annotations
 
 import math
 
+import networkx as nx
+from shapely.geometry import Polygon
+
+from procedural import generator
+
 ROUND = 3  # coordinate rounding (mm) for coincident-edge matching
 
 
@@ -96,12 +101,6 @@ def derive_openings(rooms: dict[str, list[tuple[float, float]]],
     return openings
 
 
-import networkx as nx
-from shapely.geometry import Polygon
-
-from procedural import generator, rules
-
-
 def _poly_to_pts(poly: Polygon) -> list[list[float]]:
     return [[float(x), float(y)] for x, y in poly.exterior.coords]
 
@@ -114,13 +113,13 @@ def build_plan(graph: nx.Graph, boundary: Polygon, seed: int = 0) -> dict:
     angle = generator.dominant_angle(boundary)
 
     # rooms: stable string ids r{node}
-    rooms_poly: dict[str, list[tuple[float, float]]] = {}
+    rooms_poly: dict[str, list[list[float]]] = {}
     room_meta: dict[str, dict] = {}
     for n, room in layout.rooms.items():
         if room.polygon.is_empty:
             continue
         rid = f"r{n}"
-        pts = [(float(x), float(y)) for x, y in room.polygon.exterior.coords]
+        pts = _poly_to_pts(room.polygon)
         rooms_poly[rid] = pts
         room_meta[rid] = {"type": room.room_type, "node": n}
 
@@ -145,7 +144,7 @@ def build_plan(graph: nx.Graph, boundary: Polygon, seed: int = 0) -> dict:
         rooms_out.append({
             "id": rid,
             "type": room_meta[rid]["type"],
-            "poly": [[float(x), float(y)] for x, y in pts],
+            "poly": pts,
             "wallIds": wall_ids,
         })
 

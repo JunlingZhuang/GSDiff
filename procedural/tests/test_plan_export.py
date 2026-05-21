@@ -1,4 +1,9 @@
-from procedural.plan_export import derive_walls, _seg_key, derive_openings
+import json
+import pickle
+from pathlib import Path
+
+from procedural.plan_export import derive_walls, _seg_key, derive_openings, build_plan
+from procedural import io_msd
 
 
 def _square(x0, y0, x1, y1):
@@ -61,14 +66,6 @@ def test_derive_openings_entrance_maps_to_door_kind():
     assert openings[0]["kind"] == "door"
 
 
-import json
-import pickle
-from pathlib import Path
-
-from procedural.plan_export import build_plan
-from procedural import io_msd
-
-
 def _load_multiapt_graph():
     p = Path(__file__).resolve().parents[2] / "digress" / "data" / "msd_wall_v6" / "graphs.p"
     with open(p, "rb") as f:
@@ -94,5 +91,7 @@ def test_build_plan_shape_and_json_serializable():
         assert key in r
     # grid carries the building axis angle
     assert "angleDeg" in plan["grid"]
+    # at least one room must actually link to walls (guards silent key mismatch)
+    assert any(len(r["wallIds"]) > 0 for r in plan["rooms"])
     # whole thing must be JSON-serializable (it crosses the HTTP boundary)
     json.dumps(plan)
