@@ -23,11 +23,12 @@ export function wallQuad(wall: Wall): Pt[] {
 // SVG path "d" for a closed polygon of points.
 export function polyPath(pts: Pt[]): string {
   if (pts.length === 0) return '';
+  const fmt = (n: number) => +n.toFixed(4);
   const [first, ...rest] = pts;
-  return `M ${first[0]} ${first[1]} ` + rest.map((p) => `L ${p[0]} ${p[1]}`).join(' ') + ' Z';
+  return `M ${fmt(first[0])} ${fmt(first[1])} ` + rest.map((p) => `L ${fmt(p[0])} ${fmt(p[1])}`).join(' ') + ' Z';
 }
 
-// Midpoint of a wall offset by t in [0,1] from a→b; used to place openings.
+// Point at parameter t in [0,1] along the wall centreline a→b; used to place openings.
 export function pointAlongWall(wall: Wall, t: number): Pt {
   return [wall.a[0] + (wall.b[0] - wall.a[0]) * t, wall.a[1] + (wall.b[1] - wall.a[1]) * t];
 }
