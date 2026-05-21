@@ -1,4 +1,5 @@
 import type { DatasetId } from './constants';
+import type { Plan } from './plan';
 import type { GraphGenerationResponse, ModelStatusResponse } from './types';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
@@ -66,4 +67,24 @@ export async function generateBoundary(boundaryImage: string): Promise<{ image: 
   });
   if (!res.ok) throw await readError(res, 'Generation failed');
   return res.json();
+}
+
+export interface ProceduralGraphInput {
+  nodes: { id: number; room_type: string }[];
+  edges: { source: number; target: number; connectivity: string }[];
+}
+
+export async function generateProcedural(
+  graph: ProceduralGraphInput,
+  boundary: [number, number][],
+  seed = 0,
+): Promise<Plan> {
+  const res = await fetch(`${API_BASE}/api/generate/procedural`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ graph, boundary, seed }),
+    signal: AbortSignal.timeout(60000),
+  });
+  if (!res.ok) throw await readError(res, 'Procedural generation failed');
+  return res.json() as Promise<Plan>;
 }
