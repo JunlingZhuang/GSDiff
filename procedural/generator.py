@@ -28,7 +28,7 @@ import networkx as nx
 from shapely.affinity import rotate as shp_rotate
 from shapely.affinity import scale as shp_scale
 from shapely.affinity import translate as shp_translate
-from shapely.geometry import Polygon, box
+from shapely.geometry import MultiPolygon, Polygon, box
 from shapely.ops import unary_union
 
 from . import bsp, carve, io_msd, rules

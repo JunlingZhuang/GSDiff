@@ -59,3 +59,40 @@ def test_derive_openings_entrance_maps_to_door_kind():
     openings = derive_openings(rooms, walls, edges)
     assert len(openings) == 1
     assert openings[0]["kind"] == "door"
+
+
+import json
+import pickle
+from pathlib import Path
+
+from procedural.plan_export import build_plan
+from procedural import io_msd
+
+
+def _load_multiapt_graph():
+    p = Path(__file__).resolve().parents[2] / "digress" / "data" / "msd_wall_v6" / "graphs.p"
+    with open(p, "rb") as f:
+        graphs = pickle.load(f)
+    # smallest graph for a fast test
+    return min(graphs, key=lambda g: g.number_of_nodes())
+
+
+def test_build_plan_shape_and_json_serializable():
+    g = _load_multiapt_graph()
+    boundary = io_msd.boundary_for_processed_graph(g)
+    assert boundary is not None
+    plan = build_plan(g, boundary, seed=0)
+
+    for key in ("walls", "openings", "rooms", "grid", "unit"):
+        assert key in plan
+    assert plan["unit"] == "m"
+    assert len(plan["rooms"]) > 0
+    assert len(plan["walls"]) > 0
+    # every room references walls and has a polygon + type
+    r = plan["rooms"][0]
+    for key in ("id", "type", "poly", "wallIds"):
+        assert key in r
+    # grid carries the building axis angle
+    assert "angleDeg" in plan["grid"]
+    # whole thing must be JSON-serializable (it crosses the HTTP boundary)
+    json.dumps(plan)
