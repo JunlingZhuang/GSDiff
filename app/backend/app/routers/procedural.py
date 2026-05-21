@@ -52,6 +52,8 @@ def _to_nx(graph: GraphIn) -> nx.Graph:
 def procedural(req: ProceduralRequest):
     if len(req.boundary) < 3:
         raise HTTPException(400, "boundary needs at least 3 points")
+    if any(len(p) != 2 for p in req.boundary):
+        raise HTTPException(400, "each boundary point must have exactly 2 coordinates")
     try:
         g = _to_nx(req.graph)
         boundary = Polygon(req.boundary)

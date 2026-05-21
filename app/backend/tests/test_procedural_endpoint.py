@@ -34,3 +34,23 @@ def test_procedural_generates_plan_from_default_boundary():
     assert {"walls", "openings", "rooms", "grid", "unit"} <= set(data)
     assert len(data["rooms"]) == 4
     assert len(data["walls"]) > 0
+
+
+def test_procedural_rejects_too_few_boundary_points():
+    body = {
+        "graph": {"nodes": [{"id": 0, "room_type": "Livingroom"}], "edges": []},
+        "boundary": [[0, 0], [1, 1]],  # only 2 points
+        "seed": 0,
+    }
+    resp = client.post("/api/generate/procedural", json=body)
+    assert resp.status_code == 400
+
+
+def test_procedural_rejects_malformed_boundary_point():
+    body = {
+        "graph": {"nodes": [{"id": 0, "room_type": "Livingroom"}], "edges": []},
+        "boundary": [[0, 0], [1, 0], [1, 1, 5]],  # third point has 3 coords
+        "seed": 0,
+    }
+    resp = client.post("/api/generate/procedural", json=body)
+    assert resp.status_code == 400
