@@ -1,4 +1,4 @@
-from procedural.plan_export import derive_walls, _seg_key
+from procedural.plan_export import derive_walls, _seg_key, derive_openings
 
 
 def _square(x0, y0, x1, y1):
@@ -29,9 +29,6 @@ def test_derive_walls_two_adjacent_squares_dedup_shared_edge():
     assert keys.count(shared) == 1
 
 
-from procedural.plan_export import derive_openings
-
-
 def test_derive_openings_door_edge_makes_one_opening():
     rooms = {"rA": _square(0, 0, 1, 1), "rB": _square(1, 0, 2, 1)}
     walls = derive_walls(rooms, thickness=0.2)
@@ -53,3 +50,12 @@ def test_derive_openings_wall_edge_makes_none():
     edges = [{"source": "rA", "target": "rB", "connectivity": "wall"}]
     openings = derive_openings(rooms, walls, edges)
     assert openings == []
+
+
+def test_derive_openings_entrance_maps_to_door_kind():
+    rooms = {"rA": _square(0, 0, 1, 1), "rB": _square(1, 0, 2, 1)}
+    walls = derive_walls(rooms, thickness=0.2)
+    edges = [{"source": "rA", "target": "rB", "connectivity": "entrance"}]
+    openings = derive_openings(rooms, walls, edges)
+    assert len(openings) == 1
+    assert openings[0]["kind"] == "door"

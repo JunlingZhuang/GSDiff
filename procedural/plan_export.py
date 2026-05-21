@@ -52,7 +52,7 @@ ACCESS_KINDS = {"door", "passage", "entrance"}
 OPENING_WIDTH = {"door": 0.9, "passage": 1.2, "entrance": 1.0, "window": 1.0}
 
 
-def _room_edge_keys(poly) -> set:
+def _room_edge_keys(poly: list[tuple[float, float]]) -> set:
     keys = set()
     for i in range(len(poly) - 1):
         a, b = poly[i], poly[i + 1]
