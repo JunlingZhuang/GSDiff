@@ -91,6 +91,8 @@ def evaluate_one(
 
     rounds, best = [], None  # best = (n_mismatch, round_idx, plan, png_path)
     png = realistic = None
+    stall = 0  # consecutive rounds without strict improvement (§5.3: don't keep burning)
+    stopped_early = False
     for i in range(1, max_rounds + 1):
         png_path = d / f"gemini_r{i}.png"
         if i == 1:
@@ -129,6 +131,15 @@ def evaluate_one(
             best = (len(mism), i, plan, png_path)
         if not mism:
             break
+        # violations not strictly decreasing for 2 consecutive rounds -> stop
+        # burning tokens, keep the best round (plan §5.3 discipline)
+        if len(rounds) >= 2 and len(mism) >= len(rounds[-2]["mismatches"]):
+            stall += 1
+            if stall >= 2:
+                stopped_early = True
+                break
+        else:
+            stall = 0
 
     _, best_i, best_plan, best_png = best
     (d / "parsed.json").write_text(best_plan.model_dump_json(indent=2), encoding="utf-8")
@@ -152,6 +163,7 @@ def evaluate_one(
         "converged_in": best_i if vlm_exact else None,
         "count_fix": fix,
         "final_count_exact": vlm_exact or fix["fixed"],
+        "stopped_early": stopped_early,
     }
     (d / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     return report

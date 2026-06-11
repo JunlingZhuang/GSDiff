@@ -24,7 +24,7 @@ Phase N
 
 #### Phase 0 — 验证命门（1周内，tool 级 + 单元测试，无编排架构）
 
-> **状态**：0-A ✅ 已完成（2026-06-10，结论：路线走得通，图文报告见 [hfagent/docs/phase0a-findings.md](../../hfagent/docs/phase0a-findings.md)）；0-B ⬜ 未开始。
+> **状态**：0-A ✅（2026-06-10，路线走得通，[hfagent/docs/phase0a-findings.md](../../hfagent/docs/phase0a-findings.md)）；0-B ✅（2026-06-10，编排纪律 mock 验证通过，[hfagent/docs/phase0b-findings.md](../../hfagent/docs/phase0b-findings.md)）。Phase 0 完成 → 下一步 Phase 1。
 
 > **修订（v1.1）**：原版"脚本级、用完即弃"与 §10.2 的工具 I/O 契约测试自相矛盾。0-A 验证的三个步骤（生成→parse→还原渲染）**就是未来生产管线的节点**，所以从第一天起写成带 I/O 契约和单元测试的正式 tool——验证产物直接沉淀为永久回归测试。不写的仍然是：编排、状态机、前后端、数据库。
 
