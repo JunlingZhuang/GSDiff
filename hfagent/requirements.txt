@@ -1,0 +1,8 @@
+google-genai>=1.0
+opencv-python>=4.9
+shapely>=2.0
+numpy>=1.26
+pillow>=10.0
+pydantic>=2.5
+python-dotenv>=1.0
+pytest>=8.0
