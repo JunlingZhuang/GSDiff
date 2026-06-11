@@ -28,6 +28,7 @@ from pathlib import Path
 from hfagent.llm import GeminiClient
 from hfagent.tools.cv_parse import cv_parse
 from hfagent.tools.generate_colorblock import generate_colorblock
+from hfagent.tools.build_wallgraph import plan_to_wallgraph
 from hfagent.tools.plan_fixes import fix_room_counts
 from hfagent.tools.render_plan import render_plan
 
@@ -148,6 +149,9 @@ def evaluate_one(
     fixed_plan, fix = fix_room_counts(best_plan, requested)
     (d / "fixed.json").write_text(fixed_plan.model_dump_json(indent=2), encoding="utf-8")
     render_plan(fixed_plan, px_per_mm=1.0).save(d / "recon.png")
+    # authoritative structure: wall graph (walls first-class, rooms as node loops)
+    g = plan_to_wallgraph(fixed_plan)
+    (d / "wallgraph.json").write_text(g.model_dump_json(indent=2), encoding="utf-8")
 
     vlm_exact = not rounds[best_i - 1]["mismatches"]
     report = {
@@ -164,6 +168,7 @@ def evaluate_one(
         "count_fix": fix,
         "final_count_exact": vlm_exact or fix["fixed"],
         "stopped_early": stopped_early,
+        "wallgraph": {"nodes": len(g.nodes), "walls": len(g.walls), "party_walls": len(g.adjacency())},
     }
     (d / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     return report
