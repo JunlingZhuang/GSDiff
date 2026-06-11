@@ -163,7 +163,7 @@ def build_model_kwargs(cfg, spec):
         domain_features=domain_features,
     )
     if is_absorbing_transition(cfg):
-        prepare_absorbing_dataset_infos(dataset_infos)
+        prepare_absorbing_dataset_infos(dataset_infos, cfg)
     return {
         "dataset_infos": dataset_infos,
         "train_metrics": TrainAbstractMetricsDiscrete(),

@@ -23,11 +23,15 @@ if str(SRC_DIR) not in sys.path:
 from diffusion.absorbing_utils import is_absorbing_transition  # noqa: E402
 from diffusion_model_absorbing import AbsorbingDenoisingDiffusion  # noqa: E402
 from test_graph_completion import (  # noqa: E402
+    class_counts,
     cfg_get,
     data_to_dense_indices,
+    distribution_similarity,
     draw_graph_with_positions,
+    f1_from_counts,
     graph_to_record,
     label_at,
+    precision_recall_f1,
     resolve_completion_checkpoint,
 )
 from test_graph_generation import (  # noqa: E402
@@ -78,6 +82,23 @@ def make_next_node_tensors(x_idx, e_idx, target_node):
         "anchor_X": known.unsqueeze(0),
         "anchor_E": anchor_e.unsqueeze(0),
     }
+
+
+def graph_policy_condition(model, x_idx, target_node):
+    if getattr(model.dataset_info, "graph_condition_dim", 0) == 0:
+        return None
+    n = int(x_idx.numel())
+    node_mask = torch.ones((1, n), dtype=torch.bool)
+    known = torch.ones((1, n), dtype=torch.bool)
+    known[0, target_node] = False
+    target = torch.zeros((1, n), dtype=torch.bool)
+    target[0, target_node] = True
+    return model._build_graph_condition(
+        node_mask=node_mask.to(model.device),
+        known_nodes=known.to(model.device),
+        target_nodes=target.to(model.device),
+        X_idx=x_idx.unsqueeze(0).to(model.device),
+    )
 
 
 def next_node_input_graph(x_idx, e_idx, target_node, spec):
@@ -166,13 +187,16 @@ def evaluate_next_node(completed_sample, x_true, e_true, target_node):
     predicted_degree = int(pred_present.sum().item())
     reference_degree = int(true_present.sum().item())
 
-    precision = tp / (tp + fp) if (tp + fp) else None
-    recall = tp / (tp + fn) if (tp + fn) else None
-    f1 = (
-        2 * precision * recall / (precision + recall)
-        if precision is not None and recall is not None and (precision + recall) > 0
-        else None
-    )
+    precision, recall, f1 = precision_recall_f1(tp, fp, fn)
+    typed_tp = int(((pred_edges == true_edges) & true_present).sum().item())
+    typed_fp = int((pred_present & (pred_edges != true_edges)).sum().item())
+    typed_fn = int((true_present & (pred_edges != true_edges)).sum().item())
+    typed_precision, typed_recall, typed_f1 = precision_recall_f1(typed_tp, typed_fp, typed_fn)
+
+    target_mask = torch.zeros(n, dtype=torch.bool)
+    target_mask[target_node] = True
+    edge_classes = [int(value) for value in torch.unique(true_edges[true_present]).detach().cpu().tolist()]
+
     return {
         "target_node_correct": target_node_correct,
         "target_node_total": 1,
@@ -188,6 +212,29 @@ def evaluate_next_node(completed_sample, x_true, e_true, target_node):
         "connection_precision": precision,
         "connection_recall": recall,
         "connection_f1": f1,
+        "typed_edge_tp": typed_tp,
+        "typed_edge_fp": typed_fp,
+        "typed_edge_fn": typed_fn,
+        "typed_edge_precision": typed_precision,
+        "typed_edge_recall": typed_recall,
+        "typed_edge_f1": typed_f1,
+        "target_degree_error": predicted_degree - reference_degree,
+        "target_degree_abs_error": abs(predicted_degree - reference_degree),
+        "normalized_edit_proxy": (
+            int(pred_target_type != true_target_type) + (edge_total - edge_correct)
+        ) / (1 + edge_total) if edge_total else None,
+        "target_node_type_counts": class_counts(
+            x_pred.long(),
+            x_true.long(),
+            target_mask,
+            [true_target_type],
+        ),
+        "target_edge_type_present_counts": class_counts(
+            pred_edges,
+            true_edges,
+            true_present,
+            edge_classes,
+        ),
         "predicted_degree": predicted_degree,
         "reference_degree": reference_degree,
         "predicted_connected_to_known": predicted_degree > 0,
@@ -208,11 +255,19 @@ def aggregate_case_metrics(case_metrics):
         "connection_tp": 0,
         "connection_fp": 0,
         "connection_fn": 0,
+        "typed_edge_tp": 0,
+        "typed_edge_fp": 0,
+        "typed_edge_fn": 0,
         "predicted_connected_count": 0,
         "reference_connected_count": 0,
     }
     predicted_degrees = []
     reference_degrees = []
+    target_degree_errors = []
+    target_degree_abs_errors = []
+    normalized_edit_proxy = []
+    target_node_type_counts = {}
+    target_edge_type_present_counts = {}
     for metrics in case_metrics:
         for key in [
             "target_node_correct",
@@ -224,25 +279,38 @@ def aggregate_case_metrics(case_metrics):
             "connection_tp",
             "connection_fp",
             "connection_fn",
+            "typed_edge_tp",
+            "typed_edge_fp",
+            "typed_edge_fn",
         ]:
             totals[key] += int(metrics[key])
         totals["predicted_connected_count"] += int(metrics["predicted_connected_to_known"])
         totals["reference_connected_count"] += int(metrics["reference_connected_to_known"])
         predicted_degrees.append(metrics["predicted_degree"])
         reference_degrees.append(metrics["reference_degree"])
+        target_degree_errors.append(metrics["target_degree_error"])
+        target_degree_abs_errors.append(metrics["target_degree_abs_error"])
+        if metrics["normalized_edit_proxy"] is not None:
+            normalized_edit_proxy.append(metrics["normalized_edit_proxy"])
+        for target, source in [
+            (target_node_type_counts, metrics["target_node_type_counts"]),
+            (target_edge_type_present_counts, metrics["target_edge_type_present_counts"]),
+        ]:
+            for cls, values in source.items():
+                if cls not in target:
+                    target[cls] = {"tp": 0, "fp": 0, "fn": 0, "support": 0}
+                for count_key in ["tp", "fp", "fn", "support"]:
+                    target[cls][count_key] += int(values[count_key])
 
-    precision = (
-        totals["connection_tp"] / (totals["connection_tp"] + totals["connection_fp"])
-        if totals["connection_tp"] + totals["connection_fp"] else None
+    precision, recall, f1 = precision_recall_f1(
+        totals["connection_tp"],
+        totals["connection_fp"],
+        totals["connection_fn"],
     )
-    recall = (
-        totals["connection_tp"] / (totals["connection_tp"] + totals["connection_fn"])
-        if totals["connection_tp"] + totals["connection_fn"] else None
-    )
-    f1 = (
-        2 * precision * recall / (precision + recall)
-        if precision is not None and recall is not None and (precision + recall) > 0
-        else None
+    typed_precision, typed_recall, typed_f1 = precision_recall_f1(
+        totals["typed_edge_tp"],
+        totals["typed_edge_fp"],
+        totals["typed_edge_fn"],
     )
     num_cases = max(1, len(case_metrics))
     return {
@@ -257,10 +325,20 @@ def aggregate_case_metrics(case_metrics):
         "connection_precision": precision,
         "connection_recall": recall,
         "connection_f1": f1,
+        "typed_edge_precision": typed_precision,
+        "typed_edge_recall": typed_recall,
+        "typed_edge_f1": typed_f1,
         "predicted_connected_to_known_frac": totals["predicted_connected_count"] / num_cases,
         "reference_connected_to_known_frac": totals["reference_connected_count"] / num_cases,
         "avg_predicted_target_degree": float(np.mean(predicted_degrees)) if predicted_degrees else 0.0,
         "avg_reference_target_degree": float(np.mean(reference_degrees)) if reference_degrees else 0.0,
+        "mean_target_degree_error": float(np.mean(target_degree_errors)) if target_degree_errors else None,
+        "mean_target_degree_abs_error": float(np.mean(target_degree_abs_errors))
+        if target_degree_abs_errors else None,
+        "mean_normalized_edit_proxy": float(np.mean(normalized_edit_proxy))
+        if normalized_edit_proxy else None,
+        "target_node_type_f1": f1_from_counts(target_node_type_counts),
+        "target_edge_type_present_f1": f1_from_counts(target_edge_type_present_counts),
         **totals,
     }
 
@@ -344,7 +422,10 @@ def main():
                 continue
             target_node = choose_target_node(int(x_true.numel()), rng)
             tensors = make_next_node_tensors(x_true, e_true, target_node)
-            completed_sample = model.complete_batch(**tensors)[0]
+            completed_sample = model.complete_batch(
+                **tensors,
+                graph_condition=graph_policy_condition(model, x_true, target_node),
+            )[0]
             completed_graph = sample_to_graph(completed_sample, spec)
             reference_graph = sample_to_graph([x_true, e_true], spec)
             input_graph = next_node_input_graph(x_true, e_true, target_node, spec)
@@ -395,6 +476,7 @@ def main():
         "completed_distribution": completed_distribution,
         "reference_distribution": reference_distribution,
         "distribution_delta": numeric_delta(completed_distribution, reference_distribution),
+        "distribution_similarity": distribution_similarity(completed_distribution, reference_distribution),
     }
 
     serializable_cases = []

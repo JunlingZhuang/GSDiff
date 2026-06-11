@@ -105,12 +105,16 @@ def _poly_to_pts(poly: Polygon) -> list[list[float]]:
     return [[float(x), float(y)] for x, y in poly.exterior.coords]
 
 
-def build_plan(graph: nx.Graph, boundary: Polygon, seed: int = 0) -> dict:
+def build_plan(graph: nx.Graph, boundary: Polygon, seed: int = 0,
+               axis_angle: float | None = None) -> dict:
     """Run the procedural generator, then derive a Plan dict (walls/openings/
     rooms/grid). JSON-serializable; this is the HTTP response body.
+
+    `axis_angle` (degrees) overrides the BSP cut direction and the grid angle;
+    when None the generator auto-detects the building's dominant axis.
     """
-    layout = generator.generate(graph, boundary, seed=seed)
-    angle = generator.dominant_angle(boundary)
+    layout = generator.generate(graph, boundary, axis_angle=axis_angle, seed=seed)
+    angle = axis_angle if axis_angle is not None else generator.dominant_angle(boundary)
 
     # rooms: stable string ids r{node}
     rooms_poly: dict[str, list[list[float]]] = {}

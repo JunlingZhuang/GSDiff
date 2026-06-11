@@ -1,0 +1,118 @@
+# @package _global_
+general:
+    name: 'msd_wall_full_completion_v4_bridge'
+    gpus: 1
+    strategy: 'auto'
+    matmul_precision: 'high'
+    wandb: 'disabled'
+    check_val_every_n_epochs: 5
+    sample_every_val: 4
+    samples_to_generate: 16
+    samples_to_save: 8
+    chains_to_save: 0
+    final_model_samples_to_generate: 128
+    final_model_samples_to_save: 32
+    final_model_chains_to_save: 0
+train:
+    n_epochs: 200
+    batch_size: 8
+    lr: 0.00005
+    weight_decay: 1e-12
+    clip_grad: null
+    ema_decay: 0
+    num_workers: 0
+    num_sanity_val_steps: 0
+    save_model: True
+model:
+    transition: 'absorbing'
+    diffusion_steps: 500
+    maskgit_steps: 16
+    n_layers: 5
+    lambda_train: [2.0, 0]
+    edge_loss_mode: 'split_presence_type'
+    edge_presence_loss_weight: 1.5
+    edge_type_loss_weight: 1.0
+    edge_density_loss_weight: 1.0
+    edge_degree_loss_weight: 0.5
+    edge_present_loss_weight: 1.0
+    # Rebalances rare room labels so the model does not optimize only common
+    # room types. inverse_sqrt is intentionally moderate; full inverse can
+    # overfit rare labels and hurt common-room accuracy.
+    node_class_balance: 'inverse_sqrt'
+    node_class_weight_max: 4.0
+    # Extra loss weight for real edges connecting visible partial nodes to
+    # hidden completion nodes. This targets the previous failure mode where
+    # generated graphs had plausible edge counts but weak attachment to input.
+    bridge_edge_loss_weight: 3.0
+    bridge_edges_only_full_completion: true
+    extra_features: 'all'
+    edge_none_logit_bias: -0.2
+    graph_condition:
+        enabled: true
+        version: 'v3'
+        room_type_inventory: true
+        include_target_density: true
+        include_partial_stats: true
+        include_availability_bits: true
+        # V4 keeps the app-compatible condition path but reduces dropout
+        # because V3 showed the model still needs stable condition signal.
+        condition_dropout: 0.2
+        edge_hist_dropout: 0.1
+    absorbing_masking:
+        strategy: 'mixed'
+        eval_strategy: 'full_completion'
+        random_probability: 0.05
+        full_completion_probability: 0.90
+        next_node_probability: 0.05
+        graph_policy_probability: 0.00
+        known_ratio_start: 0.75
+        known_ratio_end: 0.45
+        eval_known_ratio: 0.50
+        curriculum_epochs: 100
+        known_ratio_jitter: 0.10
+    hidden_mlp_dims: {'X': 128, 'E': 64, 'y': 128}
+    hidden_dims: {'dx': 256, 'de': 64, 'dy': 64, 'n_head': 8, 'dim_ffX': 256, 'dim_ffE': 64, 'dim_ffy': 256}
+test:
+    checkpoint: null
+    out_dir: null
+    num_samples: 32
+    batch_size: 8
+    num_nodes: null
+    grid_samples: 24
+    grid_cols: 4
+    device: 'auto'
+completion:
+    checkpoint: null
+    out_dir: null
+    num_samples: 32
+    batch_size: 1
+    known_ratio: 0.5
+    condition_mode: 'app'
+    grid_samples: 12
+    seed: 0
+    device: 'auto'
+    repair_connectivity: true
+    repair_edge_type: 1
+    rerank_candidates: 8
+    rerank:
+        expected_degree: 4.2
+        connected_weight: 4.0
+        edge_count_weight: 1.0
+        isolated_weight: 0.25
+next_node:
+    checkpoint: null
+    out_dir: null
+    num_samples: 32
+    batch_size: 1
+    grid_samples: 12
+    seed: 0
+    device: 'auto'
+autoregressive:
+    checkpoint: null
+    out_dir: null
+    num_samples: 32
+    batch_size: 1
+    known_ratio: 0.5
+    grid_samples: 12
+    seed: 0
+    device: 'auto'

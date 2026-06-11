@@ -7,6 +7,7 @@ import torch.nn.functional as F
 
 from src import utils
 from diffusion import diffusion_utils
+from diffusion.absorbing_losses import masked_ce_loss
 from diffusion.absorbing_utils import pad_clean_features_for_absorbing, strip_mask_class_from_sample
 from diffusion_model_discrete import DiscreteDenoisingDiffusion
 
@@ -40,11 +41,16 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
             "loss": 0.0,
             "x_ce": 0.0,
             "e_ce": 0.0,
+            "e_presence_ce": 0.0,
+            "e_type_ce": 0.0,
+            "e_density": 0.0,
+            "e_degree": 0.0,
             "x_masked": 0.0,
             "e_masked": 0.0,
             "random_batches": 0.0,
             "full_completion_batches": 0.0,
             "next_node_batches": 0.0,
+            "graph_policy_batches": 0.0,
             "batches": 0.0,
         })
 
@@ -54,11 +60,16 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
             "loss",
             "x_ce",
             "e_ce",
+            "e_presence_ce",
+            "e_type_ce",
+            "e_density",
+            "e_degree",
             "x_masked",
             "e_masked",
             "random_batches",
             "full_completion_batches",
             "next_node_batches",
+            "graph_policy_batches",
         ]:
             value = stats[key]
             bucket[key] += float(value.detach().cpu()) if isinstance(value, torch.Tensor) else float(value)
@@ -73,13 +84,35 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
                 "loss",
                 "x_ce",
                 "e_ce",
+                "e_presence_ce",
+                "e_type_ce",
+                "e_density",
+                "e_degree",
                 "x_masked",
                 "e_masked",
                 "random_batches",
                 "full_completion_batches",
                 "next_node_batches",
+                "graph_policy_batches",
             ]
         }
+
+    def compute_extra_data(self, noisy_data):
+        """Append optional graph-level policy condition to the usual features."""
+        extra_data = super().compute_extra_data(noisy_data)
+        dim = self._graph_condition_dim()
+        if dim == 0:
+            return extra_data
+        graph_condition = noisy_data.get("graph_condition")
+        if graph_condition is None:
+            graph_condition = self._empty_graph_condition(
+                noisy_data["X_t"].size(0),
+                noisy_data["X_t"].device,
+                noisy_data["X_t"].dtype,
+            )
+        graph_condition = graph_condition.to(device=extra_data.y.device, dtype=extra_data.y.dtype)
+        extra_data.y = torch.cat((extra_data.y, graph_condition), dim=1)
+        return extra_data
 
     def _clean_to_absorbing_space(self, X: torch.Tensor, E: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if X.size(-1) == self.Xdim_output and E.size(-1) == self.Edim_output:
@@ -94,8 +127,9 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
 
         `random` is the original absorbing D3PM objective. `full_completion`
         masks an arbitrary unknown subgraph. `next_node` masks exactly one
-        target node plus its edges to the known graph, matching interactive
-        "add one room" use cases.
+        target node while revealing the rest of the graph. `graph_policy`
+        masks one target node while hiding future nodes as padding, which
+        matches autoregressive "add one room, then repeat" inference.
         """
         masking_cfg = self._masking_cfg()
         strategy = masking_cfg.get("strategy", "random")
@@ -108,7 +142,9 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
             return self._sample_mixed_masking_strategy(masking_cfg)
         if strategy == "completion":
             strategy = "full_completion"
-        if strategy not in {"random", "full_completion", "next_node"}:
+        if strategy == "policy":
+            strategy = "graph_policy"
+        if strategy not in {"random", "full_completion", "next_node", "graph_policy"}:
             raise ValueError(f"Unsupported absorbing_masking.strategy='{strategy}'")
         return strategy
 
@@ -121,16 +157,22 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
         """
         if any(
             key in masking_cfg
-            for key in ["random_probability", "full_completion_probability", "next_node_probability"]
+            for key in [
+                "random_probability",
+                "full_completion_probability",
+                "next_node_probability",
+                "graph_policy_probability",
+            ]
         ):
             weights = [
                 float(masking_cfg.get("random_probability", 0.0)),
                 float(masking_cfg.get("full_completion_probability", 0.0)),
                 float(masking_cfg.get("next_node_probability", 0.0)),
+                float(masking_cfg.get("graph_policy_probability", 0.0)),
             ]
         else:
             completion_prob = float(masking_cfg.get("completion_probability", 0.5))
-            weights = [max(0.0, 1.0 - completion_prob), max(0.0, completion_prob), 0.0]
+            weights = [max(0.0, 1.0 - completion_prob), max(0.0, completion_prob), 0.0, 0.0]
 
         total = sum(max(0.0, weight) for weight in weights)
         if total <= 0.0:
@@ -140,7 +182,282 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
             return "random"
         if draw < weights[0] + weights[1]:
             return "full_completion"
-        return "next_node"
+        if draw < weights[0] + weights[1] + weights[2]:
+            return "next_node"
+        return "graph_policy"
+
+    def _graph_condition_cfg(self):
+        return self.cfg.model.get("graph_condition", {})
+
+    def _graph_condition_dim(self) -> int:
+        return int(getattr(self.dataset_info, "graph_condition_dim", 0))
+
+    def _empty_graph_condition(self, batch_size: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        dim = self._graph_condition_dim()
+        return torch.zeros(batch_size, dim, device=device, dtype=dtype)
+
+    def _graph_condition_version(self) -> str:
+        return str(self._graph_condition_cfg().get("version", "v2")).lower()
+
+    def _should_drop_condition_group(self, split: str | None, probability: float, device: torch.device) -> bool:
+        if split != "train" or probability <= 0:
+            return False
+        return bool(torch.rand((), device=device).item() < probability)
+
+    def _known_partial_graph_stats(self, known_nodes, E_idx, node_mask):
+        """Return app-available structural stats for the visible subgraph.
+
+        These stats intentionally use only known-known edge slots, so the same
+        condition can be built during training, offline eval, and app inference
+        without peeking at hidden edges.
+        """
+        bs, n = node_mask.shape
+        device = node_mask.device
+        stats = torch.zeros(bs, 4, device=device, dtype=torch.float32)
+        hist = torch.zeros(bs, self.base_Edim_output, device=device, dtype=torch.float32)
+        if known_nodes is None or E_idx is None:
+            return stats, hist, torch.zeros(bs, device=device, dtype=torch.float32)
+
+        E_idx = E_idx.to(device=device, dtype=torch.long)
+        max_nodes = max(1.0, float(getattr(self.dataset_info, "max_n_nodes", n)))
+        availability = torch.zeros(bs, device=device, dtype=torch.float32)
+        upper = torch.triu(torch.ones(n, n, device=device, dtype=torch.bool), diagonal=1)
+        for b in range(bs):
+            known = known_nodes[b] & node_mask[b]
+            known_count = int(known.sum().item())
+            if known_count <= 1:
+                availability[b] = 1.0
+                continue
+            known_pairs = known.unsqueeze(0) & known.unsqueeze(1) & upper
+            values = E_idx[b][known_pairs].clamp(min=0, max=self.base_Edim_output - 1)
+            pair_count = max(1, int(values.numel()))
+            real_edges = int((values > 0).sum().item())
+            stats[b, 0] = float(real_edges) / float(pair_count)
+            stats[b, 1] = (2.0 * float(real_edges) / float(known_count)) / max_nodes
+
+            adjacency = torch.zeros((n, n), device=device, dtype=torch.bool)
+            src, dst = torch.nonzero(known_pairs, as_tuple=True)
+            if src.numel() > 0:
+                real = E_idx[b, src, dst] > 0
+                src = src[real]
+                dst = dst[real]
+                adjacency[src, dst] = True
+                adjacency[dst, src] = True
+
+            visited = torch.zeros(n, device=device, dtype=torch.bool)
+            components = 0
+            isolated = 0
+            for node in torch.nonzero(known, as_tuple=False).flatten().tolist():
+                node = int(node)
+                if visited[node]:
+                    continue
+                components += 1
+                stack = [node]
+                visited[node] = True
+                component_size = 0
+                degree_sum = 0
+                while stack:
+                    cur = stack.pop()
+                    component_size += 1
+                    neighbors = torch.nonzero(adjacency[cur] & known, as_tuple=False).flatten().tolist()
+                    degree_sum += len(neighbors)
+                    for neighbor in neighbors:
+                        neighbor = int(neighbor)
+                        if not visited[neighbor]:
+                            visited[neighbor] = True
+                            stack.append(neighbor)
+                if component_size == 1 and degree_sum == 0:
+                    isolated += 1
+
+            stats[b, 2] = float(components) / max_nodes
+            stats[b, 3] = float(isolated) / max_nodes
+            hist[b].scatter_add_(
+                0,
+                values,
+                torch.ones_like(values, dtype=torch.float32),
+            )
+            hist[b] = hist[b] / float(pair_count)
+            availability[b] = 1.0
+        return stats, hist, availability
+
+    def _target_avg_degree_condition(self, E_idx, node_mask):
+        bs, n = node_mask.shape
+        device = node_mask.device
+        value = torch.zeros(bs, device=device, dtype=torch.float32)
+        availability = torch.zeros(bs, device=device, dtype=torch.float32)
+        if E_idx is None:
+            return value, availability
+        E_idx = E_idx.to(device=device, dtype=torch.long)
+        max_nodes = max(1.0, float(getattr(self.dataset_info, "max_n_nodes", n)))
+        upper = torch.triu(torch.ones(n, n, device=device, dtype=torch.bool), diagonal=1)
+        for b in range(bs):
+            valid_pairs = node_mask[b].unsqueeze(0) & node_mask[b].unsqueeze(1) & upper
+            node_count = float(node_mask[b].float().sum().item())
+            if node_count <= 0:
+                continue
+            real_edges = float((E_idx[b][valid_pairs] > 0).sum().item())
+            value[b] = (2.0 * real_edges / max(1.0, node_count)) / max_nodes
+            availability[b] = 1.0
+        return value, availability
+
+    def _build_graph_condition_v3(self, node_mask, known_nodes=None, target_nodes=None,
+                                  X_idx=None, E_idx=None, split: str | None = None,
+                                  room_inventory_available: bool = True,
+                                  target_density_available: bool = True,
+                                  edge_hist_available: bool = True):
+        """Build V3 graph condition with app-available structural context.
+
+        V3 keeps the original count/inventory signal but adds availability bits
+        and partial-graph stats. Availability bits let the model distinguish a
+        true zero from a condition that is unknown at app inference time.
+        """
+        bs = node_mask.size(0)
+        device = node_mask.device
+        cfg = self._graph_condition_cfg()
+        condition = torch.zeros(bs, self._graph_condition_dim(), device=device, dtype=torch.float32)
+        max_nodes = max(1.0, float(getattr(self.dataset_info, "max_n_nodes", node_mask.size(1))))
+        target_count = node_mask.float().sum(dim=1)
+        if known_nodes is None:
+            current_count = target_count
+            remaining_nodes = torch.zeros_like(target_count)
+            remaining_mask = torch.zeros_like(node_mask, dtype=torch.bool)
+        else:
+            current_count = known_nodes.float().sum(dim=1)
+            remaining_mask = node_mask & (~known_nodes) if target_nodes is None else target_nodes
+            remaining_nodes = remaining_mask.float().sum(dim=1)
+
+        offset = 0
+        condition[:, offset] = current_count / max_nodes
+        condition[:, offset + 1] = target_count / max_nodes
+        condition[:, offset + 2] = remaining_nodes / max_nodes
+        offset += 3
+
+        availability_bits = bool(cfg.get("include_availability_bits", True))
+        dropout = float(cfg.get("condition_dropout", 0.0))
+
+        if cfg.get("room_type_inventory", True):
+            room_available = torch.ones(bs, device=device, dtype=torch.float32)
+            if (
+                not room_inventory_available
+                or X_idx is None
+                or self._should_drop_condition_group(split, dropout, device)
+            ):
+                counts = torch.zeros(bs, self.base_Xdim_output, device=device, dtype=torch.float32)
+                room_available.zero_()
+            else:
+                counts = torch.zeros(bs, self.base_Xdim_output, device=device, dtype=torch.float32)
+                X_idx = X_idx.to(device=device, dtype=torch.long)
+                for b in range(bs):
+                    values = X_idx[b, remaining_mask[b]].long()
+                    if values.numel() > 0:
+                        counts[b].scatter_add_(
+                            0,
+                            values.clamp(min=0, max=self.base_Xdim_output - 1),
+                            torch.ones_like(values, dtype=torch.float32),
+                        )
+                counts = counts / target_count.clamp(min=1.0).unsqueeze(1)
+            condition[:, offset:offset + self.base_Xdim_output] = counts
+            offset += self.base_Xdim_output
+            if availability_bits:
+                condition[:, offset] = room_available
+                offset += 1
+
+        if cfg.get("include_target_density", True):
+            density, density_available = self._target_avg_degree_condition(E_idx, node_mask)
+            if (
+                not target_density_available
+                or self._should_drop_condition_group(split, dropout, device)
+            ):
+                density.zero_()
+                density_available.zero_()
+            condition[:, offset] = density
+            offset += 1
+            if availability_bits:
+                condition[:, offset] = density_available
+                offset += 1
+
+        if cfg.get("include_partial_stats", True):
+            stats, edge_hist, edge_hist_available_tensor = self._known_partial_graph_stats(known_nodes, E_idx, node_mask)
+            condition[:, offset:offset + 4] = stats
+            offset += 4
+            if (
+                not edge_hist_available
+                or self._should_drop_condition_group(split, float(cfg.get("edge_hist_dropout", dropout)), device)
+            ):
+                edge_hist.zero_()
+                edge_hist_available_tensor.zero_()
+            condition[:, offset:offset + self.base_Edim_output] = edge_hist
+            offset += self.base_Edim_output
+            if availability_bits:
+                condition[:, offset] = edge_hist_available_tensor
+                offset += 1
+
+        return condition
+
+    def _build_graph_condition(self, node_mask, known_nodes=None, target_nodes=None,
+                               X_idx=None, E_idx=None, split: str | None = None,
+                               room_inventory_available: bool = True,
+                               target_density_available: bool = True,
+                               edge_hist_available: bool = True):
+        """Build graph-level policy context.
+
+        The vector is intentionally simple and graph-only:
+          [current_known_count, target_total_count, remaining_count] / max_n
+          + optional remaining room-type histogram.
+
+        During training, `remaining` is computed from the full GT graph. During
+        inference, callers may pass the user-requested remaining inventory.
+        """
+        dim = self._graph_condition_dim()
+        if dim == 0:
+            return self._empty_graph_condition(node_mask.size(0), node_mask.device, torch.float32)
+
+        if self._graph_condition_version() == "v3":
+            return self._build_graph_condition_v3(
+                node_mask=node_mask,
+                known_nodes=known_nodes,
+                target_nodes=target_nodes,
+                X_idx=X_idx,
+                E_idx=E_idx,
+                split=split,
+                room_inventory_available=room_inventory_available,
+                target_density_available=target_density_available,
+                edge_hist_available=edge_hist_available,
+            )
+
+        bs = node_mask.size(0)
+        condition = torch.zeros(bs, dim, device=node_mask.device, dtype=torch.float32)
+        max_nodes = max(1.0, float(getattr(self.dataset_info, "max_n_nodes", node_mask.size(1))))
+        target_count = node_mask.float().sum(dim=1)
+        if known_nodes is None:
+            current_count = target_count
+            remaining_nodes = torch.zeros_like(target_count)
+            remaining_mask = torch.zeros_like(node_mask, dtype=torch.bool)
+        else:
+            current_count = known_nodes.float().sum(dim=1)
+            if target_nodes is None:
+                remaining_mask = node_mask & (~known_nodes)
+            else:
+                remaining_mask = target_nodes
+            remaining_nodes = remaining_mask.float().sum(dim=1)
+
+        condition[:, 0] = current_count / max_nodes
+        condition[:, 1] = target_count / max_nodes
+        condition[:, 2] = remaining_nodes / max_nodes
+
+        if self._graph_condition_cfg().get("room_type_inventory", True) and dim > 3 and X_idx is not None:
+            counts = torch.zeros(bs, self.base_Xdim_output, device=node_mask.device, dtype=torch.float32)
+            for b in range(bs):
+                values = X_idx[b, remaining_mask[b]].long()
+                if values.numel() > 0:
+                    counts[b].scatter_add_(
+                        0,
+                        values.clamp(min=0, max=self.base_Xdim_output - 1),
+                        torch.ones_like(values, dtype=torch.float32),
+                    )
+            denom = target_count.clamp(min=1.0).unsqueeze(1)
+            condition[:, 3:3 + self.base_Xdim_output] = counts / denom
+        return condition
 
     def _completion_known_ratio(self, split: str) -> float:
         """Return the visible-node ratio for completion-style masking.
@@ -278,6 +595,72 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
         t_fields = self._time_fields_from_mask_fraction(x_positions, e_positions, node_mask)
         return (z_t, *t_fields)
 
+    def _apply_graph_policy_absorbing_noise(self, X, E, y, node_mask, split: str):
+        """Train the app-facing graph policy: predict exactly one next room.
+
+        Unlike `next_node`, this does not reveal every other room in the target
+        graph. It samples a current partial graph, selects one hidden room as
+        the next target, and marks all other future rooms as padding. This
+        matches autoregressive full completion: one policy step sees only the
+        current graph plus one [MASK] node.
+        """
+        bs, n = node_mask.shape
+        X_idx = X.argmax(dim=-1).clone()
+        E_idx = E.argmax(dim=-1).clone()
+        known_nodes = torch.zeros_like(node_mask, dtype=torch.bool)
+        target_nodes = torch.zeros_like(node_mask, dtype=torch.bool)
+        active_nodes = torch.zeros_like(node_mask, dtype=torch.bool)
+        x_positions = torch.zeros_like(node_mask, dtype=torch.bool)
+        e_positions = torch.zeros((bs, n, n), device=X.device, dtype=torch.bool)
+        known_ratio = self._completion_known_ratio(split)
+
+        for b in range(bs):
+            valid = torch.nonzero(node_mask[b], as_tuple=False).flatten()
+            num_valid = int(valid.numel())
+            if num_valid <= 1:
+                active_nodes[b, valid] = True
+                known_nodes[b, valid] = True
+                continue
+
+            known_count = int(round(known_ratio * num_valid))
+            known_count = max(1, min(num_valid - 1, known_count))
+            perm = valid[torch.randperm(num_valid, device=X.device)]
+            known = perm[:known_count]
+            hidden = perm[known_count:]
+            target = hidden[torch.randint(int(hidden.numel()), size=(1,), device=X.device)].item()
+
+            known_nodes[b, known] = True
+            target_nodes[b, target] = True
+            active_nodes[b, known] = True
+            active_nodes[b, target] = True
+            x_positions[b, target] = True
+            e_positions[b, target, known_nodes[b]] = True
+            e_positions[b, known_nodes[b], target] = True
+
+        diagonal = torch.eye(n, device=X.device, dtype=torch.bool).unsqueeze(0)
+        valid_edges = active_nodes.unsqueeze(1) & active_nodes.unsqueeze(2) & ~diagonal
+        e_positions = e_positions & valid_edges
+
+        X_idx[~active_nodes] = 0
+        E_idx[~valid_edges] = 0
+        X_idx[x_positions] = self.mask_idx_X
+        E_idx[e_positions] = self.mask_idx_E
+        E_idx[diagonal.expand(bs, -1, -1)] = 0
+
+        X_t = F.one_hot(X_idx, num_classes=self.Xdim_output).float()
+        E_t = F.one_hot(E_idx, num_classes=self.Edim_output).float()
+        z_t = utils.PlaceHolder(X=X_t, E=E_t, y=y).type_as(X_t).mask(active_nodes)
+        t_fields = self._time_fields_from_mask_fraction(x_positions, e_positions, active_nodes)
+        graph_condition = self._build_graph_condition(
+            node_mask=node_mask,
+            known_nodes=known_nodes,
+            target_nodes=node_mask & (~known_nodes),
+            X_idx=X.argmax(dim=-1),
+            E_idx=E.argmax(dim=-1),
+            split=split,
+        )
+        return (z_t, *t_fields, active_nodes, graph_condition)
+
     def apply_noise(self, X, E, y, node_mask, split: str = "train"):
         """Mask clean graph positions according to the configured strategy.
 
@@ -289,14 +672,45 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
             z_t, t_int, t_float, beta_t, alpha_s_bar, alpha_t_bar = self._apply_full_completion_absorbing_noise(
                 X, E, y, node_mask, split
             )
+            effective_node_mask = node_mask
+            graph_condition = self._build_graph_condition(
+                node_mask=node_mask,
+                known_nodes=(z_t.X.argmax(dim=-1) != self.mask_idx_X) & node_mask,
+                target_nodes=None,
+                X_idx=X.argmax(dim=-1),
+                E_idx=E.argmax(dim=-1),
+                split=split,
+            )
         elif strategy == "next_node":
             z_t, t_int, t_float, beta_t, alpha_s_bar, alpha_t_bar = self._apply_next_node_absorbing_noise(
                 X, E, y, node_mask
             )
+            effective_node_mask = node_mask
+            graph_condition = self._build_graph_condition(
+                node_mask=node_mask,
+                known_nodes=(z_t.X.argmax(dim=-1) != self.mask_idx_X) & node_mask,
+                target_nodes=None,
+                X_idx=X.argmax(dim=-1),
+                E_idx=E.argmax(dim=-1),
+                split=split,
+            )
+        elif strategy == "graph_policy":
+            (
+                z_t,
+                t_int,
+                t_float,
+                beta_t,
+                alpha_s_bar,
+                alpha_t_bar,
+                effective_node_mask,
+                graph_condition,
+            ) = self._apply_graph_policy_absorbing_noise(X, E, y, node_mask, split)
         else:
             z_t, t_int, t_float, beta_t, alpha_s_bar, alpha_t_bar = self._apply_random_absorbing_noise(
                 X, E, y, node_mask
             )
+            effective_node_mask = node_mask
+            graph_condition = self._empty_graph_condition(X.size(0), X.device, X.dtype)
 
         return {
             "t_int": t_int,
@@ -307,7 +721,8 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
             "X_t": z_t.X,
             "E_t": z_t.E,
             "y_t": z_t.y,
-            "node_mask": node_mask,
+            "node_mask": effective_node_mask,
+            "graph_condition": graph_condition,
             # ExtraFeatures uses this to avoid treating [MASK] as a real edge
             # when computing cycles/spectral features.
             "mask_idx_E": self.mask_idx_E,
@@ -315,67 +730,21 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
         }
 
     def _masked_ce_loss(self, pred, noisy_data, true_X, true_E, node_mask):
-        """Cross entropy only where the noisy graph currently contains [MASK]."""
-        X_t_idx = noisy_data["X_t"].argmax(dim=-1)
-        E_t_idx = noisy_data["E_t"].argmax(dim=-1)
-        true_X_idx = true_X[..., :self.base_Xdim_output].argmax(dim=-1)
-        true_E_idx = true_E[..., :self.base_Edim_output].argmax(dim=-1)
-
-        x_positions = (X_t_idx == self.mask_idx_X) & node_mask
-        n = node_mask.size(1)
-        diagonal = torch.eye(n, device=node_mask.device, dtype=torch.bool).unsqueeze(0)
-        edge_slots = node_mask.unsqueeze(1) & node_mask.unsqueeze(2) & ~diagonal
-        e_positions = (E_t_idx == self.mask_idx_E) & edge_slots
-
-        # The network has an output logit for [MASK] because the residual
-        # GraphTransformer expects equal input/output dimensions. We exclude
-        # that last logit from the CE target so the model learns real classes.
-        pred_X = pred.X[..., :self.base_Xdim_output]
-        pred_E = pred.E[..., :self.base_Edim_output]
-
-        zero = pred.X.sum() * 0.0
-        loss_X = (
-            F.cross_entropy(pred_X[x_positions], true_X_idx[x_positions])
-            if x_positions.any()
-            else zero
-        )
-        loss_E = zero
-        if e_positions.any():
-            edge_present_weight = float(self.cfg.model.get("edge_present_loss_weight", 1.0))
-            if edge_present_weight == 1.0:
-                loss_E = F.cross_entropy(pred_E[e_positions], true_E_idx[e_positions])
-            else:
-                # Edge class 0 is "none"; all non-zero edge classes represent
-                # real target connections. MSD has many more none edge slots
-                # than real edges, so this optional weight makes missed wall /
-                # door / passage / entrance edges more expensive.
-                edge_weights = torch.ones(self.base_Edim_output, device=pred_E.device, dtype=pred_E.dtype)
-                edge_weights[1:] = edge_present_weight
-                loss_E = F.cross_entropy(
-                    pred_E[e_positions],
-                    true_E_idx[e_positions],
-                    weight=edge_weights,
-                )
-        total = loss_X + float(self.cfg.model.lambda_train[0]) * loss_E
-        return total, {
-            "loss": total.detach(),
-            "x_ce": loss_X.detach(),
-            "e_ce": loss_E.detach(),
-            "x_masked": x_positions.float().sum().detach(),
-            "e_masked": e_positions.float().sum().detach(),
-        }
+        return masked_ce_loss(self, pred, noisy_data, true_X, true_E, node_mask)
 
     def _step(self, data, split: str):
         dense_data, node_mask = utils.to_dense(data.x, data.edge_index, data.edge_attr, data.batch)
         dense_data = dense_data.mask(node_mask)
         X, E = self._clean_to_absorbing_space(dense_data.X, dense_data.E)
         noisy_data = self.apply_noise(X, E, data.y, node_mask, split=split)
+        effective_node_mask = noisy_data["node_mask"]
         extra_data = self.compute_extra_data(noisy_data)
-        pred = self.forward(noisy_data, extra_data, node_mask)
-        loss, stats = self._masked_ce_loss(pred, noisy_data, X, E, node_mask)
+        pred = self.forward(noisy_data, extra_data, effective_node_mask)
+        loss, stats = self._masked_ce_loss(pred, noisy_data, X, E, effective_node_mask)
         stats["random_batches"] = 1.0 if noisy_data["mask_strategy"] == "random" else 0.0
         stats["full_completion_batches"] = 1.0 if noisy_data["mask_strategy"] == "full_completion" else 0.0
         stats["next_node_batches"] = 1.0 if noisy_data["mask_strategy"] == "next_node" else 0.0
+        stats["graph_policy_batches"] = 1.0 if noisy_data["mask_strategy"] == "graph_policy" else 0.0
         self._accumulate_absorbing_stats(split, stats)
         self.log(f"{split}/absorbing_masked_loss", loss, sync_dist=True)
         return {"loss": loss}
@@ -402,10 +771,15 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
             f"Epoch {display_epoch}: train_masked_loss={stats['loss']:.3f} "
             f"(masked_node_CE={stats['x_ce']:.3f}, "
             f"masked_edge_CE={stats['e_ce']:.3f}, "
+            f"edge_presence={stats['e_presence_ce']:.3f}, "
+            f"edge_type={stats['e_type_ce']:.3f}, "
+            f"edge_density={stats['e_density']:.3f}, "
+            f"edge_degree={stats['e_degree']:.3f}, "
             f"avg_masked_nodes={stats['x_masked']:.1f}, "
             f"avg_masked_edges={stats['e_masked']:.1f}, "
             f"full_completion_batches={stats['full_completion_batches']:.2f}, "
-            f"next_node_batches={stats['next_node_batches']:.2f}) "
+            f"next_node_batches={stats['next_node_batches']:.2f}, "
+            f"graph_policy_batches={stats['graph_policy_batches']:.2f}) "
             f"-- {time.time() - self.start_epoch_time:.1f}s"
         )
         self._append_history({
@@ -415,9 +789,14 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
             "train_weighted": stats["loss"],
             "train_x_ce": stats["x_ce"],
             "train_e_ce": stats["e_ce"],
+            "train_e_presence_ce": stats["e_presence_ce"],
+            "train_e_type_ce": stats["e_type_ce"],
+            "train_e_density": stats["e_density"],
+            "train_e_degree": stats["e_degree"],
             "train_y_ce": "",
             "train_full_completion_batches": stats["full_completion_batches"],
             "train_next_node_batches": stats["next_node_batches"],
+            "train_graph_policy_batches": stats["graph_policy_batches"],
             "train_random_batches": stats["random_batches"],
             "train_seconds": time.time() - self.start_epoch_time,
         })
@@ -445,8 +824,13 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
             f"Epoch {display_epoch}: val_masked_loss={val_loss:.4f} "
             f"(masked_node_CE={stats['x_ce']:.3f}, "
             f"masked_edge_CE={stats['e_ce']:.3f}, "
+            f"edge_presence={stats['e_presence_ce']:.3f}, "
+            f"edge_type={stats['e_type_ce']:.3f}, "
+            f"edge_density={stats['e_density']:.3f}, "
+            f"edge_degree={stats['e_degree']:.3f}, "
             f"full_completion_batches={stats['full_completion_batches']:.2f}, "
             f"next_node_batches={stats['next_node_batches']:.2f}, "
+            f"graph_policy_batches={stats['graph_policy_batches']:.2f}, "
             f"best_val_masked_loss={self.best_val_nll:.4f})\n"
         )
         self._append_history({
@@ -456,8 +840,13 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
             "val_nll": val_loss,
             "val_x_kl": stats["x_ce"],
             "val_e_kl": stats["e_ce"],
+            "val_e_presence_ce": stats["e_presence_ce"],
+            "val_e_type_ce": stats["e_type_ce"],
+            "val_e_density": stats["e_density"],
+            "val_e_degree": stats["e_degree"],
             "val_full_completion_batches": stats["full_completion_batches"],
             "val_next_node_batches": stats["next_node_batches"],
+            "val_graph_policy_batches": stats["graph_policy_batches"],
             "val_random_batches": stats["random_batches"],
             "best_val_nll": self.best_val_nll,
         })
@@ -580,7 +969,7 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
         return utils.PlaceHolder(X=X_next, E=E_next, y=torch.zeros(bs, 0, device=X.device)).mask(node_mask)
 
     @torch.no_grad()
-    def complete_batch(self, X_idx, E_idx, node_mask, anchor_X, anchor_E):
+    def complete_batch(self, X_idx, E_idx, node_mask, anchor_X, anchor_E, graph_condition=None):
         """Complete partially observed graphs with the absorbing sampler.
 
         Args:
@@ -606,6 +995,10 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
         anchor_E = anchor_E.to(self.device, dtype=torch.bool)
 
         bs, n = X_idx.shape
+        if graph_condition is None:
+            graph_condition = self._empty_graph_condition(bs, self.device, torch.float32)
+        else:
+            graph_condition = graph_condition.to(self.device, dtype=torch.float32)
         valid_edges = node_mask.unsqueeze(1) & node_mask.unsqueeze(2)
         diagonal = torch.eye(n, device=self.device, dtype=torch.bool).unsqueeze(0).expand(bs, -1, -1)
         anchor_E = anchor_E & valid_edges
@@ -636,6 +1029,7 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
                 "t": t,
                 "node_mask": node_mask,
                 "mask_idx_E": self.mask_idx_E,
+                "graph_condition": graph_condition,
             }
             extra_data = self.compute_extra_data(noisy_data)
             pred = self.forward(noisy_data, extra_data, node_mask)
@@ -696,6 +1090,7 @@ class AbsorbingDenoisingDiffusion(DiscreteDenoisingDiffusion):
                 "t": t,
                 "node_mask": node_mask,
                 "mask_idx_E": self.mask_idx_E,
+                "graph_condition": self._empty_graph_condition(batch_size, self.device, state.X.dtype),
             }
             extra_data = self.compute_extra_data(noisy_data)
             pred = self.forward(noisy_data, extra_data, node_mask)

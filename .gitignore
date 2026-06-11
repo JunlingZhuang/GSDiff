@@ -41,3 +41,10 @@ debug-*.png
 
 # Local Serena coding-agent metadata
 .serena/
+
+# secrets & local artifacts
+.env.local
+app/backend/backend.log
+
+# retrieval datasets (21GB)
+gretrieval/data/

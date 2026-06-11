@@ -32,3 +32,21 @@ export function polyPath(pts: Pt[]): string {
 export function pointAlongWall(wall: Wall, t: number): Pt {
   return [wall.a[0] + (wall.b[0] - wall.a[0]) * t, wall.a[1] + (wall.b[1] - wall.a[1]) * t];
 }
+
+// Unit normal (perpendicular) of a wall.
+export function wallNormal(wall: Wall): Pt {
+  const dx = wall.b[0] - wall.a[0];
+  const dy = wall.b[1] - wall.a[1];
+  const len = Math.hypot(dx, dy) || 1;
+  return [-dy / len, dx / len];
+}
+
+// A point at parameter t along the centreline, pushed `off` metres along the
+// wall normal — used to draw the two parallel faces of a double-line wall.
+export function offsetAlong(wall: Wall, t: number, off: number): Pt {
+  const [nx, ny] = wallNormal(wall);
+  return [
+    wall.a[0] + (wall.b[0] - wall.a[0]) * t + nx * off,
+    wall.a[1] + (wall.b[1] - wall.a[1]) * t + ny * off,
+  ];
+}

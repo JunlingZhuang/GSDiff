@@ -65,6 +65,48 @@ export const DATASETS = [
 
 export type DatasetId = (typeof DATASETS)[number]['id'];
 
+export const GRAPH_MODELS = [
+  {
+    id: 'rplan',
+    dataset: 'rplan',
+    task: 'sample',
+    name: 'RPLAN sampler',
+    description: 'Unconditional RPLAN graph generator',
+    statusKey: 'digress_rplan',
+    enabled: true,
+  },
+  {
+    id: 'msd_wall',
+    dataset: 'msd_wall',
+    task: 'sample',
+    name: 'MSD sampler',
+    description: 'Unconditional MSD wall graph generator',
+    statusKey: 'digress_msd_wall',
+    enabled: true,
+  },
+  {
+    id: 'msd_wall_next_node',
+    dataset: 'msd_wall',
+    task: 'next_node',
+    name: 'MSD next-node',
+    description: 'Adds one room and predicts its edge types',
+    statusKey: 'digress_msd_wall_next_node',
+    enabled: true,
+  },
+  {
+    id: 'msd_wall_full_completion_v2',
+    dataset: 'msd_wall',
+    task: 'completion',
+    name: 'MSD full completion v2',
+    description: 'Completes a partial MSD graph into a full bubble graph',
+    statusKey: 'digress_msd_wall_full_completion_v2',
+    enabled: true,
+  },
+] as const;
+
+export type GraphModelId = (typeof GRAPH_MODELS)[number]['id'];
+export type GraphModelTask = (typeof GRAPH_MODELS)[number]['task'];
+
 // Per-dataset spec used by frontend rendering. The order of `roomTypes` and
 // `edgeTypes` MUST match the digress dataset config decoders.
 export const DATASET_SPECS: Record<DatasetId, { roomTypes: readonly RoomTypeMeta[]; edgeTypes: readonly EdgeTypeMeta[] }> = {
@@ -89,11 +131,55 @@ export const GENERATION_MODES = [
     icon: 'Network',
   },
   {
+    id: 'next_node' as const,
+    name: 'Next Node',
+    description: 'Add one room and predict its connections',
+    icon: 'PlusCircle',
+  },
+  {
+    id: 'graph_completion' as const,
+    name: 'Graph Completion',
+    description: 'Complete a partial graph into a full graph',
+    icon: 'Share2',
+  },
+  {
     id: 'boundary' as const,
     name: 'Boundary',
     description: 'Draw a building outline to fill with rooms',
     icon: 'PenTool',
   },
+  {
+    id: 'retrieve' as const,
+    name: 'Retrieve',
+    description: 'Draw a partial graph and find similar floorplans in MSD',
+    icon: 'Search',
+  },
+  {
+    id: 'design' as const,
+    name: 'Design',
+    description: 'Build an editable vector floor plan from a bubble graph (procedural)',
+    icon: 'PencilRuler',
+  },
 ] as const;
 
 export type GenerationMode = (typeof GENERATION_MODES)[number]['id'];
+
+// Retrieval sub-modes. Server side is in gretrieval/src/retrievers/.
+//   cosine         symmetric: full -> full
+//   containment    asymmetric histogram intersection: partial -> full (A)
+//   node_matching  greedy WL-node alignment: partial -> full (B)
+//   two_stage      containment recall + node_matching rerank
+// Ordered with the empirically-strongest first; the panel uses index 0 as the
+// default. Self-recall eval (200 queries, mask 0-0.7) on MSD shows containment
+// consistently beats the others at every mask level, so it's the default.
+export const RETRIEVAL_MODES = [
+  { id: 'containment',   name: 'Containment (recommended)', description: 'Asks "is query inside candidate?" -- best on partial queries' },
+  { id: 'two_stage',     name: 'Two-stage',                 description: 'Containment recall + node-matching rerank' },
+  { id: 'cosine',        name: 'Cosine (full graphs)',      description: 'Best when you provide a complete query graph' },
+  { id: 'node_matching', name: 'Node matching',             description: 'Each query node must locally match' },
+] as const;
+
+export type RetrievalMode = (typeof RETRIEVAL_MODES)[number]['id'];
+
+// Retrieval is currently MSD-only (the gretrieval corpus is built from MSD).
+export const RETRIEVAL_DATASET: DatasetId = 'msd_wall';

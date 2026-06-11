@@ -18,15 +18,20 @@ The absorbing refactor changes the training objective to:
 partially masked graph -> recover the masked node/edge classes
 ```
 
-This is the foundation for three tasks with one model:
+This is the foundation for graph-only masked prediction. Earlier experiments
+tried to make one checkpoint handle all downstream graph tasks equally well,
+but the current direction is more specific:
 
-- Unconditional generation: all valid node/edge slots start as `[MASK]`.
-- Partial graph completion: known slots stay fixed, unknown slots are `[MASK]`.
-- Node attribute prediction: the target node type is `[MASK]`, edges stay known.
+- Keep `msd_wall_absorbing_v2` as the unconditional graph generation baseline.
+- Use task-shaped absorbing checkpoints for app-facing graph completion.
+- Prefer Graph Policy V2 for the app: one policy step predicts one next room
+  and its target-to-current edges; full completion is obtained by repeatedly
+  applying that policy.
 
 The first implementation focused on the core absorbing objective and
 unconditional all-mask sampling. The current implementation also includes a
-partial graph completion test path using anchor masks.
+partial graph completion test path using anchor masks and an autoregressive
+Graph Policy V2 path.
 
 ## Compatibility
 
@@ -103,6 +108,24 @@ the unknown node/edge classes.
 Task-tuned absorbing training config for partial graph completion. It uses a
 mixed curriculum of random absorbing masks and completion-shaped masks.
 
+`digress/configs/experiment/msd_wall_graph_policy_v2.yaml`
+
+Current recommended app-facing graph policy config. It trains one step:
+
+```text
+current partial graph + target summary condition + one masked next node
+-> next room type + next-node-to-current edge types
+```
+
+Full graph completion should use this policy autoregressively instead of a
+single one-shot full-completion denoising pass.
+
+`digress/scripts/test_autoregressive_completion.py`
+
+Config-driven evaluator that repeatedly applies a next-node / graph-policy
+checkpoint until the target graph reaches the reference node count. This is the
+diagnostic path for app-style full completion.
+
 ## Changed Files
 
 `digress/src/main.py`
@@ -116,6 +139,12 @@ transition=absorbing -> AbsorbingDenoisingDiffusion
 
 It also expands dataset dimensions for absorbing runs after normal DiGress
 dimension inference.
+
+`digress/src/diffusion/absorbing_utils.py`
+
+Adds optional graph-level condition dimensions to absorbing configs. Existing
+absorbing configs keep the old dimensions unless `model.graph_condition.enabled`
+is true.
 
 `digress/src/diffusion_model_discrete.py`
 
@@ -159,6 +188,8 @@ The logged training values mean:
   completion masks in the current epoch.
 - `next_node_batches`: fraction of logged batches that used next-node masks in
   the current epoch.
+- `graph_policy_batches`: fraction of logged batches that used Graph Policy V2
+  masks in the current epoch.
 
 ### Completion-Style Masking Curriculum
 
@@ -308,12 +339,18 @@ msd_wall_absorbing_completion
 msd_wall_absorbing_next_node
   Purpose: app interaction, "add one room" and predict its target-to-known
   edge types.
-  Status: config ready; train next.
+  Status: trained; useful diagnostic, but superseded by Graph Policy V2 because
+  it lacks target-size / remaining-room context.
 
 msd_wall_absorbing_full_completion
   Purpose: one-click completion from a partial input graph to a full graph.
-  Status: config ready; train in parallel only if a second GPU is available,
-  otherwise run after next-node.
+  Status: trained; current checkpoint is not good enough because it
+  over-connects completed graphs.
+
+msd_wall_graph_policy_v2
+  Purpose: current recommended app-facing policy. One step predicts one next
+  room and its target-to-current edges; full completion loops this policy.
+  Status: code ready; 1-epoch smoke passed; needs full 200-epoch training.
 ```
 
 Next-node-specialized training:
@@ -342,7 +379,1250 @@ Full-completion-specialized testing:
 .\.venv\Scripts\python.exe scripts\test_graph_completion.py msd_wall_absorbing_full_completion completion.checkpoint=outputs/.../checkpoints/msd_wall_absorbing_full_completion/best.ckpt
 ```
 
-Initial specialized config choices:
+Full-completion-specialized result, 2026-05-19:
+
+```text
+Status: trained, but not good enough for app use.
+
+Run:
+  outputs/2026-05-18/15-59-34-msd_wall_absorbing_full_completion
+
+Checkpoint:
+  outputs/2026-05-18/15-59-34-msd_wall_absorbing_full_completion/checkpoints/msd_wall_absorbing_full_completion/best.ckpt
+
+Training:
+  completed 200 epochs
+  best validation at epoch 180
+  train_loss: 3.9423 at epoch 1 -> 3.4734 at epoch 200
+  train node CE: 1.9729 -> 1.7736
+  train edge CE: 0.9847 -> 0.8499
+  val_nll: 3.6716 at epoch 10 -> best 3.5730 at epoch 180 -> 3.5761 at epoch 200
+
+Evaluation command:
+  .\.venv\Scripts\python.exe scripts\test_graph_completion.py msd_wall_absorbing_full_completion completion.checkpoint=outputs/2026-05-18/15-59-34-msd_wall_absorbing_full_completion/checkpoints/msd_wall_absorbing_full_completion/best.ckpt completion.out_dir=outputs/2026-05-18/15-59-34-msd_wall_absorbing_full_completion/completion_eval_best completion.num_samples=128 completion.grid_samples=12
+
+Evaluation output:
+  outputs/2026-05-18/15-59-34-msd_wall_absorbing_full_completion/completion_eval_best/completion_metrics.json
+  outputs/2026-05-18/15-59-34-msd_wall_absorbing_full_completion/completion_eval_best/completion_grid.png
+
+Metrics:
+  node_unknown_accuracy: 0.1797
+  edge_masked_accuracy_all: 0.6911
+  edge_masked_accuracy_present: 0.1444
+  completed avg_edges: 105.16
+  reference avg_edges: 62.44
+  completed connected_frac: 1.000
+  reference connected_frac: 0.930
+  inference: 38.61 s / 128 samples, 0.302 s per sample, 16 MaskGIT steps
+
+Weakness:
+  The model is heavily over-connected. Connected fraction is high only because
+  it predicts too many edges. This checkpoint should not be treated as the
+  app-facing full-completion model.
+
+Next:
+  Calibrate full-completion inference with a positive edge_none_logit_bias
+  sweep, analogous to next-node. If inference calibration cannot reduce
+  avg_edges near the reference without collapsing edge-present accuracy, train
+  a new full-completion checkpoint with stronger none/present balance or a
+  degree/density regularizer.
+```
+
+Autoregressive full-completion smoke test, 2026-05-19:
+
+```text
+Status: implemented and tested, but not yet good enough.
+
+Idea:
+  Use the next-node checkpoint as a policy. Start from the known partial graph,
+  add one masked target node, sample node type and target-to-known edges, append
+  it to the graph, then repeat until the reference node count is reached.
+
+Script:
+  scripts/test_autoregressive_completion.py
+
+Command:
+  .\.venv\Scripts\python.exe scripts\test_autoregressive_completion.py msd_wall_absorbing_next_node autoregressive.checkpoint=outputs/2026-05-18/13-38-27-msd_wall_absorbing_next_node/checkpoints/msd_wall_absorbing_next_node/best.ckpt autoregressive.out_dir=outputs/2026-05-18/13-38-27-msd_wall_absorbing_next_node/autoregressive_completion_smoke_32 autoregressive.num_samples=32 autoregressive.grid_samples=8 autoregressive.known_ratio=0.5 model.edge_none_logit_bias=0.4
+
+Output:
+  outputs/2026-05-18/13-38-27-msd_wall_absorbing_next_node/autoregressive_completion_smoke_32/autoregressive_completion_metrics.json
+  outputs/2026-05-18/13-38-27-msd_wall_absorbing_next_node/autoregressive_completion_smoke_32/autoregressive_completion_grid.png
+
+Metrics:
+  num_samples: 32
+  node_unknown_accuracy: 0.2179
+  edge_masked_accuracy_all: 0.7523
+  edge_masked_accuracy_present: 0.1061
+  edge_presence_f1: 0.1859
+  typed_edge_f1: 0.0906
+  completed avg_edges: 77.12
+  reference avg_edges: 61.50
+  completed connected_frac: 0.938
+  reference connected_frac: 0.938
+
+Weakness:
+  This is not materially better than calibrated one-shot full completion. It
+  controls connectedness and edge density better than the uncalibrated full
+  checkpoint, but exact GT edge recovery is still weak.
+
+Important limitation:
+  The current evaluator uses a random hidden reference-node order so direct
+  GT-aligned metrics are defined. In the app, the order would be user-driven
+  or sampled/reranked. This means the smoke test is an early diagnostic, not a
+  final paper-quality autoregressive evaluation.
+
+Next:
+  Do not rely on naive iterative inference alone. Train an autoregressive-style
+  checkpoint explicitly, or add top-k candidate sampling with reranking by
+  degree prior, edge-density prior, and optional retrieved-neighbor priors.
+```
+
+### Graph Policy V2: Current Direction
+
+Decision, 2026-05-19:
+
+```text
+Use Graph Policy V2 as the next training target.
+
+This is not a one-shot full-completion model. It is an autoregressive graph
+policy: every step predicts exactly one next room and its connections to the
+current graph. Full completion is produced by running the same policy in a
+loop until the requested target node count is reached.
+```
+
+Why this is the chosen direction:
+
+- One-shot full completion is too ambiguous and the trained checkpoint
+  over-connected badly.
+- The old next-node checkpoint was more app-relevant, but it did not know the
+  final target graph size or remaining room inventory.
+- Graph Policy V2 adds that missing global context while keeping the task
+  simple enough: predict one node and its target-to-current edges.
+- The same checkpoint supports both app flows: one-step "add room" and
+  multi-step full graph completion.
+
+Model input:
+
+```text
+current partial graph
++ graph-level target summary
++ one masked target node
+```
+
+Graph-level target summary:
+
+```text
+[current_known_count, target_total_count, remaining_count] / max_nodes
++ optional remaining room-type inventory histogram
+```
+
+Model output:
+
+```text
+target room type
+target-to-current edge presence/type
+```
+
+Important limitation:
+
+```text
+This is still graph-only. It does not predict room geometry, room placement, or
+floorplan polygons. Geometry-conditioned graph policy should be a separate
+experiment because it changes the data schema and model inputs.
+```
+
+Changed / added files for Graph Policy V2:
+
+```text
+digress/configs/experiment/msd_wall_graph_policy_v2.yaml
+digress/src/diffusion/absorbing_utils.py
+digress/src/diffusion_model_absorbing.py
+digress/src/main.py
+digress/scripts/test_next_node_completion.py
+digress/scripts/test_autoregressive_completion.py
+digress/scripts/test_graph_generation.py
+```
+
+Backend note:
+
+```text
+app/backend/app/services/graph_generation.py also uses the updated absorbing
+dimension helper so graph-condition-aware checkpoints can be loaded later, but
+the app endpoint still needs separate wiring for Graph Policy V2 inference.
+```
+
+Architecture changes:
+
+- Optional graph condition is appended to DiGress global `y` features only when
+  `model.graph_condition.enabled: true`.
+- `graph_policy` masking samples a current known subgraph, selects one hidden
+  target node, and treats all other future nodes as inactive padding for that
+  training step.
+- The edge loss can use `split_presence_type`, which separates edge existence,
+  edge class, and edge-density calibration instead of using one CE over all
+  edge classes.
+- Existing absorbing configs keep the old behavior unless they opt into graph
+  condition or split edge loss.
+
+Graph Policy V2 config:
+
+```yaml
+general:
+  name: msd_wall_graph_policy_v2
+train:
+  n_epochs: 200
+  batch_size: 8
+model:
+  transition: absorbing
+  lambda_train: [2.0, 0]
+  edge_loss_mode: split_presence_type
+  edge_density_loss_weight: 0.5
+  graph_condition:
+    enabled: true
+    room_type_inventory: true
+  absorbing_masking:
+    strategy: mixed
+    eval_strategy: graph_policy
+    random_probability: 0.02
+    next_node_probability: 0.08
+    graph_policy_probability: 0.90
+```
+
+Training command:
+
+```powershell
+cd D:\Github\GSDiff\digress
+.\.venv\Scripts\python.exe src\main.py dataset=msd_wall +experiment=msd_wall_graph_policy_v2.yaml
+```
+
+Next-node evaluation command after training:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\test_next_node_completion.py msd_wall_graph_policy_v2 next_node.checkpoint=outputs/.../checkpoints/msd_wall_graph_policy_v2/best.ckpt next_node.num_samples=128 next_node.grid_samples=12
+```
+
+Autoregressive full-completion evaluation command after training:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\test_autoregressive_completion.py msd_wall_graph_policy_v2 autoregressive.checkpoint=outputs/.../checkpoints/msd_wall_graph_policy_v2/best.ckpt autoregressive.num_samples=128 autoregressive.grid_samples=12 autoregressive.known_ratio=0.5
+```
+
+Smoke result, 2026-05-19:
+
+```text
+Status: code ready for full training.
+
+Command:
+  .\.venv\Scripts\python.exe src\main.py dataset=msd_wall +experiment=msd_wall_graph_policy_v2.yaml train.n_epochs=1 train.batch_size=2 general.name=debug_graph_policy_v2 general.samples_to_generate=0 general.final_model_samples_to_generate=0 general.sample_every_val=1000
+
+Result:
+  py_compile passed.
+  1-epoch training smoke completed.
+  test/absorbing_masked_loss: 4.7809
+
+Weakness:
+  This is only a functionality smoke test, not evidence of model quality.
+  The checkpoint still needs a real 200-epoch run and task-specific evaluation.
+
+Next:
+  Train `msd_wall_graph_policy_v2` for 200 epochs, then evaluate both
+  next-node and autoregressive full completion with the commands above.
+```
+
+Graph Policy V2 first long-run observation, 2026-05-19:
+
+```text
+Status: training started, but the first config is not healthy enough to keep as
+the default recommendation.
+
+Run:
+  outputs/2026-05-19/13-18-38-msd_wall_graph_policy_v2
+
+Command:
+  .\.venv\Scripts\python.exe src\main.py dataset=msd_wall +experiment=msd_wall_graph_policy_v2.yaml
+
+Observed validation:
+  epoch 10: val_masked_loss=4.5677, node=1.9316, edge=1.3181
+  epoch 20: val_masked_loss=4.4042, node=1.8723, edge=1.2660
+  epoch 30: val_masked_loss=4.2371, node=1.8033, edge=1.2169
+  epoch 40: val_masked_loss=4.2102, node=1.7737, edge=1.2183  best so far
+  epoch 50: val_masked_loss=4.2191, node=1.7628, edge=1.2282
+  epoch 60: val_masked_loss=4.2512, node=1.7395, edge=1.2559
+
+Interpretation:
+  Node validation keeps improving, but edge validation starts worsening after
+  epoch 30-40. The total validation loss therefore plateaus and then regresses.
+  This is not a runtime crash; it is a training/config issue.
+
+Likely cause:
+  The curriculum moves from known_ratio=0.85 toward 0.30 over 140 epochs. For
+  app-style next-room completion, that becomes too sparse too early. The model
+  is learning room type distribution but losing edge stability. The current
+  history also only records the combined edge loss, so it is hard to tell
+  whether presence, type, or density is the main failure.
+
+Code update:
+  `digress/src/diffusion_model_absorbing.py` now records edge loss components:
+  `train_e_presence_ce`, `train_e_type_ce`, `train_e_density`,
+  `val_e_presence_ce`, `val_e_type_ce`, `val_e_density`.
+
+New config:
+  `digress/configs/experiment/msd_wall_graph_policy_v2_stable.yaml`
+
+Changes:
+  lr: 1e-4 -> 5e-5
+  known_ratio_end: 0.30 -> 0.50
+  curriculum_epochs: 140 -> 80
+  known_ratio_jitter: 0.20 -> 0.10
+  edge_density_loss_weight: 0.5 -> 0.2
+  check_val_every_n_epochs: 10 -> 5
+
+Next:
+  Prefer starting a new run with `msd_wall_graph_policy_v2_stable.yaml` if the
+  first run continues to regress. Keep the best checkpoint from the first run
+  as a diagnostic only, not as the app-facing checkpoint.
+```
+
+Graph Policy V2 stable run observation, 2026-05-19:
+
+```text
+Status: better than the first Graph Policy V2 run, but still plateauing.
+
+Run:
+  outputs/2026-05-19/13-57-07-msd_wall_graph_policy_v2_stable
+
+Checkpoint:
+  outputs/2026-05-19/13-57-07-msd_wall_graph_policy_v2_stable/checkpoints/msd_wall_graph_policy_v2_stable/best.ckpt
+
+Observed validation:
+  epoch 25:  val_masked_loss=4.3087, node=1.7963, edge=1.2562
+  epoch 35:  val_masked_loss=4.1407, node=1.7520, edge=1.1944
+  epoch 65:  val_masked_loss=3.9958, node=1.6784, edge=1.1587
+  epoch 95:  val_masked_loss=3.9914, node=1.6830, edge=1.1542
+  epoch 125: val_masked_loss=3.9770, node=1.6756, edge=1.1507  best so far
+  epoch 155: val_masked_loss=3.9898, node=1.7050, edge=1.1424
+
+Interpretation:
+  The stable config improved validation from the first run: best val moved
+  from about 4.2102 to 3.9770. The train loss staying around 3.7-3.8 is not by
+  itself a failure because this objective is node_CE + 2 * edge_loss. However,
+  after epoch 125 the validation score has not made a new best for about 30
+  epochs.
+
+Weakness:
+  Edge validation is still around 1.14-1.15 and node validation is around
+  1.68-1.70. This indicates the graph policy is learning but remains
+  uncertain, especially for exact next-room type and edge targets.
+
+Next:
+  If no new best appears by epoch 170-180, stop the run and evaluate the
+  epoch-125 `best.ckpt` with next-node and autoregressive completion tests.
+  Do not judge this checkpoint by training loss alone.
+```
+
+Graph Policy V2 stable evaluation, 2026-05-19:
+
+```text
+Status: next-node is promising; autoregressive full completion is not good
+enough yet.
+
+Checkpoint:
+  outputs/2026-05-19/13-57-07-msd_wall_graph_policy_v2_stable/checkpoints/msd_wall_graph_policy_v2_stable/best.ckpt
+
+Next-node command:
+  .\.venv\Scripts\python.exe scripts\test_next_node_completion.py msd_wall_graph_policy_v2_stable next_node.checkpoint=outputs/2026-05-19/13-57-07-msd_wall_graph_policy_v2_stable/checkpoints/msd_wall_graph_policy_v2_stable/best.ckpt next_node.num_samples=128 next_node.grid_samples=12
+
+Next-node outputs:
+  outputs/2026-05-19/13-57-07-msd_wall_graph_policy_v2_stable/next_node_eval_best_128/next_node_metrics.json
+  outputs/2026-05-19/13-57-07-msd_wall_graph_policy_v2_stable/next_node_eval_best_128/next_node_grid.png
+
+Next-node edge_none_logit_bias sweep:
+  bias +0.4: node_acc=0.7031, edge_present_acc=0.1719, conn_f1=0.2691, degree=2.49 vs 3.95
+  bias  0.0: node_acc=0.7031, edge_present_acc=0.1996, conn_f1=0.2903, degree=3.37 vs 3.95
+  bias -0.2: node_acc=0.7031, edge_present_acc=0.2628, conn_f1=0.3482, degree=3.95 vs 3.95
+  bias -0.4: node_acc=0.6953, edge_present_acc=0.2708, conn_f1=0.3445, degree=4.44 vs 3.95
+
+Next-node recommendation:
+  Use `model.edge_none_logit_bias=-0.2` for this checkpoint. It gives the best
+  connection F1 and matches the reference target degree almost exactly.
+
+Autoregressive commands:
+  .\.venv\Scripts\python.exe scripts\test_autoregressive_completion.py msd_wall_graph_policy_v2_stable autoregressive.checkpoint=outputs/2026-05-19/13-57-07-msd_wall_graph_policy_v2_stable/checkpoints/msd_wall_graph_policy_v2_stable/best.ckpt autoregressive.num_samples=64 autoregressive.grid_samples=12 autoregressive.known_ratio=0.5
+  .\.venv\Scripts\python.exe scripts\test_autoregressive_completion.py msd_wall_graph_policy_v2_stable autoregressive.checkpoint=outputs/2026-05-19/13-57-07-msd_wall_graph_policy_v2_stable/checkpoints/msd_wall_graph_policy_v2_stable/best.ckpt autoregressive.num_samples=64 autoregressive.grid_samples=12 autoregressive.known_ratio=0.5 model.edge_none_logit_bias=-0.2
+  .\.venv\Scripts\python.exe scripts\test_autoregressive_completion.py msd_wall_graph_policy_v2_stable autoregressive.checkpoint=outputs/2026-05-19/13-57-07-msd_wall_graph_policy_v2_stable/checkpoints/msd_wall_graph_policy_v2_stable/best.ckpt autoregressive.num_samples=64 autoregressive.grid_samples=12 autoregressive.known_ratio=0.5 model.edge_none_logit_bias=-0.4
+
+Autoregressive outputs:
+  outputs/2026-05-19/13-57-07-msd_wall_graph_policy_v2_stable/autoregressive_eval_best_64/autoregressive_completion_metrics.json
+  outputs/2026-05-19/13-57-07-msd_wall_graph_policy_v2_stable/autoregressive_eval_bias_m0p2_64/autoregressive_completion_metrics.json
+  outputs/2026-05-19/13-57-07-msd_wall_graph_policy_v2_stable/autoregressive_eval_bias_m0p4_64/autoregressive_completion_metrics.json
+
+Autoregressive results:
+  bias +0.4: node_unknown=0.2477, edge_present=0.0298, presence_f1=0.0827, typed_f1=0.0435, edges=34.12 vs 64.27, connected=0.062 vs 0.938
+  bias -0.2: node_unknown=0.2886, edge_present=0.0491, presence_f1=0.1227, typed_f1=0.0588, edges=48.50 vs 64.27, connected=0.375 vs 0.938
+  bias -0.4: node_unknown=0.2733, edge_present=0.0596, presence_f1=0.1389, typed_f1=0.0662, edges=54.69 vs 64.27, connected=0.391 vs 0.938
+
+Distribution notes:
+  For autoregressive full completion, edge-type JS improves from 0.00487
+  at bias +0.4 to 0.00114 at bias -0.4, and degree JS improves from 0.1590
+  to 0.0334. This confirms calibration helps distribution match, but does not
+  fix connectedness.
+
+Weakness:
+  Autoregressive full completion accumulates local edge errors. Even when edge
+  count becomes closer to reference, many generated graphs remain disconnected.
+  This checkpoint is therefore usable as a next-node prototype but not as a
+  high-quality one-click full-completion model.
+
+Next:
+  For app next-node, use this checkpoint with `edge_none_logit_bias=-0.2`.
+  For full completion, add inference-time connectivity repair / reranking or
+  train with explicit connectedness/bridge-edge pressure. Do not present the
+  current autoregressive full-completion output as final quality.
+```
+
+### Full Completion V2
+
+Decision, 2026-05-19:
+
+```text
+Do not use naive autoregressive next-node as the main one-click full-completion
+model. The single next-node step is usable, but repeated steps accumulate edge
+errors and leave many generated graphs disconnected.
+
+Train a separate one-shot full-completion checkpoint instead.
+```
+
+New config:
+
+```text
+digress/configs/experiment/msd_wall_full_completion_v2.yaml
+```
+
+Training command:
+
+```powershell
+cd D:\Github\GSDiff\digress
+.\.venv\Scripts\python.exe src\main.py dataset=msd_wall +experiment=msd_wall_full_completion_v2.yaml
+```
+
+Evaluation command after training:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\test_graph_completion.py msd_wall_full_completion_v2 completion.checkpoint=outputs/.../checkpoints/msd_wall_full_completion_v2/best.ckpt completion.num_samples=128 completion.grid_samples=12
+```
+
+What changed:
+
+- Full completion is one-shot: partial graph in, all missing nodes/edges out.
+- Graph condition is enabled: current count, target count, remaining count, and
+  remaining room-type inventory are appended to global `y`.
+- Edge loss uses `split_presence_type`.
+- Added `edge_degree_loss_weight` to penalize wrong per-node masked-edge degree.
+- Full-completion eval now passes graph condition into `complete_batch`.
+- Completion eval can optionally report deterministic connectivity repair
+  metrics separately from raw model metrics.
+
+New / changed files:
+
+```text
+digress/configs/experiment/msd_wall_full_completion_v2.yaml
+digress/src/diffusion/absorbing_losses.py
+digress/src/diffusion_model_absorbing.py
+digress/scripts/graph_completion_eval.py
+digress/scripts/test_graph_completion.py
+```
+
+Component split:
+
+```text
+test_graph_completion.py is now the CLI driver only.
+graph_completion_eval.py contains reusable completion metrics, graph drawing,
+graph-condition helpers, and connectivity repair.
+absorbing_losses.py contains absorbing masked loss logic.
+```
+
+Smoke check:
+
+```text
+py_compile passed.
+Config/model construction passed:
+  input_dims: {'X': 16, 'E': 6, 'y': 24}
+  output_dims: {'X': 10, 'E': 6, 'y': 0}
+  graph_condition_dim: 12
+```
+
+Expected evaluation standard:
+
+```text
+Report raw metrics first:
+  node_unknown_accuracy
+  edge_presence_f1
+  typed_edge_f1
+  avg_edges vs reference
+  connected_frac vs reference
+  JS/KL/TV distribution similarity
+
+Report repaired metrics separately:
+  repaired metrics are app-facing diagnostics, not proof that the raw model is
+  good enough.
+```
+
+Full Completion V2 evaluation, 2026-05-20:
+
+```text
+Status: raw model is still weak semantically, but top-k graph-only reranking
+makes one-click completion structurally usable for the app prototype.
+
+Run:
+  outputs/2026-05-19/18-58-03-msd_wall_full_completion_v2
+
+Checkpoint:
+  outputs/2026-05-19/18-58-03-msd_wall_full_completion_v2/checkpoints/msd_wall_full_completion_v2/best.ckpt
+
+Training:
+  completed 200 epochs
+  best validation at epoch 145
+  best val_masked_loss=4.4979
+  final epoch 200 val_masked_loss=4.5340
+
+Raw eval at default edge_none_logit_bias=-0.2:
+  output: outputs/2026-05-19/18-58-03-msd_wall_full_completion_v2/completion_eval_best_128
+  node_unknown_accuracy=0.2524
+  edge_present_accuracy=0.0976
+  edge_presence_f1=0.1749
+  typed_edge_f1=0.0829
+  avg_edges=78.97 vs 62.44 reference
+  connected_frac=0.906 vs 0.930 reference
+  interpretation: connectedness is close, but the graph is over-connected.
+
+Bias sweep:
+  bias 0.0: avg_edges=74.53 vs 64.27, connected=0.797
+  bias 0.2: avg_edges=65.47 vs 64.27, connected=0.734
+  bias 0.4: avg_edges=54.59 vs 64.27, connected=0.531
+
+Interpretation:
+  `edge_none_logit_bias=0.2` calibrates edge count well, but raw connectedness
+  drops. This shows the problem is not just edge quantity; the model is not
+  reliably selecting bridge edges.
+
+Top-k graph-only rerank:
+  command:
+    .\.venv\Scripts\python.exe scripts\test_graph_completion.py msd_wall_full_completion_v2 completion.checkpoint=outputs/2026-05-19/18-58-03-msd_wall_full_completion_v2/checkpoints/msd_wall_full_completion_v2/best.ckpt completion.out_dir=outputs/2026-05-19/18-58-03-msd_wall_full_completion_v2/completion_eval_bias_0p2_rerank8_64 completion.num_samples=64 completion.grid_samples=8 completion.repair_connectivity=true completion.rerank_candidates=8 completion.rerank.expected_degree=4.2 completion.rerank.connected_weight=4.0 completion.rerank.edge_count_weight=1.0 completion.rerank.isolated_weight=0.25 model.edge_none_logit_bias=0.2
+
+  output:
+    outputs/2026-05-19/18-58-03-msd_wall_full_completion_v2/completion_eval_bias_0p2_rerank8_64/completion_metrics.json
+    outputs/2026-05-19/18-58-03-msd_wall_full_completion_v2/completion_eval_bias_0p2_rerank8_64/completion_grid.png
+
+  raw first candidate:
+    node_unknown_accuracy=0.2528
+    edge_present_accuracy=0.0790
+    edge_presence_f1=0.1583
+    typed_edge_f1=0.0780
+    avg_edges=65.48 vs 64.27 reference
+    connected_frac=0.766 vs 0.938 reference
+
+  reranked candidate:
+    node_unknown_accuracy=0.2334
+    edge_present_accuracy=0.0885
+    edge_presence_f1=0.1689
+    typed_edge_f1=0.0873
+    avg_edges=65.53 vs 64.27 reference
+    connected_frac=1.000 vs 0.938 reference
+    degree_js=0.0071
+    edge_type_js=0.00023
+
+Decision:
+  For app one-click full completion, use this checkpoint with
+  `edge_none_logit_bias=0.2` and `rerank_candidates=8` as the current prototype.
+  For paper/model-quality claims, report raw metrics separately and do not claim
+  the raw model solves full completion yet.
+
+Weakness:
+  Exact edge recovery is still weak. Rerank improves structural usability and
+  degree distribution but does not make the model semantically accurate.
+
+Next:
+  Wire reranked full completion into the backend/app path if one-click
+  completion is needed now. For a stronger checkpoint, train a V3 model with
+  explicit bridge-edge or component-aware supervision rather than only global
+  edge count/degree losses.
+```
+
+App integration, 2026-05-20:
+
+```text
+Status: wired as prototype app mode, not a final model-quality claim.
+
+Backend:
+  endpoint: POST /api/generate/graph/completion
+  model key: msd_wall_full_completion_v2
+  checkpoint:
+    digress/outputs/2026-05-19/18-58-03-msd_wall_full_completion_v2/checkpoints/msd_wall_full_completion_v2/best.ckpt
+
+Frontend:
+  mode: graph_completion
+  visible label: Graph Completion
+  reused components:
+    GraphModelSelector
+    BubbleGraphCanvas
+    GenerateButton
+    HistoryBar
+
+Runtime policy:
+  target_num_nodes default: 30
+  num_candidates: 8
+  edge_none_logit_bias: 0.2
+  rerank expected_degree: 4.2
+  rerank connected_weight: 4.0
+  rerank edge_count_weight: 1.0
+  rerank isolated_weight: 0.25
+  connectivity repair: enabled, edge type wall
+
+Important limitation:
+  The offline evaluation used ground-truth remaining room inventory as a graph
+  condition. The app does not know the future room inventory, so the backend
+  estimates the remaining inventory from known room counts plus an MSD room-type
+  prior. This is appropriate for an app prototype, but it is not the same
+  condition as the diagnostic eval setup.
+
+Weakness:
+  The app output should be structurally usable after reranking/repair, but exact
+  room type and edge recovery remain weak. Keep labeling this as a prototype
+  completion mode until a stronger model is trained and evaluated.
+```
+
+Graph-condition optimization plan, 2026-05-22:
+
+```text
+Status: planned. This is the next high-value model improvement before simply
+scaling model size.
+
+Why this belongs here:
+  `docs/absorbing_d3pm_implementation.md` is the absorbing D3PM architecture
+  and experiment notebook. Graph condition changes affect training inputs,
+  evaluation setup, app inference, and checkpoint compatibility, so this is the
+  right place to track the plan and later results.
+```
+
+Current V2 condition:
+
+```text
+condition vector:
+  current_known_count / max_nodes
+  target_total_count / max_nodes
+  remaining_count / max_nodes
+  remaining_room_type_inventory / target_total_count
+
+Training/eval:
+  remaining_room_type_inventory is available from the ground-truth full graph.
+
+App:
+  remaining_room_type_inventory is not known, so the backend estimates it from
+  known room counts plus an MSD room-type prior.
+```
+
+Problem:
+
+```text
+The offline eval condition is stronger than the app condition. This makes V2
+look cleaner in diagnostics than in real app usage.
+
+The model also receives only room-count inventory. It does not receive enough
+global graph-shape information such as target edge density, access-edge count,
+or whether the visible partial graph already has multiple connected components.
+For full completion, those missing global hints can cause:
+  over/under connection
+  weak bridge-edge selection
+  poor connectedness despite reasonable avg_edges
+```
+
+V3 graph-condition goals:
+
+```text
+Use only conditions that can exist in the app, or train with explicit dropout so
+the model is robust when some conditions are estimated or missing.
+
+Separate three condition groups:
+  required app conditions:
+    current_known_count
+    target_total_count
+    remaining_count
+
+  optional user/app conditions:
+    desired room-type inventory
+    desired edge density / average degree
+    desired access-edge emphasis
+
+  derived partial-graph conditions:
+    known edge count
+    known average degree
+    known connected component count
+    known isolated node count
+    known edge-type histogram
+```
+
+Concrete implementation plan:
+
+```text
+1. Add graph-condition schema/versioning.
+   Do not silently change old checkpoint dimensions.
+   Add a new config flag such as:
+     model.graph_condition.version: v3
+
+2. Add condition dropout during training.
+   Randomly hide room inventory and optional graph stats with probability
+   0.3-0.5, replacing them with zeros plus an availability bit.
+   This trains the model for both GT-conditioned eval and app-style inference.
+
+3. Add availability bits.
+   For every optional condition group, append a binary flag:
+     room_inventory_available
+     target_density_available
+     edge_type_hist_available
+   This avoids confusing "unknown" with a true zero value.
+
+4. Add partial-graph structural stats.
+   These are always available in the app because they come from the user's
+   current graph:
+     known_edges / max_possible_edges
+     known_avg_degree / max_nodes
+     known_components / max_nodes
+     known_isolated_nodes / max_nodes
+     known edge-type histogram
+
+5. Train/eval under two modes.
+   Report both:
+     oracle_condition: uses GT remaining inventory
+     app_condition: uses only app-available/estimated conditions
+   The app-facing checkpoint should be selected by app_condition metrics, not
+   by oracle_condition alone.
+
+6. Update backend request shape only after the model supports it.
+   Add optional fields:
+     target_num_nodes
+     desired_room_counts
+     desired_avg_degree
+   Keep defaults so the app can still run without user-supplied inventory.
+```
+
+V3 evaluation requirements:
+
+```text
+For every V3 checkpoint, report:
+  oracle_condition metrics
+  app_condition metrics
+  completion_grid.png for both modes
+  connected_frac
+  avg_edges vs reference
+  degree_js
+  edge_type_js
+  node_unknown_accuracy
+  edge_presence_f1
+  typed_edge_f1
+
+Decision rule:
+  If oracle_condition improves but app_condition does not, the model is not yet
+  better for the product. It may still be useful for a controlled research
+  setting, but not as the app default.
+```
+
+First V3 experiment proposal:
+
+```text
+Config name:
+  msd_wall_full_completion_v3_conditioned.yaml
+
+Start from V2 choices:
+  full_completion objective
+  split_presence_type edge loss
+  lambda_train: [2.0, 0]
+  edge_degree_loss_weight: 0.5
+  known_ratio_start: 0.75
+  known_ratio_end: 0.45
+
+Add:
+  graph_condition.version: v3
+  graph_condition.condition_dropout: 0.4
+  graph_condition.include_partial_stats: true
+  graph_condition.include_availability_bits: true
+
+Do not increase model size in the first V3 run.
+Reason:
+  If V3 improves with the same capacity, the bottleneck was condition mismatch,
+  not model size. Only scale capacity after this is tested.
+```
+
+V3 conditioned training observation, 2026-05-22:
+
+```text
+Status: running; early training looks healthy but not enough to judge final
+completion quality.
+
+Run:
+  outputs/2026-05-22/14-57-20-msd_wall_full_completion_v3_conditioned
+
+Command:
+  .\.venv\Scripts\python.exe src\main.py dataset=msd_wall +experiment=msd_wall_full_completion_v3_conditioned.yaml
+
+Checkpoint directory:
+  outputs/2026-05-22/14-57-20-msd_wall_full_completion_v3_conditioned/checkpoints/msd_wall_full_completion_v3_conditioned
+
+Current observed progress:
+  latest history row: epoch 33 train
+  latest validation: epoch 30
+  current best checkpoint: best.ckpt from epoch 30 validation
+
+Validation trend:
+  epoch 5:  val_masked_loss=4.9381, node=1.9162, edge=1.5110
+  epoch 10: val_masked_loss=4.8467, node=1.8874, edge=1.4796
+  epoch 15: val_masked_loss=4.8004, node=1.8649, edge=1.4678
+  epoch 20: val_masked_loss=4.7864, node=1.8582, edge=1.4641
+  epoch 25: val_masked_loss=4.7430, node=1.8304, edge=1.4563
+  epoch 30: val_masked_loss=4.7270, node=1.8056, edge=1.4607
+
+Training trend:
+  train_weighted fell from 5.886 at epoch 1 to about 4.41 by epoch 33.
+  train_node_ce fell from 1.974 to about 1.708.
+  train_edge_ce fell from 1.956 to about 1.349.
+
+Interpretation:
+  This is a normal early trajectory. Validation is still improving, and there
+  is no clear overfitting signal yet. Edge validation improved early but is
+  slightly noisy around epoch 25-30, so the run should continue at least to
+  80-120 epochs before making a model-quality call.
+
+Weakness / caution:
+  V3 loss is not directly comparable to V2 loss because V3 has a larger graph
+  condition vector and condition dropout. Final judgment must use both
+  app_condition and oracle_condition completion evals, not train loss alone.
+
+Next:
+  Let training continue. After a stable best checkpoint, run:
+    app raw eval
+    app rerank/repair eval
+    oracle raw eval
+  and compare against V2.
+```
+
+V3 conditioned final result, 2026-05-22:
+
+```text
+Status: trained successfully, but not good enough to replace V2 as the app
+default.
+
+Run:
+  outputs/2026-05-22/14-57-20-msd_wall_full_completion_v3_conditioned
+
+Checkpoint:
+  outputs/2026-05-22/14-57-20-msd_wall_full_completion_v3_conditioned/checkpoints/msd_wall_full_completion_v3_conditioned/best.ckpt
+
+Training:
+  completed 200 epochs
+  best validation at epoch 180
+  best val_masked_loss=4.5272
+  final epoch 200 val_masked_loss=4.6097
+
+Training interpretation:
+  The model improved steadily until about epoch 180, then regressed at the final
+  validation. Use `best.ckpt`, not `last-v1.ckpt`.
+```
+
+Evaluation commands:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\test_graph_completion.py msd_wall_full_completion_v3_conditioned completion.checkpoint=outputs/2026-05-22/14-57-20-msd_wall_full_completion_v3_conditioned/checkpoints/msd_wall_full_completion_v3_conditioned/best.ckpt completion.out_dir=outputs/2026-05-22/14-57-20-msd_wall_full_completion_v3_conditioned/completion_eval_app_raw_128 completion.condition_mode=app completion.num_samples=128 completion.grid_samples=12 completion.repair_connectivity=false completion.rerank_candidates=1
+
+.\.venv\Scripts\python.exe scripts\test_graph_completion.py msd_wall_full_completion_v3_conditioned completion.checkpoint=outputs/2026-05-22/14-57-20-msd_wall_full_completion_v3_conditioned/checkpoints/msd_wall_full_completion_v3_conditioned/best.ckpt completion.out_dir=outputs/2026-05-22/14-57-20-msd_wall_full_completion_v3_conditioned/completion_eval_oracle_raw_128 completion.condition_mode=oracle completion.num_samples=128 completion.grid_samples=12 completion.repair_connectivity=false completion.rerank_candidates=1
+
+.\.venv\Scripts\python.exe scripts\test_graph_completion.py msd_wall_full_completion_v3_conditioned completion.checkpoint=outputs/2026-05-22/14-57-20-msd_wall_full_completion_v3_conditioned/checkpoints/msd_wall_full_completion_v3_conditioned/best.ckpt completion.out_dir=outputs/2026-05-22/14-57-20-msd_wall_full_completion_v3_conditioned/completion_eval_app_rerank8_repair_128 completion.condition_mode=app completion.num_samples=128 completion.grid_samples=12 completion.repair_connectivity=true completion.rerank_candidates=8 completion.rerank.expected_degree=4.2 completion.rerank.connected_weight=4.0 completion.rerank.edge_count_weight=1.0 completion.rerank.isolated_weight=0.25 model.edge_none_logit_bias=0.2
+```
+
+Evaluation outputs:
+
+```text
+app raw:
+  outputs/2026-05-22/14-57-20-msd_wall_full_completion_v3_conditioned/completion_eval_app_raw_128/completion_metrics.json
+  outputs/2026-05-22/14-57-20-msd_wall_full_completion_v3_conditioned/completion_eval_app_raw_128/completion_grid.png
+
+oracle raw:
+  outputs/2026-05-22/14-57-20-msd_wall_full_completion_v3_conditioned/completion_eval_oracle_raw_128/completion_metrics.json
+  outputs/2026-05-22/14-57-20-msd_wall_full_completion_v3_conditioned/completion_eval_oracle_raw_128/completion_grid.png
+
+app rerank/repair:
+  outputs/2026-05-22/14-57-20-msd_wall_full_completion_v3_conditioned/completion_eval_app_rerank8_repair_128/completion_metrics.json
+  outputs/2026-05-22/14-57-20-msd_wall_full_completion_v3_conditioned/completion_eval_app_rerank8_repair_128/completion_grid.png
+```
+
+Key metrics:
+
+```text
+V3 app raw:
+  node_unknown_accuracy=0.1670
+  edge_present_accuracy=0.0882
+  edge_presence_f1=0.1687
+  typed_edge_f1=0.0784
+  avg_edges=74.08 vs 62.44 reference
+  connected_frac=0.906 vs 0.930 reference
+
+V3 oracle raw:
+  node_unknown_accuracy=0.2328
+  edge_present_accuracy=0.0912
+  edge_presence_f1=0.1662
+  typed_edge_f1=0.0848
+  avg_edges=69.45 vs 62.44 reference
+  connected_frac=0.773 vs 0.930 reference
+
+V3 app rerank/repair:
+  node_unknown_accuracy=0.1718
+  edge_present_accuracy=0.0756
+  edge_presence_f1=0.1658
+  typed_edge_f1=0.0761
+  avg_edges=61.80 vs 62.44 reference
+  connected_frac=1.000 vs 0.930 reference
+  degree_js=0.00676
+  edge_type_js=0.00013
+```
+
+Comparison to V2:
+
+```text
+V2 raw:
+  node_unknown_accuracy=0.2524
+  edge_presence_f1=0.1749
+  typed_edge_f1=0.0829
+  avg_edges=78.97 vs 62.44
+  connected_frac=0.906 vs 0.930
+
+V2 rerank/repair, 64 samples:
+  node_unknown_accuracy=0.2334
+  edge_presence_f1=0.1689
+  typed_edge_f1=0.0873
+  avg_edges=65.53 vs 64.27
+  connected_frac=1.000 vs 0.938
+```
+
+Interpretation:
+
+```text
+V3 condition dropout improved the app/eval framing but did not improve the
+model enough. App-condition reranking gives excellent structural usability
+after postprocess: edge count, connectedness, degree distribution, and edge-type
+distribution are all close. However, semantic recovery is worse than V2:
+node_unknown_accuracy and typed_edge_f1 are both lower.
+
+Oracle-condition improves node accuracy over app-condition but hurts
+connectedness. This means stronger future inventory hints do not automatically
+solve graph topology.
+```
+
+Decision:
+
+```text
+Do not replace the current app default with V3.
+Keep V2 + edge_none_logit_bias=0.2 + rerank/repair as the current app prototype
+unless visual inspection of V3 grids is clearly preferable for product demos.
+
+V3 is useful as a diagnostic checkpoint showing that condition mismatch was not
+the only bottleneck. The remaining problem is likely loss/objective structure:
+bridge-edge selection, component-level connectivity, and semantic room recovery.
+```
+
+Next:
+
+```text
+Do not increase capacity yet based only on this result.
+The next model experiment should target objective quality:
+  bridge-edge / component-aware supervision
+  stronger node-type auxiliary loss or class-balanced node loss
+  lower condition_dropout, e.g. 0.2, only if app-condition node accuracy is the
+  main target
+
+If a larger model is tested later, keep V2/V3 configs unchanged and add a new
+config name, e.g. `msd_wall_full_completion_v4_bridge.yaml`.
+```
+
+New / changed files for V3 graph condition:
+
+```text
+digress/configs/experiment/msd_wall_full_completion_v3_conditioned.yaml
+  New V3 experiment config. Keeps V2 model capacity but enables graph condition
+  version v3, condition dropout, availability bits, target density, and partial
+  graph stats.
+
+digress/src/diffusion/absorbing_utils.py
+  Extends graph_condition_dim() with versioned v3 condition dimensions while
+  preserving v2 checkpoint compatibility.
+
+digress/src/diffusion_model_absorbing.py
+  Adds v3 graph-condition construction, app/oracle availability flags,
+  condition dropout, target avg-degree condition, and partial known-graph stats.
+
+digress/scripts/graph_completion_eval.py
+  Adds `completion_graph_condition(..., condition_mode="oracle"|"app")` so eval
+  can compare GT-oracle conditions against realistic app conditions.
+
+digress/scripts/test_graph_completion.py
+  Adds `completion.condition_mode=oracle|app` and records the selected condition
+  mode in completion_metrics.json.
+```
+
+V4 bridge-loss experiment, 2026-05-22:
+
+```text
+Status: code ready; full 200-epoch training not started yet.
+
+Goal:
+  Improve one-shot full graph completion without increasing model capacity.
+  V3 showed that condition mismatch alone was not the bottleneck. The next
+  hypothesis is that the loss underweights two important cases:
+    rare room labels
+    real edges that attach hidden completion nodes back to the known partial graph
+
+Config:
+  digress/configs/experiment/msd_wall_full_completion_v4_bridge.yaml
+
+Training command:
+  cd D:\Github\GSDiff\digress
+  .\.venv\Scripts\python.exe src\main.py dataset=msd_wall +experiment=msd_wall_full_completion_v4_bridge.yaml
+
+Expected checkpoint:
+  outputs/<date>/<time>-msd_wall_full_completion_v4_bridge/checkpoints/msd_wall_full_completion_v4_bridge/best.ckpt
+
+Important config differences from V3:
+  graph_condition.version=v3
+  graph_condition.condition_dropout=0.2
+  graph_condition.edge_hist_dropout=0.1
+  model.node_class_balance=inverse_sqrt
+  model.node_class_weight_max=4.0
+  model.bridge_edge_loss_weight=3.0
+  model.bridge_edges_only_full_completion=true
+
+Reasoning:
+  node_class_balance makes rare room types matter more without using aggressive
+  full inverse-frequency weights.
+  bridge_edge_loss_weight upweights real known-to-hidden edges during the
+  full-completion mask. This directly targets the observed failure mode where
+  graphs have plausible global edge counts but poor attachment/connectivity to
+  the visible input graph.
+```
+
+V4 validation / smoke:
+
+```text
+Syntax check:
+  .\.venv\Scripts\python.exe -m py_compile digress\src\diffusion\absorbing_losses.py digress\src\diffusion_model_absorbing.py
+  Result: passed.
+
+Fast-dev smoke command:
+  cd D:\Github\GSDiff\digress
+  .\.venv\Scripts\python.exe src\main.py dataset=msd_wall +experiment=msd_wall_full_completion_v4_bridge.yaml general.name=debug train.batch_size=2 general.samples_to_generate=0 general.samples_to_save=0 general.final_model_samples_to_generate=0 general.final_model_samples_to_save=0
+
+Fast-dev smoke result:
+  passed one train batch and one validation batch.
+  train_masked_loss=11.234
+  val_masked_loss=10.7763
+  masked_node_CE=2.205 on val
+  masked_edge_CE=4.286 on val
+
+Note:
+  A previous full 1-epoch smoke with validation progress bar timed out on
+  Windows stdout/tqdm with OSError 22 after reaching validation. That failure is
+  not from the V4 loss. The debug fast-dev run confirms the model/loss path
+  executes.
+```
+
+V4 evaluation commands after training:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\test_graph_completion.py msd_wall_full_completion_v4_bridge completion.checkpoint=outputs/<date>/<time>-msd_wall_full_completion_v4_bridge/checkpoints/msd_wall_full_completion_v4_bridge/best.ckpt completion.out_dir=outputs/<date>/<time>-msd_wall_full_completion_v4_bridge/completion_eval_app_rerank8_repair_128 completion.condition_mode=app completion.num_samples=128 completion.grid_samples=12 completion.repair_connectivity=true completion.rerank_candidates=8 model.edge_none_logit_bias=0.2
+
+.\.venv\Scripts\python.exe scripts\test_graph_completion.py msd_wall_full_completion_v4_bridge completion.checkpoint=outputs/<date>/<time>-msd_wall_full_completion_v4_bridge/checkpoints/msd_wall_full_completion_v4_bridge/best.ckpt completion.out_dir=outputs/<date>/<time>-msd_wall_full_completion_v4_bridge/completion_eval_app_raw_128 completion.condition_mode=app completion.num_samples=128 completion.grid_samples=12 completion.repair_connectivity=false completion.rerank_candidates=1
+```
+
+V4 success criteria:
+
+```text
+Must beat or match V2/V3 on:
+  connected_frac after rerank/repair close to 1.0
+  avg_edges close to reference
+  degree_js close to V3 rerank/repair
+
+Must improve over V3 on at least one semantic metric:
+  node_unknown_accuracy
+  typed_edge_f1
+
+If V4 only improves connectedness but hurts semantic recovery further, do not
+promote it to the app default. Keep V2 rerank/repair as the app prototype and
+consider either a larger model or a separate semantic auxiliary objective.
+```
+
+New / changed files for V4 bridge loss:
+
+```text
+digress/src/diffusion/absorbing_losses.py
+  Adds `_node_class_weights()` for class-balanced masked node CE.
+  Adds `_known_to_hidden_bridge_mask()` to identify real masked edges between
+  visible partial nodes and hidden completion nodes.
+  Adds weighted presence/type edge loss for those bridge edges.
+
+digress/configs/experiment/msd_wall_full_completion_v4_bridge.yaml
+  New full-completion experiment config. Keeps V3 graph condition and model
+  capacity, lowers condition dropout, and enables node/bridge loss weighting.
+
+docs/absorbing_d3pm_implementation.md
+  Records the V4 hypothesis, commands, smoke result, expected evaluation, and
+  files changed.
+```
+
+V4 bridge-loss final result, 2026-05-22:
+
+```text
+Status: trained successfully, but not good enough to replace V2 as the app
+default.
+
+Run:
+  outputs/2026-05-22/19-48-45-msd_wall_full_completion_v4_bridge
+
+Checkpoint:
+  outputs/2026-05-22/19-48-45-msd_wall_full_completion_v4_bridge/checkpoints/msd_wall_full_completion_v4_bridge/best.ckpt
+
+Training:
+  completed 200 epochs
+  best validation at epoch 180
+  best val_masked_loss=5.3272
+  final epoch 200 val_masked_loss=5.3372
+
+Training interpretation:
+  The run is stable and did not collapse. It improves from val=5.7913 at epoch
+  5 to best val=5.3272 at epoch 180, then plateaus. Because V4 adds
+  class-balanced node loss and bridge-edge weighting, this validation number is
+  not directly comparable to V2/V3 loss values. Task metrics are required.
+```
+
+Evaluation commands:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\test_graph_completion.py msd_wall_full_completion_v4_bridge completion.checkpoint=outputs/2026-05-22/19-48-45-msd_wall_full_completion_v4_bridge/checkpoints/msd_wall_full_completion_v4_bridge/best.ckpt completion.out_dir=outputs/2026-05-22/19-48-45-msd_wall_full_completion_v4_bridge/completion_eval_app_rerank8_repair_128 completion.condition_mode=app completion.num_samples=128 completion.grid_samples=12 completion.repair_connectivity=true completion.rerank_candidates=8 model.edge_none_logit_bias=0.2
+
+.\.venv\Scripts\python.exe scripts\test_graph_completion.py msd_wall_full_completion_v4_bridge completion.checkpoint=outputs/2026-05-22/19-48-45-msd_wall_full_completion_v4_bridge/checkpoints/msd_wall_full_completion_v4_bridge/best.ckpt completion.out_dir=outputs/2026-05-22/19-48-45-msd_wall_full_completion_v4_bridge/completion_eval_app_raw_128 completion.condition_mode=app completion.num_samples=128 completion.grid_samples=12 completion.repair_connectivity=false completion.rerank_candidates=1
+```
+
+Evaluation outputs:
+
+```text
+app raw:
+  outputs/2026-05-22/19-48-45-msd_wall_full_completion_v4_bridge/completion_eval_app_raw_128/completion_metrics.json
+  outputs/2026-05-22/19-48-45-msd_wall_full_completion_v4_bridge/completion_eval_app_raw_128/completion_grid.png
+
+app rerank/repair:
+  outputs/2026-05-22/19-48-45-msd_wall_full_completion_v4_bridge/completion_eval_app_rerank8_repair_128/completion_metrics.json
+  outputs/2026-05-22/19-48-45-msd_wall_full_completion_v4_bridge/completion_eval_app_rerank8_repair_128/completion_grid.png
+```
+
+Key metrics:
+
+```text
+V4 app raw:
+  node_unknown_accuracy=0.1771
+  edge_present_accuracy=0.0941
+  edge_presence_f1=0.1707
+  typed_edge_f1=0.0817
+  avg_edges=76.50 vs 62.44 reference
+  connected_frac=0.969 vs 0.930 reference
+  degree_js=0.03091
+  edge_type_js=0.00099
+
+V4 app rerank/repair:
+  raw first-candidate node_unknown_accuracy=0.1877
+  raw first-candidate edge_presence_f1=0.1637
+  raw first-candidate avg_edges=63.93 vs 62.44 reference
+  raw first-candidate connected_frac=0.781 vs 0.930 reference
+
+  final node_unknown_accuracy=0.1744
+  final edge_present_accuracy=0.0791
+  final edge_presence_f1=0.1647
+  final typed_edge_f1=0.0785
+  final avg_edges=63.18 vs 62.44 reference
+  final connected_frac=1.000 vs 0.930 reference
+  final degree_js=0.00593
+  final edge_type_js=0.00008
+  inference=69.42s / 128 samples = 0.542s per sample
+```
+
+Comparison:
+
+```text
+Against V3 app rerank/repair:
+  V3 node_unknown_accuracy=0.1718
+  V4 node_unknown_accuracy=0.1744  slightly higher, but not meaningful enough
+
+  V3 edge_presence_f1=0.1658
+  V4 edge_presence_f1=0.1647  slightly worse
+
+  V3 typed_edge_f1=0.0761
+  V4 typed_edge_f1=0.0785  slightly higher, but still weak
+
+  V3 avg_edges=61.80 vs 62.44
+  V4 avg_edges=63.18 vs 62.44
+
+  V3 connected_frac=1.000 after repair
+  V4 connected_frac=1.000 after repair
+
+Against V2 rerank/repair:
+  V2 node_unknown_accuracy=0.2334
+  V4 node_unknown_accuracy=0.1744
+
+  V2 edge_presence_f1=0.1689
+  V4 edge_presence_f1=0.1647
+
+  V2 typed_edge_f1=0.0873
+  V4 typed_edge_f1=0.0785
+```
+
+Interpretation:
+
+```text
+V4 bridge weighting did not solve the core full-completion problem. It can
+produce structurally usable graphs after rerank/repair, but semantic room-type
+recovery and true edge recovery remain weak.
+
+Raw V4 is still over-connected: avg_edges=76.50 vs 62.44. Rerank/repair fixes
+global structure, but the model itself has not learned significantly better
+GT-aligned edge selection.
+
+The bridge loss may have improved attachment pressure, but it did not improve
+the exact hidden graph reconstruction enough to justify replacing V2.
+```
+
+Decision:
+
+```text
+Do not promote V4 to app default.
+Keep V2 + edge_none_logit_bias=0.2 + rerank/repair as the current one-click
+full-completion prototype unless visual inspection strongly favors another
+checkpoint.
+
+Use V4 as a negative/diagnostic result:
+  loss shaping alone helped structure after inference-time selection, but did
+  not materially improve semantic or typed-edge accuracy.
+```
+
+Next:
+
+```text
+If continuing one-shot full completion:
+  Try a larger model only as a controlled V5 experiment, not as a guaranteed fix.
+  Also add stronger semantic supervision, e.g. explicit node-type auxiliary
+  objective on hidden nodes or candidate reranking that scores room-type prior
+  consistency.
+
+If prioritizing app usefulness:
+  Prefer the next-node / graph-policy route, because exact one-shot GT recovery
+  is too ambiguous and the current one-shot checkpoints mostly need reranking
+  and repair to become usable.
+```
+
+Historical specialized config choices, now superseded by Graph Policy V2:
 
 ```text
 next_node:

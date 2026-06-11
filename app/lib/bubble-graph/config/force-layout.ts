@@ -13,6 +13,13 @@ export const FORCE_LAYOUT_CONFIG = {
   linkDistance: 105,
 
   /**
+   * Wall-contact edges are dense semantic hints, not strong movement/access
+   * constraints. Give them a longer preferred distance so they do not pull the
+   * graph into a compact hairball.
+   */
+  wallLinkDistance: 150,
+
+  /**
    * Number of link-force relaxation passes per simulation tick.
    * Higher values make edge lengths more rigid and help hub-and-spoke graphs
    * keep all spokes at similar lengths.
@@ -24,6 +31,11 @@ export const FORCE_LAYOUT_CONFIG = {
    * Lower values allow looser layouts; higher values keep edges tighter.
    */
   linkBaseStrength: 0.72,
+
+  /**
+   * Much weaker spring for wall-contact layout backbone edges.
+   */
+  wallLinkStrength: 0.18,
 
   /**
    * Extra link spring strength added for each degree of the higher-degree

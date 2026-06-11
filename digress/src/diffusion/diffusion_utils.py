@@ -371,12 +371,15 @@ def sample_discrete_feature_noise(limit_dist, node_mask):
     y_limit = limit_dist.y[None, :].expand(bs, -1)
     U_X = x_limit.flatten(end_dim=-2).multinomial(1).reshape(bs, n_max)
     U_E = e_limit.flatten(end_dim=-2).multinomial(1).reshape(bs, n_max, n_max)
-    U_y = torch.empty((bs, 0))
+    # `y` is empty for these graph datasets, but it still controls dtype in
+    # several sampling paths via PlaceHolder.type_as(y_t). Keep it floating on
+    # the same device; otherwise X/E one-hot tensors can accidentally become
+    # Long tensors and CUDA graph features such as cycle counting will fail.
+    U_y = torch.empty((bs, 0), device=node_mask.device, dtype=torch.float32)
 
     long_mask = node_mask.long()
     U_X = U_X.type_as(long_mask)
     U_E = U_E.type_as(long_mask)
-    U_y = U_y.type_as(long_mask)
 
     U_X = F.one_hot(U_X, num_classes=x_limit.shape[-1]).float()
     U_E = F.one_hot(U_E, num_classes=e_limit.shape[-1]).float()

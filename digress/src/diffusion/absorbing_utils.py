@@ -7,7 +7,45 @@ def is_absorbing_transition(cfg) -> bool:
     return str(cfg.model.get("transition", "")).lower() == "absorbing"
 
 
-def prepare_absorbing_dataset_infos(dataset_infos):
+def graph_condition_dim(cfg, base_node_classes: int, base_edge_classes: int = 0) -> int:
+    """Return the extra global-conditioning width requested by an absorbing config.
+
+    The graph-policy checkpoint uses `y` as a small graph-level summary vector:
+    current node count, target node count, remaining node count, and optionally
+    the remaining room-type inventory. Existing configs keep this disabled and
+    therefore preserve the old model dimensions.
+    """
+    condition_cfg = cfg.model.get("graph_condition", {}) if cfg is not None else {}
+    if not condition_cfg.get("enabled", False):
+        return 0
+
+    version = str(condition_cfg.get("version", "v2")).lower()
+    if version == "v3":
+        availability_bits = bool(condition_cfg.get("include_availability_bits", True))
+        dim = 3
+        if condition_cfg.get("room_type_inventory", True):
+            dim += int(base_node_classes)
+            if availability_bits:
+                dim += 1
+        if condition_cfg.get("include_target_density", True):
+            dim += 1
+            if availability_bits:
+                dim += 1
+        if condition_cfg.get("include_partial_stats", True):
+            # known_edge_density, known_avg_degree, known_component_count,
+            # known_isolated_count, plus known edge-type histogram.
+            dim += 4 + int(base_edge_classes)
+            if availability_bits:
+                dim += 1
+        return dim
+
+    dim = 3
+    if condition_cfg.get("room_type_inventory", True):
+        dim += int(base_node_classes)
+    return dim
+
+
+def prepare_absorbing_dataset_infos(dataset_infos, cfg=None):
     """Expand DiGress input/output dimensions with one explicit [MASK] class.
 
     The MSD/RPLAN datasets store only real semantic classes. Absorbing D3PM
@@ -28,6 +66,12 @@ def prepare_absorbing_dataset_infos(dataset_infos):
 
     dataset_infos.input_dims["X"] += 1
     dataset_infos.input_dims["E"] += 1
+    dataset_infos.graph_condition_dim = graph_condition_dim(
+        cfg,
+        dataset_infos.base_Xdim_output,
+        dataset_infos.base_Edim_output,
+    )
+    dataset_infos.input_dims["y"] += dataset_infos.graph_condition_dim
     dataset_infos.output_dims["X"] += 1
     dataset_infos.output_dims["E"] += 1
 

@@ -37,6 +37,8 @@ class ProceduralRequest(BaseModel):
     graph: GraphIn
     boundary: list[list[float]]
     seed: int = 0
+    # Optional building-axis angle in degrees; None auto-detects from boundary.
+    axis_angle: float | None = None
 
 
 def _to_nx(graph: GraphIn) -> nx.Graph:
@@ -59,6 +61,6 @@ def procedural(req: ProceduralRequest):
         boundary = Polygon(req.boundary)
         if not boundary.is_valid:
             boundary = boundary.buffer(0)
-        return build_plan(g, boundary, seed=req.seed)
+        return build_plan(g, boundary, seed=req.seed, axis_angle=req.axis_angle)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))

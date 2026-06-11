@@ -3,9 +3,12 @@
 import { ImageIcon } from 'lucide-react';
 import { BubbleGraphCanvas } from '@/components/bubble-graph/BubbleGraphCanvas';
 import { BoundaryCanvas } from '@/components/BoundaryCanvas';
+import { RetrievePanel } from '@/components/RetrievePanel';
+import { DesignWorkspace } from '@/components/floorplan/DesignWorkspace';
 import type { DatasetId, GenerationMode } from '@/lib/constants';
 import type { HistoryItem } from '@/lib/history';
 import type { GeneratedGraph } from '@/lib/types';
+import type { Plan, Pt } from '@/lib/plan';
 
 interface Props {
   mode: GenerationMode;
@@ -17,6 +20,10 @@ interface Props {
   onBoundaryChange?: (dataUrl: string) => void;
   onGenerateBoundary?: () => void;
   onGraphDraftChange?: (g: GeneratedGraph) => void;
+  planDraft?: Plan | null;
+  planFitKey?: number;
+  onGenerateProcedural?: (boundary: Pt[], axisAngle: number | null) => void;
+  onPlanChange?: (plan: Plan) => void;
 }
 
 // Initial canvas state when there is no selected graph yet. Four rooms in a
@@ -52,7 +59,38 @@ export function MainViewer({
   onBoundaryChange,
   onGenerateBoundary,
   onGraphDraftChange,
+  planDraft,
+  planFitKey,
+  onGenerateProcedural,
+  onPlanChange,
 }: Props) {
+  // Retrieve mode: self-contained panel that owns its query graph, sub-mode,
+  // and top-k results. Doesn't read/write the history because results are
+  // transient until the user explicitly saves one.
+  if (mode === 'retrieve') {
+    return <RetrievePanel />;
+  }
+
+  // Design mode: unified CAD workspace — editable bubble graph (left, seeded
+  // from the selected history graph or a default), editable procedural floor
+  // plan (right). Generation + plan edits flow back to the page.
+  if (mode === 'design') {
+    const seedGraph = selectedItem?.kind === 'graph' ? selectedItem.graph : DEFAULT_GRAPH;
+    return (
+      <DesignWorkspace
+        graph={seedGraph}
+        dataset={selectedItem?.kind === 'graph' ? selectedItem.dataset : dataset}
+        plan={planDraft ?? null}
+        loading={loading}
+        error={error}
+        fitKey={planFitKey ?? 0}
+        onGraphChange={(g) => onGraphDraftChange?.(g)}
+        onGenerate={(boundary, axisAngle) => onGenerateProcedural?.(boundary, axisAngle)}
+        onPlanChange={(p) => onPlanChange?.(p)}
+      />
+    );
+  }
+
   // Boundary mode: always render the drawing canvas.
   if (mode === 'boundary') {
     return (
@@ -67,10 +105,10 @@ export function MainViewer({
     );
   }
 
-  // Graph mode: always render the editable bubble canvas. Source is either
+  // Graph / Next Node / Completion mode: always render the editable bubble canvas. Source is either
   // the currently-selected sampled graph from history, or the small default
   // graph so the user has something to start editing from.
-  if (mode === 'graph') {
+  if (mode === 'graph' || mode === 'next_node' || mode === 'graph_completion') {
     const sourceGraph =
       selectedItem?.kind === 'graph' ? selectedItem.graph : DEFAULT_GRAPH;
     return (
@@ -86,7 +124,13 @@ export function MainViewer({
             <div className="flex h-full items-center justify-center">
               <div className="flex flex-col items-center gap-3">
                 <div className="h-8 w-8 animate-spin rounded-full border-2 border-muted-foreground/20 border-t-muted-foreground/60" />
-                <p className="text-sm text-muted-foreground">Sampling graph...</p>
+                <p className="text-sm text-muted-foreground">
+                  {mode === 'next_node'
+                    ? 'Completing next node...'
+                    : mode === 'graph_completion'
+                      ? 'Completing graph...'
+                      : 'Sampling graph...'}
+                </p>
               </div>
             </div>
           ) : (

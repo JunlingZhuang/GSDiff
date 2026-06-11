@@ -12,6 +12,8 @@ export interface BubbleEdgeState {
   source: number;
   target: number;
   edgeType: number;
+  /** Internal layout hint. Wall edges are displayed but should not act like strong access constraints. */
+  layoutRole?: 'wall' | 'access';
 }
 
 export interface BubbleSelection {

@@ -1,0 +1,30 @@
+# WL-based retrieval over MSD graphs.
+#
+# Paths are resolved relative to the gretrieval/ project root unless absolute.
+
+graphs_path: ../digress/data/msd_wall/graphs.p
+output_dir: data/msd_wall/wl_n3/
+
+# Filter applied at corpus load time. Should mirror the training filter
+# (digress/configs/dataset/msd.yaml) so retrieved indices line up.
+filter:
+  min_nodes: 2
+  max_nodes: 64
+
+# Feature extractor. `name` dispatches to FEATURE_REGISTRY in build_index.py;
+# remaining keys are forwarded as constructor kwargs.
+#
+# Memory: dense float32 features. With n_iter=2 the WL vocab is typically a
+# few thousand for MSD; raising n_iter grows vocab roughly multiplicatively.
+features:
+  name: wl
+  n_iter: 3
+  node_attr: room_type
+  edge_attr: connectivity
+
+# Retrieval modes to build. `two_stage` reuses containment + node_matching at
+# query time and does not need its own build step.
+retrievers:
+  - cosine
+  - containment
+  - node_matching

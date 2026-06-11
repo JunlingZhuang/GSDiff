@@ -142,3 +142,9 @@
 .skeleton-pulse {
   animation: skeleton-pulse 1.8s ease-in-out infinite;
 }
+
+/* Floor-plan workspace: panel reveal */
+@keyframes fpFadeSlide {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: translateY(0); }
+}

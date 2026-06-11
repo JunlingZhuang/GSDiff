@@ -18,6 +18,7 @@ interface UseForceSimulationParams {
   width: number;
   height: number;
   onTick: (nodes: BubbleNodeState[]) => void;
+  syncKey?: string | number;
 }
 
 /**
@@ -63,12 +64,17 @@ function computeDegrees(
   return map;
 }
 
+function isWallEdge(edge: BubbleEdgeState): boolean {
+  return edge.layoutRole === 'wall';
+}
+
 export function useForceSimulation({
   nodes,
   edges,
   width,
   height,
   onTick,
+  syncKey,
 }: UseForceSimulationParams): {
   reheat: () => void;
   pinNode: (nodeId: number, x: number, y: number) => void;
@@ -90,6 +96,7 @@ export function useForceSimulation({
       : FORCE_LAYOUT_CONFIG.isolatedChargeStrength;
   };
   const linkStrengthFn = (link: BubbleEdgeState): number => {
+    if (isWallEdge(link)) return FORCE_LAYOUT_CONFIG.wallLinkStrength;
     const sourceId = endpointId(link.source as number | BubbleNodeState);
     const targetId = endpointId(link.target as number | BubbleNodeState);
     const sourceDegree = degreesRef.current.get(sourceId) ?? 1;
@@ -103,6 +110,19 @@ export function useForceSimulation({
         + maxDegree * FORCE_LAYOUT_CONFIG.linkStrengthPerDegree,
     );
   };
+  const linkDistanceFn = (link: BubbleEdgeState): number =>
+    isWallEdge(link) ? FORCE_LAYOUT_CONFIG.wallLinkDistance : FORCE_LAYOUT_CONFIG.linkDistance;
+  const structureKey = [
+    nodes.map((node) => node.id).join(','),
+    edges
+      .map((edge) => {
+        const source = endpointId(edge.source as number | BubbleNodeState);
+        const target = endpointId(edge.target as number | BubbleNodeState);
+        return `${Math.min(source, target)}-${Math.max(source, target)}`;
+      })
+      .sort()
+      .join(','),
+  ].join('::');
 
   // -------------------------------------------------------------------------
   // Lifecycle — create / destroy simulation. Runs only when canvas size
@@ -119,7 +139,7 @@ export function useForceSimulation({
           // distance + strength tuned together: stiff springs at moderate
           // distance keep edges visually uniform. Tweaking these is the
           // primary lever for "tighter" vs "looser" layout.
-          .distance(FORCE_LAYOUT_CONFIG.linkDistance)
+          .distance(linkDistanceFn)
           .strength(linkStrengthFn)
           // D3's documented way to make link distance constraints more rigid.
           // This is important for hub-and-spoke floorplan graphs where a
@@ -150,7 +170,10 @@ export function useForceSimulation({
   }, [width, height]);
 
   // -------------------------------------------------------------------------
-  // Sync simulation nodes/edges when their count changes (add/delete).
+  // Sync simulation nodes/edges when graph structure changes or the caller
+  // explicitly asks for a layout reset. Positions are intentionally included
+  // via the passed node objects, but not as dependencies, because D3 mutates
+  // them on every tick.
   // Uses in-place updates so existing node positions are preserved.
   // -------------------------------------------------------------------------
   useEffect(() => {
@@ -167,7 +190,7 @@ export function useForceSimulation({
     degreesRef.current = computeDegrees(nodes, edges);
     if (linkForce) {
       linkForce
-        .distance(FORCE_LAYOUT_CONFIG.linkDistance)
+        .distance(linkDistanceFn)
         .strength(linkStrengthFn)
         .iterations(FORCE_LAYOUT_CONFIG.linkIterations);
     }
@@ -179,7 +202,7 @@ export function useForceSimulation({
     // throwing the rest of the graph around.
     sim.alpha(FORCE_LAYOUT_CONFIG.structuralReheatAlpha).restart();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes.length, edges.length]);
+  }, [structureKey, syncKey]);
 
   // -------------------------------------------------------------------------
   // Keep center force in sync with canvas size (resize, etc.) without

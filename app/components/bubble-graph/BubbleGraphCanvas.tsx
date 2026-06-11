@@ -31,6 +31,9 @@ interface Props {
   onSelectionChange?: (sel: BubbleSelection) => void;
   width?: number;
   height?: number;
+  /** Node ids to render with an outer glow ring (e.g. retrieval matches).
+   *  Pass an array or a Set; falsy means no highlighting. */
+  highlightedNodeIds?: number[] | Set<number> | null;
 }
 
 const DEFAULT_WIDTH = 900;
@@ -51,6 +54,8 @@ type EditAction =
   | { type: 'add-node-and-edge'; attr: number; x: number; y: number; sourceId: number; edgeType: number }
   /** Restore nodes+edges to a snapshot (used by Reset). Undoable. */
   | { type: 'reset-to'; nodes: BubbleNodeState[]; edges: BubbleEdgeState[] }
+  /** Replace editor state because the incoming graph prop changed. Not undoable. */
+  | { type: 'replace-from-prop'; nodes: BubbleNodeState[]; edges: BubbleEdgeState[] }
   | { type: 'undo' }
   | { type: 'redo' }
   | { type: 'tick'; nodes: BubbleNodeState[] };
@@ -74,6 +79,185 @@ function normalizeEdges(edges: BubbleEdgeState[]): BubbleEdgeState[] {
     source: endpointId(edge.source as number | BubbleNodeState),
     target: endpointId(edge.target as number | BubbleNodeState),
   }));
+}
+
+function buildInitialNodes(
+  graph: GeneratedGraph,
+  width: number,
+  height: number,
+): BubbleNodeState[] {
+  const n = graph.nodes.length;
+  if (n === 0) return [];
+
+  const centerX = width / 2;
+  const centerY = height / 2;
+  if (n === 1) {
+    const only = graph.nodes[0];
+    return [{ id: only.id, attr: only.attr, x: centerX, y: centerY, fx: null, fy: null }];
+  }
+
+  const degree = new Map<number, number>();
+  for (const node of graph.nodes) degree.set(node.id, 0);
+  for (const edge of graph.edges) {
+    degree.set(edge.source, (degree.get(edge.source) ?? 0) + 1);
+    degree.set(edge.target, (degree.get(edge.target) ?? 0) + 1);
+  }
+
+  // Generated MSD graphs can have 25-30 rooms. A fixed small circle places
+  // them almost on top of one another, so seed the force layout with a
+  // topology-aware multi-ring layout: hubs near the center, leaves outward.
+  const ordered = [...graph.nodes].sort((a, b) => {
+    const degreeDelta = (degree.get(b.id) ?? 0) - (degree.get(a.id) ?? 0);
+    return degreeDelta !== 0 ? degreeDelta : a.id - b.id;
+  });
+  const positions = new Map<number, { x: number; y: number }>();
+
+  const useCenterHub = n >= 8 && (degree.get(ordered[0].id) ?? 0) >= 3;
+  let cursor = 0;
+  if (useCenterHub) {
+    positions.set(ordered[0].id, { x: centerX, y: centerY });
+    cursor = 1;
+  }
+
+  const desiredSpacing = 92;
+  let ringIndex = 1;
+  while (cursor < ordered.length) {
+    const rawRadius = 92 + (ringIndex - 1) * 112;
+    const rx = Math.min(width * 0.42, rawRadius * 1.25);
+    const ry = Math.min(height * 0.38, rawRadius);
+    const approximateCircumference = 2 * Math.PI * Math.sqrt((rx * rx + ry * ry) / 2);
+    const capacity = Math.max(6, Math.floor(approximateCircumference / desiredSpacing));
+    const remaining = ordered.length - cursor;
+    const count = Math.min(capacity, remaining);
+    const angleOffset = ringIndex % 2 === 0 ? Math.PI / count : 0;
+
+    for (let i = 0; i < count; i += 1) {
+      const angle = angleOffset + (2 * Math.PI * i) / count;
+      const jitter = 1 + ((i % 3) - 1) * 0.035;
+      const node = ordered[cursor + i];
+      positions.set(node.id, {
+        x: centerX + Math.cos(angle) * rx * jitter,
+        y: centerY + Math.sin(angle) * ry * jitter,
+      });
+    }
+    cursor += count;
+    ringIndex += 1;
+  }
+
+  return graph.nodes.map((node) => {
+    const position = positions.get(node.id) ?? { x: centerX, y: centerY };
+    return {
+      id: node.id,
+      attr: node.attr,
+      x: position.x,
+      y: position.y,
+      fx: null,
+      fy: null,
+    };
+  });
+}
+
+function isWallEdge(edge: BubbleEdgeState, edgeTypes: readonly { id: number; name: string }[]): boolean {
+  return edgeTypes.find((type) => type.id === edge.edgeType)?.name.toLowerCase() === 'wall';
+}
+
+function buildLayoutEdges(
+  nodes: BubbleNodeState[],
+  edges: BubbleEdgeState[],
+  edgeTypes: readonly { id: number; name: string }[],
+): BubbleEdgeState[] {
+  if (edges.length <= Math.max(12, nodes.length * 1.4)) return edges;
+
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  const parent = new Map<number, number>();
+  for (const id of nodeIds) parent.set(id, id);
+
+  const find = (id: number): number => {
+    const current = parent.get(id) ?? id;
+    if (current === id) return id;
+    const root = find(current);
+    parent.set(id, root);
+    return root;
+  };
+  const union = (a: number, b: number): boolean => {
+    if (!nodeIds.has(a) || !nodeIds.has(b)) return false;
+    const rootA = find(a);
+    const rootB = find(b);
+    if (rootA === rootB) return false;
+    parent.set(rootB, rootA);
+    return true;
+  };
+
+  const accessEdges: BubbleEdgeState[] = [];
+  const wallEdges: BubbleEdgeState[] = [];
+  for (const edge of edges) {
+    if (isWallEdge(edge, edgeTypes)) wallEdges.push(edge);
+    else accessEdges.push(edge);
+  }
+
+  const selected: BubbleEdgeState[] = [];
+  for (const edge of accessEdges) {
+    selected.push({ ...edge, layoutRole: 'access' });
+    union(endpointId(edge.source as number | BubbleNodeState), endpointId(edge.target as number | BubbleNodeState));
+  }
+
+  // Wall contacts are useful for connectivity but too dense to use as physics
+  // springs. Add only a spanning backbone, then let collision/charge create
+  // readable spacing.
+  for (const edge of wallEdges) {
+    const source = endpointId(edge.source as number | BubbleNodeState);
+    const target = endpointId(edge.target as number | BubbleNodeState);
+    if (union(source, target)) selected.push({ ...edge, layoutRole: 'wall' });
+  }
+
+  return selected.length > 0 ? selected : edges;
+}
+
+function buildNeighborhood(
+  selectedNodeId: number | null,
+  edges: BubbleEdgeState[],
+  maxDepth = 3,
+): {
+  nodeDepth: Map<number, 0 | 1 | 2 | 3>;
+  edgeDepth: Map<string, 1 | 2 | 3>;
+} {
+  const nodeDepth = new Map<number, 0 | 1 | 2 | 3>();
+  const edgeDepth = new Map<string, 1 | 2 | 3>();
+  if (selectedNodeId === null) return { nodeDepth, edgeDepth };
+
+  const adjacency = new Map<number, { neighbor: number; edgeId: string }[]>();
+  for (const edge of edges) {
+    const source = endpointId(edge.source as number | BubbleNodeState);
+    const target = endpointId(edge.target as number | BubbleNodeState);
+    if (!adjacency.has(source)) adjacency.set(source, []);
+    if (!adjacency.has(target)) adjacency.set(target, []);
+    adjacency.get(source)?.push({ neighbor: target, edgeId: edge.id });
+    adjacency.get(target)?.push({ neighbor: source, edgeId: edge.id });
+  }
+
+  nodeDepth.set(selectedNodeId, 0);
+  const queue: number[] = [selectedNodeId];
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (current === undefined) continue;
+    const depth = nodeDepth.get(current);
+    if (depth === undefined || depth >= maxDepth) continue;
+
+    for (const { neighbor, edgeId } of adjacency.get(current) ?? []) {
+      const nextDepth = (depth + 1) as 1 | 2 | 3;
+      const knownDepth = nodeDepth.get(neighbor);
+      if (knownDepth === undefined || nextDepth < knownDepth) {
+        nodeDepth.set(neighbor, nextDepth);
+        queue.push(neighbor);
+      }
+      const knownEdgeDepth = edgeDepth.get(edgeId);
+      if (knownEdgeDepth === undefined || nextDepth < knownEdgeDepth) {
+        edgeDepth.set(edgeId, nextDepth);
+      }
+    }
+  }
+
+  return { nodeDepth, edgeDepth };
 }
 
 function pushPast(state: EditState): EditState {
@@ -119,6 +303,14 @@ function reducer(state: EditState, action: EditAction): EditState {
       edges: normalizeEdges(next.edges),
       past: [...state.past, { nodes: state.nodes, edges: normalizeEdges(state.edges) }].slice(-MAX_UNDO),
       future: state.future.slice(1),
+    };
+  }
+  if (action.type === 'replace-from-prop') {
+    return {
+      nodes: action.nodes.map((n) => ({ ...n })),
+      edges: normalizeEdges(action.edges),
+      past: [],
+      future: [],
     };
   }
   const checkpointed = pushPast(state);
@@ -231,7 +423,15 @@ export function BubbleGraphCanvas({
   onSelectionChange,
   width: widthProp,
   height: heightProp,
+  highlightedNodeIds,
 }: Props) {
+  const highlightSet = useMemo(() => {
+    if (!highlightedNodeIds) return null;
+    return highlightedNodeIds instanceof Set
+      ? highlightedNodeIds
+      : new Set(highlightedNodeIds);
+  }, [highlightedNodeIds]);
+
   const spec = DATASET_SPECS[dataset];
 
   // Editor-internal toolbar state
@@ -258,19 +458,29 @@ export function BubbleGraphCanvas({
   const width = widthProp ?? measured.width;
   const height = heightProp ?? measured.height;
 
-  const initialNodes: BubbleNodeState[] = useMemo(
+  const graphNodeSignature = useMemo(
+    () => graph.nodes.map((node) => `${node.id}:${node.attr}`).join('|'),
+    [graph.nodes],
+  );
+  const graphEdgeSignature = useMemo(
     () =>
-      graph.nodes.map((n, i) => ({
-        id: n.id,
-        attr: n.attr,
-        x: width / 2 + Math.cos((2 * Math.PI * i) / graph.nodes.length) * 100,
-        y: height / 2 + Math.sin((2 * Math.PI * i) / graph.nodes.length) * 100,
-        fx: null,
-        fy: null,
-      })),
+      graph.edges
+        .map((edge) => {
+          const source = Math.min(edge.source, edge.target);
+          const target = Math.max(edge.source, edge.target);
+          return `${source}-${target}:${edge.edge_type}`;
+        })
+        .sort()
+        .join('|'),
+    [graph.edges],
+  );
+  const graphSignature = `${dataset}::${graphNodeSignature}::${graphEdgeSignature}`;
+
+  const initialNodes: BubbleNodeState[] = useMemo(
+    () => buildInitialNodes(graph, width, height),
     // Re-init only when graph identity changes
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [graph.nodes.length, graph.nodes.map((n) => n.id).join(',')],
+    [graphNodeSignature, graphEdgeSignature],
   );
 
   const initialEdges: BubbleEdgeState[] = useMemo(
@@ -282,13 +492,14 @@ export function BubbleGraphCanvas({
         edgeType: e.edge_type,
       })),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [graph.edges.map((e) => `${e.source}-${e.target}-${e.edge_type}`).join(',')],
+    [graphEdgeSignature],
   );
 
   // ---------------------------------------------------------------------------
   // State
   // ---------------------------------------------------------------------------
   const [viewNodes, setViewNodes] = useState<BubbleNodeState[]>(initialNodes);
+  const [forceSyncNonce, setForceSyncNonce] = useState(0);
 
   const [editState, dispatch] = useReducer(reducer, {
     nodes: initialNodes,
@@ -328,9 +539,20 @@ export function BubbleGraphCanvas({
     nodes: initialNodes,
     edges: initialEdges,
   });
+  const graphSignatureRef = useRef(graphSignature);
   useEffect(() => {
     initialSnapshotRef.current = { nodes: initialNodes, edges: initialEdges };
-  }, [initialNodes, initialEdges]);
+    if (graphSignatureRef.current === graphSignature) return;
+    graphSignatureRef.current = graphSignature;
+    dispatch({
+      type: 'replace-from-prop',
+      nodes: initialNodes.map((n) => ({ ...n })),
+      edges: initialEdges.map((e) => ({ ...e })),
+    });
+    setViewNodes(initialNodes.map((n) => ({ ...n })));
+    setSelection({ nodeId: null, edgeId: null });
+    setForceSyncNonce((value) => value + 1);
+  }, [graphSignature, initialNodes, initialEdges]);
 
   // ---------------------------------------------------------------------------
   // Force simulation
@@ -356,13 +578,18 @@ export function BubbleGraphCanvas({
   // array, making newly-added nodes silently disappear.
   const simInputNodes = editing ? editState.nodes : initialNodes;
   const simInputEdges = editing ? editState.edges : initialEdges;
+  const layoutEdges = useMemo(
+    () => buildLayoutEdges(simInputNodes, simInputEdges, spec.edgeTypes),
+    [simInputNodes, simInputEdges, spec.edgeTypes],
+  );
 
   const { pinNode, releaseNode, reheat } = useForceSimulation({
     nodes: simInputNodes,
-    edges: simInputEdges,
+    edges: layoutEdges,
     width,
     height,
     onTick: handleTick,
+    syncKey: forceSyncNonce,
   });
 
   // Dispatch wrapper that also bumps the simulation so the graph
@@ -379,6 +606,21 @@ export function BubbleGraphCanvas({
   // ---------------------------------------------------------------------------
   // onChange emission
   // ---------------------------------------------------------------------------
+  const graphContentSignature = useMemo(() => {
+    const nodePart = editState.nodes
+      .map((node) => `${node.id}:${node.attr}`)
+      .join('|');
+    const edgePart = editState.edges
+      .map((edge) => {
+        const source = endpointId(edge.source as number | BubbleNodeState);
+        const target = endpointId(edge.target as number | BubbleNodeState);
+        return `${Math.min(source, target)}-${Math.max(source, target)}:${edge.edgeType}`;
+      })
+      .sort()
+      .join('|');
+    return `${nodePart}::${edgePart}`;
+  }, [editState.nodes, editState.edges]);
+
   useEffect(() => {
     if (!editing || !onChange) return;
     const next: GeneratedGraph = {
@@ -407,7 +649,7 @@ export function BubbleGraphCanvas({
     };
     onChange(next);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editing, editState.nodes, editState.edges]);
+  }, [editing, graphContentSignature]);
 
   // ---------------------------------------------------------------------------
   // Keyboard handlers
@@ -606,6 +848,15 @@ export function BubbleGraphCanvas({
     selection.nodeId !== null ? nodeIndex.get(selection.nodeId) ?? null : null;
   const selectedEdge =
     selection.edgeId !== null ? edges.find((e) => e.id === selection.edgeId) ?? null : null;
+  const neighborhood = useMemo(
+    () => buildNeighborhood(selection.nodeId, edges, 3),
+    [selection.nodeId, edges],
+  );
+  const hasNodeNeighborhood = selection.nodeId !== null && neighborhood.nodeDepth.size > 0;
+  const layoutEdgeIds = useMemo(
+    () => new Set(layoutEdges.map((edge) => edge.id)),
+    [layoutEdges],
+  );
 
   // Edge midpoint for EdgeActionBar
   const edgeMidpoint = (() => {
@@ -623,6 +874,75 @@ export function BubbleGraphCanvas({
     if (!src || !tgt) return null;
     return { x: (src.x + tgt.x) / 2, y: (src.y + tgt.y) / 2 };
   })();
+
+  const renderEdge = (edge: BubbleEdgeState, layer: 'dimmed' | 'active') => {
+    const sourceId =
+      typeof edge.source === 'object'
+        ? (edge.source as unknown as BubbleNodeState).id
+        : edge.source;
+    const targetId =
+      typeof edge.target === 'object'
+        ? (edge.target as unknown as BubbleNodeState).id
+        : edge.target;
+    const source = nodeIndex.get(sourceId);
+    const target = nodeIndex.get(targetId);
+    if (!source || !target) return null;
+
+    const edgeHopDepth = neighborhood.edgeDepth.get(edge.id) ?? null;
+    const inNeighborhood = edgeHopDepth !== null;
+    const outsideSelectedNeighborhood =
+      hasNodeNeighborhood && !inNeighborhood && selection.edgeId !== edge.id;
+    if (layer === 'dimmed' && !outsideSelectedNeighborhood) return null;
+    if (layer === 'active' && outsideSelectedNeighborhood) return null;
+
+    const meta = spec.edgeTypes.find((m) => m.id === edge.edgeType);
+    const denseGraph = edges.length > Math.max(18, nodes.length * 1.5);
+    const wallEdge = isWallEdge(edge, spec.edgeTypes);
+    const participatesInLayout = layoutEdgeIds.has(edge.id);
+    const muted =
+      layer === 'active' &&
+      denseGraph &&
+      wallEdge &&
+      !participatesInLayout &&
+      !inNeighborhood &&
+      selection.edgeId !== edge.id;
+    const dimmed = layer === 'dimmed';
+    const showLabel = !dimmed && (selection.edgeId === edge.id || inNeighborhood || !muted);
+
+    return (
+      <BubbleEdge
+        key={edge.id}
+        edge={edge}
+        source={source}
+        target={target}
+        meta={meta}
+        selected={selection.edgeId === edge.id}
+        muted={muted}
+        showLabel={showLabel}
+        neighborhoodDepth={edgeHopDepth}
+        dimmed={dimmed}
+        onClick={
+          editing
+            ? (e) => {
+                e.stopPropagation();
+                updateSelection({ nodeId: null, edgeId: edge.id });
+              }
+            : undefined
+        }
+        onContextMenu={
+          editing
+            ? (e) => {
+                e.preventDefault();
+                dispatch({ type: 'delete-edge', id: edge.id });
+                if (selection.edgeId === edge.id) {
+                  updateSelection({ nodeId: null, edgeId: null });
+                }
+              }
+            : undefined
+        }
+      />
+    );
+  };
 
   // ---------------------------------------------------------------------------
   // Render
@@ -658,6 +978,7 @@ export function BubbleGraphCanvas({
               edges: initialSnapshotRef.current.edges.map((e) => ({ ...e })),
             });
             updateSelection({ nodeId: null, edgeId: null });
+            setForceSyncNonce((value) => value + 1);
           }}
         />
       )}
@@ -720,51 +1041,16 @@ export function BubbleGraphCanvas({
         {/* Pan+zoom transform — content positions are in "world" coords,
             this group applies the user's current zoom/pan. */}
         <g transform={`translate(${zoom.x},${zoom.y}) scale(${zoom.k})`}>
-        {/* Edges */}
+        {/* Edges. Non-neighborhood edges are composited as one dim layer so
+            overlapping transparent strokes do not keep getting darker. */}
+        <g
+          opacity={hasNodeNeighborhood ? 0.08 : 1}
+          style={{ transition: 'opacity 220ms ease-out' }}
+        >
+          {edges.map((edge) => renderEdge(edge, 'dimmed'))}
+        </g>
         <g>
-          {edges.map((edge) => {
-            const sourceId =
-              typeof edge.source === 'object'
-                ? (edge.source as unknown as BubbleNodeState).id
-                : edge.source;
-            const targetId =
-              typeof edge.target === 'object'
-                ? (edge.target as unknown as BubbleNodeState).id
-                : edge.target;
-            const source = nodeIndex.get(sourceId);
-            const target = nodeIndex.get(targetId);
-            if (!source || !target) return null;
-            const meta = spec.edgeTypes.find((m) => m.id === edge.edgeType);
-            return (
-              <BubbleEdge
-                key={edge.id}
-                edge={edge}
-                source={source}
-                target={target}
-                meta={meta}
-                selected={selection.edgeId === edge.id}
-                onClick={
-                  editing
-                    ? (e) => {
-                        e.stopPropagation();
-                        updateSelection({ nodeId: null, edgeId: edge.id });
-                      }
-                    : undefined
-                }
-                onContextMenu={
-                  editing
-                    ? (e) => {
-                        e.preventDefault();
-                        dispatch({ type: 'delete-edge', id: edge.id });
-                        if (selection.edgeId === edge.id) {
-                          updateSelection({ nodeId: null, edgeId: null });
-                        }
-                      }
-                    : undefined
-                }
-              />
-            );
-          })}
+          {edges.map((edge) => renderEdge(edge, 'active'))}
         </g>
 
         {/* Rubber-band edge draft line */}
@@ -791,12 +1077,17 @@ export function BubbleGraphCanvas({
           {nodes.map((node) => {
             const meta = spec.roomTypes.find((m) => m.id === node.attr);
             const isHovered = editing && hoveredNodeId === node.id;
+            const nodeHopDepth = neighborhood.nodeDepth.get(node.id) ?? null;
+            const dimmed = hasNodeNeighborhood && nodeHopDepth === null;
             return (
               <g key={node.id}>
                 <BubbleNode
                   node={node}
                   meta={meta}
                   selected={selection.nodeId === node.id}
+                  highlighted={highlightSet ? highlightSet.has(node.id) : false}
+                  neighborhoodDepth={nodeHopDepth}
+                  dimmed={dimmed}
                   onPointerDown={dragNode(node.id)}
                   onPointerEnter={editing ? () => setHoveredNodeId(node.id) : undefined}
                   onPointerLeave={editing ? () => setHoveredNodeId((prev) => prev === node.id ? null : prev) : undefined}

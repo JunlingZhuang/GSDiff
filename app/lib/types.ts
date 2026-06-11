@@ -33,6 +33,25 @@ export interface GraphGenerationResponse {
   edge_types: string[];
 }
 
+export interface RetrievedItem {
+  idx: number;
+  score: number;
+  graph: GeneratedGraph;
+  /** base64 PNG data URI: room polygons (draw_floor_shapes style) */
+  floorplan_image: string;
+  /** base64 PNG data URI: bubble graph at centroid positions with typed edges */
+  bubble_image: string;
+}
+
+export interface RetrieveResponse {
+  mode: string;
+  k: number;
+  retrieval_seconds: number;
+  room_types: string[];
+  edge_types: string[];
+  results: RetrievedItem[];
+}
+
 export type ModelLoadState = 'not_loaded' | 'loading' | 'loaded' | 'error';
 
 export interface ModelStatusItem {

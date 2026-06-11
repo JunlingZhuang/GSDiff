@@ -14,7 +14,11 @@ interface Props {
 const LABEL: Record<GenerationMode, string> = {
   unconstrained: 'Generate Floorplan',
   graph: 'Sample Graph',
+  next_node: 'Suggest Next Node',
+  graph_completion: 'Complete Graph',
   boundary: 'Generate Floorplan',
+  retrieve: 'Retrieve',
+  design: 'Generate Floor Plan',
 };
 
 export function GenerateButton({ mode, loading, onClick, disabled }: Props) {

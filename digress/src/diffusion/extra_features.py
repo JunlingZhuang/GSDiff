@@ -19,7 +19,11 @@ def observed_adjacency_from_noisy_data(noisy_data):
     if mask_idx_E is not None:
         observed = observed & (edge_type != int(mask_idx_E))
 
-    return observed.float().type_as(E_t) * node_mask.unsqueeze(1) * node_mask.unsqueeze(2)
+    return (
+        observed.float().to(device=E_t.device)
+        * node_mask.float().unsqueeze(1)
+        * node_mask.float().unsqueeze(2)
+    )
 
 
 class DummyExtraFeatures:
@@ -274,7 +278,7 @@ class KNodeCycles:
         return None, (c6_t / 12).unsqueeze(-1).float()
 
     def k_cycles(self, adj_matrix, verbose=False):
-        self.adj_matrix = adj_matrix
+        self.adj_matrix = adj_matrix.float()
         self.calculate_kpowers()
 
         k3x, k3y = self.k3_cycle()

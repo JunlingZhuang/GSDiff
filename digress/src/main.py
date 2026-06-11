@@ -102,7 +102,7 @@ def main(cfg: DictConfig):
         dataset_infos.compute_input_output_dims(datamodule=datamodule, extra_features=extra_features,
                                                 domain_features=domain_features)
         if is_absorbing_transition(cfg):
-            prepare_absorbing_dataset_infos(dataset_infos)
+            prepare_absorbing_dataset_infos(dataset_infos, cfg)
 
         model_kwargs = {'dataset_infos': dataset_infos, 'train_metrics': train_metrics,
                         'sampling_metrics': sampling_metrics, 'visualization_tools': visualization_tools,
@@ -127,7 +127,7 @@ def main(cfg: DictConfig):
         dataset_infos.compute_input_output_dims(datamodule=datamodule, extra_features=extra_features,
                                                 domain_features=domain_features)
         if is_absorbing_transition(cfg):
-            prepare_absorbing_dataset_infos(dataset_infos)
+            prepare_absorbing_dataset_infos(dataset_infos, cfg)
 
         model_kwargs = {'dataset_infos': dataset_infos, 'train_metrics': train_metrics,
                         'sampling_metrics': sampling_metrics, 'visualization_tools': visualization_tools,
@@ -159,7 +159,7 @@ def main(cfg: DictConfig):
         dataset_infos.compute_input_output_dims(datamodule=datamodule, extra_features=extra_features,
                                                 domain_features=domain_features)
         if is_absorbing_transition(cfg):
-            prepare_absorbing_dataset_infos(dataset_infos)
+            prepare_absorbing_dataset_infos(dataset_infos, cfg)
 
         model_kwargs = {'dataset_infos': dataset_infos, 'train_metrics': train_metrics,
                         'sampling_metrics': sampling_metrics, 'visualization_tools': visualization_tools,
@@ -201,7 +201,7 @@ def main(cfg: DictConfig):
         dataset_infos.compute_input_output_dims(datamodule=datamodule, extra_features=extra_features,
                                                 domain_features=domain_features)
         if is_absorbing_transition(cfg):
-            prepare_absorbing_dataset_infos(dataset_infos)
+            prepare_absorbing_dataset_infos(dataset_infos, cfg)
 
         if cfg.model.type == 'discrete':
             train_metrics = TrainMolecularMetricsDiscrete(dataset_infos)
