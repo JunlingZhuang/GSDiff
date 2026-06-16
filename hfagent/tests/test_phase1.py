@@ -9,7 +9,7 @@ from hfagent.api import app, get_client
 from hfagent.graph import run_pipeline
 from hfagent.tests.mock_vlm import MockVLM
 from hfagent.tests.synth import simple_clinic
-from hfagent.tools.understand import build_understand_prompt, sanitize_program, understand
+from hfagent.understand import build_understand_prompt, sanitize_program, understand
 
 PROGRAM = {
     "building_type": "community clinic",

@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 
 from hfagent.llm import GeminiClient
 from hfagent.pipeline import generate_plan, load_config
-from hfagent.tools.understand import understand
+from hfagent.understand import understand
 
 OUT_ROOT = Path(__file__).parent / "out" / "api"
 _counter = itertools.count(1)
