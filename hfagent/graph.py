@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from hfagent.pipeline import generate_plan, load_config
-from hfagent.understand import understand
+from hfagent.nodes.understand import understand
 
 
 def run_pipeline(text: str, client, out_dir: str | Path) -> dict:
