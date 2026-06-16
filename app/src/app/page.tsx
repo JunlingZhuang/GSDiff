@@ -385,10 +385,15 @@ export default function Home() {
                 Draw or select a bubble graph (left), pick a boundary and axis, then <span className="font-medium text-foreground">Generate Plan</span> in the workspace toolbar. The plan is editable: drag walls, change room types, add or move doors.
               </div>
             )}
+            {activeMode === 'agent' && (
+              <div className="rounded-xl border border-border/70 bg-background p-3 text-xs text-muted-foreground">
+                Describe the building in natural language in the workspace; the agent plans the program, generates imagery, parses it into a wall graph and repairs counts deterministically. The result is fully editable in 2D with a synced 3D view. Requires the hfagent backend on port 8100.
+              </div>
+            )}
           </div>
 
-          {/* Design mode owns its own Generate button inside the workspace. */}
-          {activeMode !== 'retrieve' && activeMode !== 'design' && (
+          {/* Design/agent modes own their Generate button inside the workspace. */}
+          {activeMode !== 'retrieve' && activeMode !== 'design' && activeMode !== 'agent' && (
             <div className="border-t border-border/60 p-4">
               <GenerateButton
                 mode={activeMode}

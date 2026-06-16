@@ -4,15 +4,10 @@ import { useMemo } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { OrbitControls } from '@react-three/drei';
 import * as THREE from 'three';
-import type { RoomType } from '@/lib/plan';
+import { roomColor } from '@/lib/plan';
 import { type WallGraph, wallSolid, roomPoly, graphBounds } from './kernel';
 
 const WALL_H = 2.8; // metres
-const ROOM_COLORS: Record<RoomType, string> = {
-  Livingroom: '#aec7e8', Bedroom: '#1f77b4', Kitchen: '#ff7f0e',
-  Dining: '#ffbb78', Corridor: '#2ca02c', Stairs: '#98df8a',
-  Storeroom: '#d62728', Bathroom: '#ff9896', Balcony: '#9467bd',
-};
 
 interface Props {
   graph: WallGraph;
@@ -38,7 +33,7 @@ export function FloorPlanView3D({ graph }: Props) {
     const floors = graph.rooms.map((r) => {
       const poly = roomPoly(graph, r);
       const shape = new THREE.Shape(poly.map(([x, y]) => new THREE.Vector2(x, y)));
-      return { id: r.id, geom: new THREE.ShapeGeometry(shape), color: ROOM_COLORS[r.type] ?? '#cccccc' };
+      return { id: r.id, geom: new THREE.ShapeGeometry(shape), color: roomColor(r.type) };
     });
 
     const b = graphBounds(graph);

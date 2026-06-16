@@ -234,6 +234,64 @@ export function setRoomType(g: WallGraph, roomId: string, type: RoomType): WallG
   return { ...g, rooms: g.rooms.map((r) => (r.id === roomId ? { ...r, type } : r)) };
 }
 
+export function wallLength(g: WallGraph, w: WallSeg): number {
+  const { a, b } = wallEnds(g, w);
+  return dist(a, b);
+}
+
+// shoelace -> absolute area in plan units²
+export function roomArea(g: WallGraph, room: RoomFace): number {
+  const pts = roomPoly(g, room);
+  let s = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const [x0, y0] = pts[i];
+    const [x1, y1] = pts[(i + 1) % pts.length];
+    s += x0 * y1 - x1 * y0;
+  }
+  return Math.abs(s) / 2;
+}
+
+// Split a wall at parameter t: a new node joins the two halves, every room
+// loop referencing the wall gains the node, and openings re-home onto the
+// half they fall in.
+export function splitWall(g: WallGraph, wallId: string, t = 0.5): WallGraph {
+  const w = g.walls.find((x) => x.id === wallId);
+  if (!w) return g;
+  const { a, b } = wallEnds(g, w);
+  const p = lerp(a, b, clamp01(t));
+  const nid = `n${Date.now().toString(36)}${Math.floor(Math.random() * 1e3)}`;
+  const nodes = { ...g.nodes, [nid]: { id: nid, x: p[0], y: p[1] } };
+
+  const wa: WallSeg = { id: `${w.id}a`, n0: w.n0, n1: nid, thickness: w.thickness };
+  const wb: WallSeg = { id: `${w.id}b`, n0: nid, n1: w.n1, thickness: w.thickness };
+  const walls = g.walls.flatMap((x) => (x.id === wallId ? [wa, wb] : [x]));
+
+  const rooms = g.rooms.map((r) => {
+    const loop: string[] = [];
+    for (let i = 0; i < r.loop.length; i++) {
+      const cur = r.loop[i];
+      const nxt = r.loop[(i + 1) % r.loop.length];
+      loop.push(cur);
+      if ((cur === w.n0 && nxt === w.n1) || (cur === w.n1 && nxt === w.n0)) loop.push(nid);
+    }
+    return loop.length === r.loop.length ? r : { ...r, loop };
+  });
+
+  const openings = g.openings.map((o) => {
+    if (o.wallId !== wallId) return o;
+    return o.t <= t
+      ? { ...o, wallId: wa.id, t: clamp01(o.t / Math.max(t, 1e-9)) }
+      : { ...o, wallId: wb.id, t: clamp01((o.t - t) / Math.max(1 - t, 1e-9)) };
+  });
+
+  return { ...g, nodes, walls, rooms, openings };
+}
+
+export function setOpeningWidth(g: WallGraph, id: string, width: number): WallGraph {
+  const w = Math.max(0.3, Math.min(3, width));
+  return { ...g, openings: g.openings.map((o) => (o.id === id ? { ...o, width: w } : o)) };
+}
+
 export function addOpening(g: WallGraph, wallId: string, t: number, kind: OpeningKind): WallGraph {
   const id = `o${Date.now().toString(36)}${Math.floor(Math.random() * 1e3)}`;
   return { ...g, openings: [...g.openings, { id, wallId, t: clamp01(t), width: widthFor(kind), kind }] };

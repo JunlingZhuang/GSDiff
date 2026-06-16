@@ -103,6 +103,21 @@ export async function generateTopology(
   return res.json();
 }
 
+// Healthcare agent backend (hfagent) — separate FastAPI on its own port.
+const AGENT_API_BASE = process.env.NEXT_PUBLIC_AGENT_API_URL || 'http://localhost:8100';
+
+export async function generateAgentPlan(text: string): Promise<import('@/components/floorplan/agent-plan').AgentGenerateResult> {
+  const res = await fetch(`${AGENT_API_BASE}/api/agent/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text }),
+    // understand + image generation + correction rounds can take a while
+    signal: AbortSignal.timeout(300000),
+  });
+  if (!res.ok) throw await readError(res, 'Agent generation failed');
+  return res.json();
+}
+
 export async function generateBoundary(boundaryImage: string): Promise<{ image: string }> {
   const res = await fetch(`${API_BASE}/api/generate/boundary`, {
     method: 'POST',

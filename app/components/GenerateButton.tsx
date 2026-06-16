@@ -19,6 +19,7 @@ const LABEL: Record<GenerationMode, string> = {
   boundary: 'Generate Floorplan',
   retrieve: 'Retrieve',
   design: 'Generate Floor Plan',
+  agent: 'Generate Plan',
 };
 
 export function GenerateButton({ mode, loading, onClick, disabled }: Props) {

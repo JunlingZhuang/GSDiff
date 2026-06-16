@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { select } from 'd3-selection';
 import { zoom, zoomIdentity, type ZoomBehavior } from 'd3-zoom';
-import type { Pt, RoomType, OpeningKind, AxisGrid } from '@/lib/plan';
+import { roomColor, ROOM_TYPE_OPTIONS, type Pt, type RoomType, type OpeningKind, type AxisGrid } from '@/lib/plan';
 import { polyPath } from './walls';
 import {
   type WallGraph,
@@ -12,25 +12,20 @@ import {
   wallSolid,
   multiPolyPath,
   graphBounds,
-  nodeXY,
-  moveNode,
   dragWallSeg,
-  snapXY,
   setRoomType,
   addOpening,
   moveOpening,
   deleteOpening,
   setOpeningKind,
+  setOpeningWidth,
+  splitWall,
+  wallLength,
+  roomArea,
   paramOnWall,
   perpDrag,
 } from './kernel';
 
-const ROOM_COLORS: Record<RoomType, string> = {
-  Livingroom: '#aec7e8', Bedroom: '#1f77b4', Kitchen: '#ff7f0e',
-  Dining: '#ffbb78', Corridor: '#2ca02c', Stairs: '#98df8a',
-  Storeroom: '#d62728', Bathroom: '#ff9896', Balcony: '#9467bd',
-};
-const ROOM_TYPES = Object.keys(ROOM_COLORS) as RoomType[];
 const DEFAULT_GRID: AxisGrid = { originX: 0, originY: 0, spacingX: 1, spacingY: 1, angleDeg: 0 };
 
 export type EditorTool = 'select' | 'door' | 'passage' | 'boundary';
@@ -43,12 +38,13 @@ interface Props {
   gridSnap?: boolean;
   tool?: EditorTool;
   fitSignature?: number;
+  /** show length labels on every wall (selected wall is always dimensioned) */
+  showDims?: boolean;
 }
 
 type Selection = { type: 'room' | 'wall' | 'opening'; id: string } | null;
 type DragState =
   | { kind: 'wall'; id: string; start: Pt; orig: WallGraph }
-  | { kind: 'node'; id: string; orig: WallGraph }
   | { kind: 'opening'; id: string; wallId: string; orig: WallGraph }
   | { kind: 'bvertex'; idx: number; orig: Pt[] }
   | null;
@@ -61,6 +57,7 @@ export function FloorPlanEditor2D({
   gridSnap = false,
   tool = 'select',
   fitSignature = 0,
+  showDims = false,
 }: Props) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
@@ -169,20 +166,6 @@ export function FloorPlanEditor2D({
     [editable, graph, toWorld],
   );
 
-  const beginNode = useCallback(
-    (e: React.PointerEvent, nodeId: string) => {
-      e.stopPropagation();
-      if (!editable || !graph) return;
-      dragRef.current = { kind: 'node', id: nodeId, orig: graph };
-      try {
-        svgRef.current?.setPointerCapture(e.pointerId);
-      } catch {
-        /* synthetic / already-captured pointer */
-      }
-    },
-    [editable, graph],
-  );
-
   const clickWallForOpening = useCallback(
     (e: React.PointerEvent, wallId: string) => {
       e.stopPropagation();
@@ -251,9 +234,6 @@ export function FloorPlanEditor2D({
       const p = toWorld(e.clientX, e.clientY);
       if (d.kind === 'wall') {
         onChange?.(dragWallSeg(d.orig, d.id, perpDrag(d.orig, d.id, d.start, p), gridSnap));
-      } else if (d.kind === 'node') {
-        const xy = gridSnap ? snapXY(p[0], p[1], d.orig.grid) : [p[0], p[1]];
-        onChange?.(moveNode(d.orig, d.id, xy[0], xy[1]));
       } else if (d.kind === 'opening') {
         onChange?.(moveOpening(d.orig, d.id, paramOnWall(d.orig, d.wallId, p)));
       } else if (d.kind === 'bvertex') {
@@ -347,7 +327,7 @@ export function FloorPlanEditor2D({
                   key={r.id}
                   data-interactive
                   d={polyPath(roomPoly(graph, r))}
-                  fill={ROOM_COLORS[r.type] ?? '#cccccc'}
+                  fill={roomColor(r.type)}
                   fillOpacity={selected ? 0.68 : 0.38}
                   stroke={selected ? '#0f172a' : 'none'}
                   strokeWidth={selected ? 1.5 * sw : 0}
@@ -419,26 +399,43 @@ export function FloorPlanEditor2D({
                 );
               })}
 
-            {/* selected wall node handles */}
-            {selWall &&
-              tool === 'select' &&
-              [selWall.n0, selWall.n1].map((nid) => {
-                const p = nodeXY(graph!, nid);
-                return (
-                  <circle
-                    key={`nh${nid}`}
-                    data-interactive
-                    cx={p[0]}
-                    cy={p[1]}
-                    r={5 * sw}
-                    fill="#ffffff"
-                    stroke="#2563eb"
-                    strokeWidth={2 * sw}
-                    style={{ pointerEvents: 'all', cursor: 'grab' }}
-                    onPointerDown={(e) => beginNode(e, nid)}
-                  />
-                );
-              })}
+            {/* selected wall move gizmo: double-headed arrow along the wall
+                normal. Junction nodes are intentionally NOT draggable — walls
+                move as rigid collinear chains, which keeps the plan orthogonal. */}
+            {selWall && tool === 'select' && graph && (() => {
+              const { a, b } = wallEnds(graph, selWall);
+              const len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+              const ux = (b[0] - a[0]) / len;
+              const uy = (b[1] - a[1]) / len;
+              const nx = -uy;
+              const ny = ux;
+              const mx = (a[0] + b[0]) / 2;
+              const my = (a[1] + b[1]) / 2;
+              const L = 26 * sw;
+              const head = 8 * sw;
+              const cursor = Math.abs(nx) > Math.abs(ny) ? 'ew-resize' : 'ns-resize';
+              const tri = (dir: 1 | -1) => {
+                const tx = mx + nx * dir * L;
+                const ty = my + ny * dir * L;
+                const bx = tx - nx * dir * head;
+                const by = ty - ny * dir * head;
+                return `${tx},${ty} ${bx + ux * head * 0.55},${by + uy * head * 0.55} ${bx - ux * head * 0.55},${by - uy * head * 0.55}`;
+              };
+              return (
+                <g
+                  data-interactive
+                  style={{ pointerEvents: 'all', cursor }}
+                  onPointerDown={(e) => beginWall(e, selWall.id)}
+                >
+                  {/* fat invisible hit area */}
+                  <line x1={mx - nx * L} y1={my - ny * L} x2={mx + nx * L} y2={my + ny * L} stroke="#000" strokeOpacity={0} strokeWidth={16 * sw} />
+                  <line x1={mx - nx * (L - head)} y1={my - ny * (L - head)} x2={mx + nx * (L - head)} y2={my + ny * (L - head)} stroke="#2563eb" strokeWidth={2 * sw} />
+                  <polygon points={tri(1)} fill="#2563eb" />
+                  <polygon points={tri(-1)} fill="#2563eb" />
+                  <circle cx={mx} cy={my} r={4 * sw} fill="#ffffff" stroke="#2563eb" strokeWidth={2 * sw} />
+                </g>
+              );
+            })()}
 
             {/* opening drag handles */}
             {tool !== 'boundary' &&
@@ -491,15 +488,43 @@ export function FloorPlanEditor2D({
                 );
               })}
 
-            {/* labels */}
+            {/* labels: room type + area */}
             {graph?.rooms.map((r) => {
               const poly = roomPoly(graph, r);
               const cx = poly.reduce((s, p) => s + p[0], 0) / poly.length;
               const cy = poly.reduce((s, p) => s + p[1], 0) / poly.length;
+              const area = roomArea(graph, r);
               return (
-                <text key={`t${r.id}`} x={cx} y={cy} fontSize={0.4} textAnchor="middle" fill="#0f172a" style={{ pointerEvents: 'none', userSelect: 'none' }} transform={`scale(1,-1) translate(0, ${-2 * cy})`}>
-                  {r.type}
-                </text>
+                <g key={`t${r.id}`} style={{ pointerEvents: 'none', userSelect: 'none' }} transform={`scale(1,-1) translate(0, ${-2 * cy})`}>
+                  <text x={cx} y={cy - 0.12} fontSize={0.4} textAnchor="middle" fill="#0f172a">
+                    {r.type}
+                  </text>
+                  <text x={cx} y={cy + 0.38} fontSize={0.3} textAnchor="middle" fill="#475569">
+                    {area.toFixed(1)} m²
+                  </text>
+                </g>
+              );
+            })}
+
+            {/* wall dimension labels: every wall when showDims, else the selection */}
+            {graph?.walls.map((w) => {
+              const selected = sel?.type === 'wall' && sel.id === w.id;
+              if (!showDims && !selected) return null;
+              const len = wallLength(graph, w);
+              if (!selected && len < 0.6) return null; // skip clutter on stubs
+              const { a, b } = wallEnds(graph, w);
+              const mx = (a[0] + b[0]) / 2;
+              const my = (a[1] + b[1]) / 2;
+              const nx = -(b[1] - a[1]) / (len || 1);
+              const ny = (b[0] - a[0]) / (len || 1);
+              const lx = mx + nx * 0.35;
+              const ly = my + ny * 0.35;
+              return (
+                <g key={`dim${w.id}`} style={{ pointerEvents: 'none', userSelect: 'none' }} transform={`scale(1,-1) translate(0, ${-2 * ly})`}>
+                  <text x={lx} y={ly} fontSize={0.32} textAnchor="middle" fill={selected ? '#2563eb' : '#64748b'} fontWeight={selected ? 600 : 400}>
+                    {len.toFixed(2)} m
+                  </text>
+                </g>
               );
             })}
           </g>
@@ -518,11 +543,12 @@ export function FloorPlanEditor2D({
                 <label className="block text-muted-foreground">
                   Type
                   <select className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1 text-foreground" value={room.type} onChange={(e) => onChange?.(setRoomType(graph, room.id, e.target.value as RoomType))}>
-                    {ROOM_TYPES.map((rt) => (
+                    {ROOM_TYPE_OPTIONS.map((rt) => (
                       <option key={rt} value={rt}>{rt}</option>
                     ))}
                   </select>
                 </label>
+                <p className="text-muted-foreground">Area: {roomArea(graph, room).toFixed(1)} m²</p>
               </div>
             );
           })()}
@@ -540,15 +566,34 @@ export function FloorPlanEditor2D({
                     <option value="window">window</option>
                   </select>
                 </label>
+                <label className="block text-muted-foreground">
+                  Width: {op.width.toFixed(2)} m
+                  <input
+                    type="range"
+                    min={0.3}
+                    max={3}
+                    step={0.05}
+                    value={op.width}
+                    className="mt-1 w-full accent-blue-600"
+                    onChange={(e) => onChange?.(setOpeningWidth(graph, op.id, Number(e.target.value)))}
+                  />
+                </label>
                 <button className="w-full rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1 text-destructive transition-colors hover:bg-destructive/20" onClick={() => { onChange?.(deleteOpening(graph, op.id)); setSel(null); }}>
                   Delete opening
                 </button>
               </div>
             );
           })()}
-          {sel.type === 'wall' && (
-            <div className="space-y-1">
+          {sel.type === 'wall' && selWall && (
+            <div className="space-y-2">
               <p className="font-semibold text-foreground">Wall</p>
+              <p className="text-muted-foreground">Length: {wallLength(graph, selWall).toFixed(2)} m</p>
+              <button
+                className="w-full rounded-md border border-border bg-background px-2 py-1 text-foreground transition-colors hover:bg-accent"
+                onClick={() => onChange?.(splitWall(graph, selWall.id, 0.5))}
+              >
+                Split wall at midpoint
+              </button>
               <p className="text-muted-foreground">Drag the wall to move it, or drag a blue node to move the corner.</p>
             </div>
           )}

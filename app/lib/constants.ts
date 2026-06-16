@@ -160,6 +160,12 @@ export const GENERATION_MODES = [
     description: 'Build an editable vector floor plan from a bubble graph (procedural)',
     icon: 'PencilRuler',
   },
+  {
+    id: 'agent' as const,
+    name: 'Agent',
+    description: 'Describe a building in natural language; an agent generates an editable plan',
+    icon: 'Bot',
+  },
 ] as const;
 
 export type GenerationMode = (typeof GENERATION_MODES)[number]['id'];

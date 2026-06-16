@@ -5,6 +5,7 @@ import { BubbleGraphCanvas } from '@/components/bubble-graph/BubbleGraphCanvas';
 import { BoundaryCanvas } from '@/components/BoundaryCanvas';
 import { RetrievePanel } from '@/components/RetrievePanel';
 import { DesignWorkspace } from '@/components/floorplan/DesignWorkspace';
+import { AgentWorkspace } from '@/components/floorplan/AgentWorkspace';
 import type { DatasetId, GenerationMode } from '@/lib/constants';
 import type { HistoryItem } from '@/lib/history';
 import type { GeneratedGraph } from '@/lib/types';
@@ -69,6 +70,12 @@ export function MainViewer({
   // transient until the user explicitly saves one.
   if (mode === 'retrieve') {
     return <RetrievePanel />;
+  }
+
+  // Agent mode: self-contained workspace — natural-language brief in, editable
+  // CAD plan out (hfagent backend, port 8100). Owns its own generate flow.
+  if (mode === 'agent') {
+    return <AgentWorkspace />;
   }
 
   // Design mode: unified CAD workspace — editable bubble graph (left, seeded
