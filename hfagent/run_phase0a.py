@@ -25,7 +25,7 @@ import json
 from pathlib import Path
 
 from hfagent.llm import GeminiClient
-from hfagent.pipeline import generate_plan, load_config
+from hfagent.generate import generate_plan, load_config
 
 DEFAULT_PROGRAMS = Path(__file__).parent / "programs.json"
 

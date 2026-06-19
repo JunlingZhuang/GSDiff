@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hfagent.pipeline import generate_plan, load_config
+from hfagent.generate import generate_plan, load_config
 from hfagent.nodes.understand import understand
 
 

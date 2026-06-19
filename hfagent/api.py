@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from hfagent.llm import GeminiClient
-from hfagent.pipeline import generate_plan, load_config
+from hfagent.generate import generate_plan, load_config
 from hfagent.nodes.understand import understand
 
 OUT_ROOT = Path(__file__).parent / "out" / "api"

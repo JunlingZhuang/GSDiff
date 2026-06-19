@@ -10,7 +10,7 @@ No API calls — deterministic. Disciplines under test (docs/agent §5.3):
 """
 import copy
 
-from hfagent.pipeline import generate_plan
+from hfagent.generate import generate_plan
 from hfagent.schema.plan import Plan
 from hfagent.tests.mock_vlm import MockVLM
 from hfagent.tests.synth import simple_clinic
