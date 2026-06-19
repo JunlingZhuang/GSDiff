@@ -2,10 +2,10 @@
 """CLI harness for evaluating the generation pipeline against test programs.
 
 Usage (from repo root, hfagent venv active):
-    python -m hfagent.run_phase0a                       # all programs in programs.json
-    python -m hfagent.run_phase0a --n 1                 # quick smoke run (first program)
-    python -m hfagent.run_phase0a --only ward-wing      # named subset (comma-separated)
-    python -m hfagent.run_phase0a --programs my.json    # alternative program file
+    python -m hfagent.evaluate                       # all programs in programs.json
+    python -m hfagent.evaluate --n 1                 # quick smoke run (first program)
+    python -m hfagent.evaluate --only ward-wing      # named subset (comma-separated)
+    python -m hfagent.evaluate --programs my.json    # alternative program file
 
 Test inputs live in hfagent/programs.json. Room types must exist in
 schema/palette.py; each room entry supports an optional "approx_area_m2" hint.

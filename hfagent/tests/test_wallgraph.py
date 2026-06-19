@@ -4,7 +4,7 @@ lossless polygon round-trip."""
 from shapely.geometry import Polygon
 
 from hfagent.tests.synth import simple_clinic, ward_wing
-from hfagent.tools.build_wallgraph import plan_to_wallgraph, wallgraph_to_plan
+from hfagent.tools.wallgraph import plan_to_wallgraph, wallgraph_to_plan
 
 
 def test_coincident_corners_become_shared_nodes():

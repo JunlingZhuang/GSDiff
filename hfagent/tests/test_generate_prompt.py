@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from hfagent.schema.palette import ROOM_RGB, rgb_hex
-from hfagent.tools.generator import build_real_prompt, build_convert_prompt, FloorPlanGenerator
+from hfagent.tools.floor_plan_generator import build_real_prompt, build_convert_prompt, FloorPlanGenerator
 
 PROGRAM = {
     "building_type": "community clinic",

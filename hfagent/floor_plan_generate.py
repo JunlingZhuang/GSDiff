@@ -12,9 +12,9 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from hfagent.tools.build_wallgraph import plan_to_wallgraph
-from hfagent.tools.cv_parse import cv_parse
-from hfagent.tools.generator import FloorPlanGenerator
+from hfagent.tools.wallgraph import plan_to_wallgraph
+from hfagent.tools.image_parser import cv_parse
+from hfagent.tools.floor_plan_generator import FloorPlanGenerator
 from hfagent.tools.plan_fixes import fix_room_counts
 from hfagent.tools.render_plan import render_plan
 

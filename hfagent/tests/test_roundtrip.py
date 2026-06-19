@@ -9,7 +9,7 @@ import pytest
 
 from hfagent.metrics import compare_plans
 from hfagent.tests.synth import ALL
-from hfagent.tools.cv_parse import cv_parse
+from hfagent.tools.image_parser import cv_parse
 from hfagent.tools.render_plan import render_plan
 
 PX_PER_MM = 0.05
