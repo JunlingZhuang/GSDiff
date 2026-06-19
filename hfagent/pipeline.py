@@ -14,7 +14,7 @@ from pathlib import Path
 
 from hfagent.tools.build_wallgraph import plan_to_wallgraph
 from hfagent.tools.cv_parse import cv_parse
-from hfagent.tools.generate_colorblock import build_convert_prompt, generate_colorblock
+from hfagent.tools.generator import generate_colorblock, real_plan_to_colorblock
 from hfagent.tools.plan_fixes import fix_room_counts
 from hfagent.tools.render_plan import render_plan
 
@@ -97,7 +97,7 @@ def generate_plan(
             )
             real_png = client.generate_image([real_png, violation_feedback])
             png_path.with_suffix(".real.png").write_bytes(real_png)
-            png_path.write_bytes(client.generate_image([real_png, build_convert_prompt(program)]))
+            png_path.write_bytes(real_plan_to_colorblock(real_png, program, client))
 
         # ── parse + verify ───────────────────────────────────────────────────
         colorblock_png = png_path.read_bytes()
