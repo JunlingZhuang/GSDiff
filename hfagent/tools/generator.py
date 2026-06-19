@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
-"""Tool ①: structured program -> colour-block PNG via two Gemini calls.
+"""Tool ①: structured program -> colour-block PNG via the real2color pipeline.
 
 Public API:
-    text_to_real_plan(program, client) -> bytes
-    real_plan_to_colorblock(real_png, program, client) -> bytes
-    generate_colorblock(program, client, out_path, generation_mode) -> Path
+    FloorPlanGenerator(program, client)
+        .generate_real_plan() -> bytes       pass 1: text -> realistic plan
+        .to_colorblock(real_png) -> bytes    pass 2: realistic plan -> colour-block
+        .run(out_path) -> Path               both passes + write files to disk
 
-generation_mode="real2color" pipeline:
-    text_to_real_plan      — text prompt -> realistic architectural floor plan (PNG bytes)
-    real_plan_to_colorblock — realistic plan image -> flat colour-block diagram (PNG bytes)
-    generate_colorblock    — orchestrates both calls, writes *.real.png + out_path to disk
+Prompt builders are module-level so tests can verify their content independently:
+    build_real_prompt(program) -> str
+    build_convert_prompt(program) -> str
 """
 from __future__ import annotations
 
@@ -71,42 +71,42 @@ def build_convert_prompt(program: dict) -> str:
     )
 
 
-# ── generation steps ─────────────────────────────────────────────────────────
+# ── generator class ───────────────────────────────────────────────────────────
 
-def text_to_real_plan(program: dict, client) -> bytes:
-    """Pass 1 — text prompt → realistic architectural floor plan (PNG bytes)."""
-    return client.generate_image(build_real_prompt(program))
+class FloorPlanGenerator:
+    """Generates a colour-block floor plan PNG from a structured room program.
 
-
-def real_plan_to_colorblock(real_png: bytes, program: dict, client) -> bytes:
-    """Pass 2 — realistic plan image → flat colour-block diagram (PNG bytes)."""
-    return client.generate_image([real_png, build_convert_prompt(program)])
-
-
-# ── file-writing orchestrator ─────────────────────────────────────────────────
-
-def generate_colorblock(
-    program: dict,
-    client,
-    out_path: str | Path,
-    generation_mode: str = "real2color",
-) -> Path:
-    """Run the full real2color pipeline and write outputs to disk.
-
-    Writes:
-        out_path          — colour-block PNG (parser input)
-        out_path.real.png — realistic intermediate (correction-loop input)
+    Holds program + client so they don't need to be threaded through every call.
+    The correction loop in pipeline.py calls to_colorblock() directly with an
+    already-corrected real_png, bypassing generate_real_plan().
     """
-    if generation_mode != "real2color":
-        raise ValueError(f"Unknown generation_mode '{generation_mode}' — use 'real2color'")
 
-    out = Path(out_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, program: dict, client):
+        self.program = program
+        self.client = client
 
-    real_png = text_to_real_plan(program, client)
-    out.with_suffix(".real.png").write_bytes(real_png)
+    def generate_real_plan(self) -> bytes:
+        """Pass 1 — text prompt -> realistic architectural floor plan (PNG bytes)."""
+        return self.client.generate_image(build_real_prompt(self.program))
 
-    colorblock = real_plan_to_colorblock(real_png, program, client)
-    out.write_bytes(colorblock)
+    def to_colorblock(self, real_png: bytes) -> bytes:
+        """Pass 2 — realistic plan image -> flat colour-block diagram (PNG bytes)."""
+        return self.client.generate_image([real_png, build_convert_prompt(self.program)])
 
-    return out
+    def run(self, out_path: str | Path) -> Path:
+        """Run both passes and write outputs to disk.
+
+        Writes:
+            out_path           — colour-block PNG (parser input)
+            out_path.real.png  — realistic intermediate (correction-loop input)
+        """
+        out = Path(out_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+
+        real_png = self.generate_real_plan()
+        out.with_suffix(".real.png").write_bytes(real_png)
+
+        colorblock = self.to_colorblock(real_png)
+        out.write_bytes(colorblock)
+
+        return out

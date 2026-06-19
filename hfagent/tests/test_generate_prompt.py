@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from hfagent.schema.palette import ROOM_RGB, rgb_hex
-from hfagent.tools.generator import build_real_prompt, build_convert_prompt, generate_colorblock
+from hfagent.tools.generator import build_real_prompt, build_convert_prompt, FloorPlanGenerator
 
 PROGRAM = {
     "building_type": "community clinic",
@@ -37,7 +37,8 @@ class FakeClient:
 
 def test_real2color_makes_two_calls_and_writes_both_files(tmp_path: Path):
     client = FakeClient()
-    out = generate_colorblock(PROGRAM, client, tmp_path / "plan.png", generation_mode="real2color")
+    generator = FloorPlanGenerator(PROGRAM, client)
+    out = generator.run(tmp_path / "plan.png")
     # call 1: realistic prompt (string); call 2: [realistic image bytes, convert prompt]
     assert len(client.calls) == 2
     assert isinstance(client.calls[0], str) and "realistic" in client.calls[0].lower()

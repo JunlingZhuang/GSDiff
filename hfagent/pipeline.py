@@ -2,7 +2,7 @@
 """Core generation pipeline: program -> generate -> parse -> verify -> fix -> wallgraph.
 
 This is the heart of the agent: one function that takes a structured program and
-a client, runs the correction loop, repairs counts deterministically, and returns
+a client, runs the VLM correction loop, repairs counts deterministically, and returns
 (report, plan_dict, wallgraph_dict).
 """
 from __future__ import annotations
@@ -14,7 +14,7 @@ from pathlib import Path
 
 from hfagent.tools.build_wallgraph import plan_to_wallgraph
 from hfagent.tools.cv_parse import cv_parse
-from hfagent.tools.generator import generate_colorblock, real_plan_to_colorblock
+from hfagent.tools.generator import FloorPlanGenerator
 from hfagent.tools.plan_fixes import fix_room_counts
 from hfagent.tools.render_plan import render_plan
 
@@ -34,22 +34,23 @@ def load_config(path: Path = DEFAULT_CONFIG) -> dict:
 
 @dataclass
 class _BestRound:
-    n_violations: int
-    index: int
+    violation_count: int
+    round_num: int
     plan: object
     png_path: Path
 
 
-def _count_mismatches(requested: dict, parsed_counts: Counter) -> list[str]:
-    out = []
-    for room_type, wanted in requested.items():
-        got = parsed_counts.get(room_type, 0)
-        if got != wanted:
-            out.append(f"{room_type}: drew {got} block(s), required exactly {wanted}")
-    for room_type, got in parsed_counts.items():
-        if room_type not in requested:
-            out.append(f"{room_type}: drew {got} block(s), but this room type was NOT requested")
-    return out
+def _count_violations(required_rooms: dict, actual_counts: Counter) -> list[str]:
+    """Compare parsed room counts against the program; return human-readable mismatches."""
+    violations = []
+    for room_type, required in required_rooms.items():
+        actual = actual_counts.get(room_type, 0)
+        if actual != required:
+            violations.append(f"{room_type}: drew {actual} block(s), required exactly {required}")
+    for room_type, actual in actual_counts.items():
+        if room_type not in required_rooms:
+            violations.append(f"{room_type}: drew {actual} block(s), but this room type was NOT requested")
+    return violations
 
 
 def generate_plan(
@@ -70,13 +71,13 @@ def generate_plan(
     """
     work_dir = out_dir / name
     work_dir.mkdir(parents=True, exist_ok=True)
-    requested = {r["type"]: r.get("count", 1) for r in program["rooms"]}
+    required_rooms = {r["type"]: r.get("count", 1) for r in program["rooms"]}
 
+    generator = FloorPlanGenerator(program, client)
     rounds: list[dict] = []
-    best: _BestRound | None = None
-    real_png: bytes | None = None   # realistic intermediate kept for correction feedback
-    colorblock_png: bytes | None = None
-    stall = 0
+    best_round: _BestRound | None = None
+    real_png: bytes | None = None
+    stall_count = 0
     stopped_early = False
 
     for round_num in range(1, max_rounds + 1):
@@ -84,67 +85,65 @@ def generate_plan(
 
         # ── generate colour-block image ──────────────────────────────────────
         if round_num == 1:
-            generate_colorblock(program, client, png_path, generation_mode=generation_mode)
+            generator.run(png_path)
             real_png = png_path.with_suffix(".real.png").read_bytes()
         else:
-            # send feedback against the realistic plan (where layout decisions live),
-            # then re-convert to colour blocks for parsing
+            # apply violation feedback to the realistic plan, then re-convert to colour blocks
             violation_feedback = (
                 "The architectural floor plan above violates its room program:\n- "
-                + "\n- ".join(rounds[-1]["mismatches"])
+                + "\n- ".join(rounds[-1]["violations"])
                 + "\nEdit the plan to fix ONLY these violations (add missing rooms, merge or "
                 "remove extra ones). Keep the same drawing style, footprint and circulation."
             )
             real_png = client.generate_image([real_png, violation_feedback])
             png_path.with_suffix(".real.png").write_bytes(real_png)
-            png_path.write_bytes(real_plan_to_colorblock(real_png, program, client))
+            png_path.write_bytes(generator.to_colorblock(real_png))
 
         # ── parse + verify ───────────────────────────────────────────────────
-        colorblock_png = png_path.read_bytes()
-        plan = cv_parse(str(png_path))
-        parsed_counts = Counter(r.type for r in plan.rooms)
-        violations = _count_mismatches(requested, parsed_counts)
-        rounds.append({"round": round_num, "parsed_rooms": dict(parsed_counts), "mismatches": violations})
+        parsed_plan = cv_parse(str(png_path))
+        actual_counts = Counter(r.type for r in parsed_plan.rooms)
+        violations = _count_violations(required_rooms, actual_counts)
+        rounds.append({"round": round_num, "actual_rooms": dict(actual_counts), "violations": violations})
 
-        if best is None or len(violations) < best.n_violations:
-            best = _BestRound(len(violations), round_num, plan, png_path)
+        if best_round is None or len(violations) < best_round.violation_count:
+            best_round = _BestRound(len(violations), round_num, parsed_plan, png_path)
 
         if not violations:
             break  # exact match — no point running more rounds
 
         # stop early if violations haven't strictly improved for 2 consecutive rounds
-        if len(rounds) >= 2 and len(violations) >= len(rounds[-2]["mismatches"]):
-            stall += 1
-            if stall >= 2:
+        if len(rounds) >= 2 and len(violations) >= len(rounds[-2]["violations"]):
+            stall_count += 1
+            if stall_count >= 2:
                 stopped_early = True
                 break
         else:
-            stall = 0
+            stall_count = 0
 
-    assert best is not None
-    (work_dir / "parsed.json").write_text(best.plan.model_dump_json(indent=2), encoding="utf-8")
+    assert best_round is not None
+    (work_dir / "parsed.json").write_text(best_round.plan.model_dump_json(indent=2), encoding="utf-8")
 
-    fixed_plan, fix = fix_room_counts(best.plan, requested)
+    fixed_plan, count_fix = fix_room_counts(best_round.plan, required_rooms)
     (work_dir / "fixed.json").write_text(fixed_plan.model_dump_json(indent=2), encoding="utf-8")
     render_plan(fixed_plan, px_per_mm=1.0).save(work_dir / "recon.png")
 
     wallgraph = plan_to_wallgraph(fixed_plan)
     (work_dir / "wallgraph.json").write_text(wallgraph.model_dump_json(indent=2), encoding="utf-8")
 
-    vlm_exact = not rounds[best.index - 1]["mismatches"]
+    vlm_converged = not rounds[best_round.round_num - 1]["violations"]
     report = {
         "program": name,
         "image_model": client.image_model,
         "generation_mode": generation_mode,
-        "requested_rooms": requested,
+        "required_rooms": required_rooms,
         "rounds": rounds,
-        "best_round": best.index,
-        "best_image": best.png_path.name,
-        "parsed_rooms": rounds[best.index - 1]["parsed_rooms"],
-        "room_count_exact": vlm_exact,
-        "converged_in": best.index if vlm_exact else None,
-        "count_fix": fix,
-        "final_count_exact": vlm_exact or fix["fixed"],
+        "best_round": best_round.round_num,
+        "best_image": best_round.png_path.name,
+        "actual_rooms": rounds[best_round.round_num - 1]["actual_rooms"],
+        "room_count_exact": vlm_converged,
+        "converged_in": best_round.round_num if vlm_converged else None,
+        "count_fix": count_fix,
+        "final_count_exact": vlm_converged or count_fix["fixed"],
         "stopped_early": stopped_early,
         "wallgraph": {
             "nodes": len(wallgraph.nodes),
