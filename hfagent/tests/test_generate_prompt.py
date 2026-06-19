@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from hfagent.schema.palette import ROOM_RGB, rgb_hex
-from hfagent.tools.generate_colorblock import build_prompt, generate_colorblock
+from hfagent.tools.generate_colorblock import build_real_prompt, build_convert_prompt, generate_colorblock
 
 PROGRAM = {
     "building_type": "community clinic",
@@ -12,13 +12,18 @@ PROGRAM = {
 }
 
 
-def test_prompt_contains_exact_hex_legend():
-    p = build_prompt(PROGRAM)
+def test_real_prompt_contains_room_types():
+    p = build_real_prompt(PROGRAM)
+    assert "exam room" in p
+    assert "waiting" in p
+    assert "community clinic" in p
+
+
+def test_convert_prompt_contains_hex_legend():
+    p = build_convert_prompt(PROGRAM)
     assert rgb_hex(ROOM_RGB["exam_room"]) in p
     assert rgb_hex(ROOM_RGB["waiting"]) in p
-    assert "3 room(s)" in p
-    assert "exam_room must share a wall with corridor" in p
-    assert "no text" in p.lower()
+    assert "Preserve every room" in p
 
 
 class FakeClient:
@@ -30,22 +35,15 @@ class FakeClient:
         return b"\x89PNG fake " + str(len(self.calls)).encode()
 
 
-def test_generate_writes_file(tmp_path: Path):
+def test_real2color_makes_two_calls_and_writes_both_files(tmp_path: Path):
     client = FakeClient()
-    out = generate_colorblock(PROGRAM, client, tmp_path / "x" / "plan.png")
-    assert out.read_bytes() == b"\x89PNG fake 1"
-    assert "community clinic" in client.calls[0]
-
-
-def test_two_pass_pipeline(tmp_path: Path):
-    client = FakeClient()
-    out = generate_colorblock(PROGRAM, client, tmp_path / "plan.png", pipeline="two-pass")
-    # call 1: realistic prompt (text); call 2: [realistic image bytes, convert prompt]
+    out = generate_colorblock(PROGRAM, client, tmp_path / "plan.png", generation_mode="real2color")
+    # call 1: realistic prompt (string); call 2: [realistic image bytes, convert prompt]
     assert len(client.calls) == 2
-    assert "realistic" in client.calls[0]
+    assert isinstance(client.calls[0], str) and "realistic" in client.calls[0].lower()
     assert isinstance(client.calls[1], list)
-    assert client.calls[1][0] == b"\x89PNG fake 1"
+    assert client.calls[1][0] == b"\x89PNG fake 1"   # realistic bytes forwarded
     assert "Preserve every room" in client.calls[1][1]
-    # final colour-block is pass-2 output; realistic intermediate saved alongside
+    # colour-block output is pass-2; realistic intermediate saved alongside
     assert out.read_bytes() == b"\x89PNG fake 2"
-    assert (tmp_path / "plan.realistic.png").read_bytes() == b"\x89PNG fake 1"
+    assert (tmp_path / "plan.real.png").read_bytes() == b"\x89PNG fake 1"

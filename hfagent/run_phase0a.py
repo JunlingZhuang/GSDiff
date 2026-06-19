@@ -50,12 +50,13 @@ def main() -> None:
     ap.add_argument("--n", type=int, default=None, help="run only the first N programs")
     ap.add_argument("--only", default=None, help="comma-separated program names")
     ap.add_argument("--programs", default=DEFAULT_PROGRAMS, help="path to programs JSON")
-    ap.add_argument("--pipeline", default=None, help="override config.json pipeline (direct | two-pass)")
+    ap.add_argument("--generation-mode", default=None, dest="generation_mode",
+                    help="override config.json generation_mode (real2color)")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
     cfg = load_config()
-    pipeline = args.pipeline or cfg["pipeline"]
+    generation_mode = args.generation_mode or cfg["generation_mode"]
     programs = load_programs(Path(args.programs))
 
     if args.only:
@@ -66,9 +67,9 @@ def main() -> None:
         programs = {n: programs[n] for n in names}
 
     client = GeminiClient()
-    print(f"text model:  {client.text_model}")
-    print(f"image model: {client.image_model}")
-    print(f"pipeline:    {pipeline} (max {cfg['max_correction_rounds']} correction rounds)")
+    print(f"text model:       {client.text_model}")
+    print(f"image model:      {client.image_model}")
+    print(f"generation mode:  {generation_mode} (max {cfg['max_correction_rounds']} correction rounds)")
 
     out_dir = Path(args.out) if args.out else Path(__file__).parent / "out" / "phase0a"
     reports = []
@@ -78,7 +79,7 @@ def main() -> None:
             report, _, _ = generate_plan(
                 program, client, out_dir, name=name,
                 max_rounds=cfg["max_correction_rounds"],
-                pipeline=program.get("pipeline", pipeline),
+                generation_mode=generation_mode,
             )
         except Exception as e:
             report = {"program": name, "error": str(e)}

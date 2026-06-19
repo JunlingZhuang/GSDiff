@@ -1,7 +1,6 @@
 {
-  "pipeline": "two-pass",
-  "pipeline_options": ["direct", "two-pass"],
-  "_pipeline_doc": "direct = program -> colour-block image (original flow). two-pass = program -> realistic floor plan image -> convert to colour-block (image-space chain-of-thought; better layout prior, conversion fidelity is the risk).",
+  "generation_mode": "real2color",
+  "_generation_mode_doc": "real2color = realistic architectural plan -> convert to colour-block (image-space chain-of-thought).",
   "max_correction_rounds": 3,
   "_max_correction_rounds_doc": "hard cap on verifier-driven correction rounds per program; on cap, the least-violating round is kept"
 }

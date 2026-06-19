@@ -56,7 +56,7 @@ def generate(req: GenerateRequest, client: GeminiClient = Depends(get_client)) -
         report, plan, wallgraph = generate_plan(
             program, client, session,
             max_rounds=_cfg["max_correction_rounds"],
-            pipeline=_cfg["pipeline"],
+            generation_mode=_cfg["generation_mode"],
         )
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
