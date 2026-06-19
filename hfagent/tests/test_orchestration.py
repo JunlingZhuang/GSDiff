@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """Validate the correction-loop orchestration against a scripted mock VLM.
-No API calls — deterministic. Disciplines under test (docs/agent §5.3):
+No API calls — deterministic. Disciplines under test:
 
   1. converge when the model improves on feedback
-  2. quantified feedback is actually sent
-  3. violations not strictly decreasing -> stop early, don't burn rounds
-  4. always keep the best (least-violating) round
-  5. deterministic plan_fixes still repairs what the loop could not
+  2. violation feedback is actually sent to the VLM
+  3. always keep the best (least-violating) round
+  4. deterministic plan_fixes repairs what the VLM loop could not
+  5. perfect first round skips all remaining rounds
 """
 import copy
 
@@ -40,32 +40,32 @@ def worse() -> Plan:
     return p
 
 
+def test_perfect_first_round_skips_remaining(tmp_path):
+    client = MockVLM([GOOD])
+    r, _, _ = generate_plan(PROGRAM, client, tmp_path, name="perfect", max_rounds=3)
+    assert r["converged_in"] == 1
+    assert len(r["rounds"]) == 1   # second round never ran
+    assert client.calls == 2       # 2 image calls per round (real2color)
+
+
 def test_converges_when_model_improves(tmp_path):
     client = MockVLM([bad_missing_exam(), GOOD])
     r, _, _ = generate_plan(PROGRAM, client, tmp_path, name="conv", max_rounds=3)
     assert r["converged_in"] == 2
-    assert not r["stopped_early"]
     assert any("exam_room" in f for f in client.feedbacks)
 
 
-def test_perfect_first_round(tmp_path):
-    client = MockVLM([GOOD])
-    r, _, _ = generate_plan(PROGRAM, client, tmp_path, name="perfect", max_rounds=3)
-    assert r["converged_in"] == 1 and client.calls == 1
-
-
-def test_oscillation_stops_early_and_keeps_best(tmp_path):
-    client = MockVLM([bad_missing_exam(), worse(), worse(), worse(), worse()])
-    r, _, _ = generate_plan(PROGRAM, client, tmp_path, name="osc", max_rounds=5)
-    assert r["stopped_early"], r
-    assert len(r["rounds"]) == 3
+def test_keeps_best_round_when_model_regresses(tmp_path):
+    # round 1: 1 violation (best), rounds 2-3: 2 violations (worse)
+    client = MockVLM([bad_missing_exam(), worse(), worse()])
+    r, _, _ = generate_plan(PROGRAM, client, tmp_path, name="regress", max_rounds=3)
     assert r["best_round"] == 1
     assert not r["room_count_exact"]
 
 
-def test_deterministic_fix_repairs_what_loop_could_not(tmp_path):
+def test_deterministic_fix_repairs_what_vlm_could_not(tmp_path):
     client = MockVLM([bad_missing_exam(), worse(), worse(), worse()])
     r, _, _ = generate_plan(PROGRAM, client, tmp_path, name="fix", max_rounds=4)
     assert not r["room_count_exact"]
-    assert r["count_fix"]["fixed"], r["count_fix"]
+    assert r["count_fix"]["fixed"]
     assert r["final_count_exact"]

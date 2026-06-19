@@ -21,7 +21,6 @@ def run_pipeline(text: str, client, out_dir: str | Path) -> dict:
     report, plan, wallgraph = generate_plan(
         program, client, out_dir,
         max_rounds=cfg["max_correction_rounds"],
-        max_stall_rounds=cfg["max_stall_rounds"],
         generation_mode=cfg["generation_mode"],
     )
     return {"program": program, "report": report, "plan": plan, "wallgraph": wallgraph}

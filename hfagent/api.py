@@ -56,7 +56,6 @@ def generate(req: GenerateRequest, client: GeminiClient = Depends(get_client)) -
         report, plan, wallgraph = generate_plan(
             program, client, session,
             max_rounds=_cfg["max_correction_rounds"],
-            max_stall_rounds=_cfg["max_stall_rounds"],
             generation_mode=_cfg["generation_mode"],
         )
     except ValueError as e:

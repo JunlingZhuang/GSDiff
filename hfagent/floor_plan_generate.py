@@ -29,7 +29,6 @@ def load_config(path: Path = DEFAULT_CONFIG) -> dict:
     return {
         "generation_mode": mode,
         "max_correction_rounds": int(cfg.get("max_correction_rounds", 3)),
-        "max_stall_rounds": int(cfg.get("max_stall_rounds", 2)),
     }
 
 
@@ -60,7 +59,6 @@ def generate_plan(
     out_dir: Path,
     name: str = "plan",
     max_rounds: int = 3,
-    max_stall_rounds: int = 2,
     generation_mode: str = "real2color",
 ) -> tuple[dict, dict, dict]:
     """Generate, parse, and repair a floor plan from a structured program.
@@ -79,8 +77,6 @@ def generate_plan(
     rounds: list[dict] = []
     best_round: _BestRound | None = None
     real_png: bytes | None = None
-    stall_count = 0
-    stopped_early = False
 
     for round_num in range(1, max_rounds + 1):
         png_path = work_dir / f"gemini_r{round_num}.png"
@@ -111,16 +107,7 @@ def generate_plan(
             best_round = _BestRound(len(violations), round_num, parsed_plan, png_path)
 
         if not violations:
-            break  # exact match — no point running more rounds
-
-        # stop early if violations haven't strictly improved for max_stall_rounds consecutive rounds
-        if len(rounds) >= 2 and len(violations) >= len(rounds[-2]["violations"]):
-            stall_count += 1
-            if stall_count >= max_stall_rounds:
-                stopped_early = True
-                break
-        else:
-            stall_count = 0
+            break  # all room counts match — skip remaining rounds
 
     assert best_round is not None
     (work_dir / "parsed.json").write_text(best_round.plan.model_dump_json(indent=2), encoding="utf-8")
@@ -146,7 +133,6 @@ def generate_plan(
         "converged_in": best_round.round_num if vlm_converged else None,
         "count_fix": count_fix,
         "final_count_exact": vlm_converged or count_fix["fixed"],
-        "stopped_early": stopped_early,
         "wallgraph": {
             "nodes": len(wallgraph.nodes),
             "walls": len(wallgraph.walls),

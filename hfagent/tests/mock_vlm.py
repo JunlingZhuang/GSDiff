@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Scripted mock VLM for Phase 0-B orchestration validation.
+"""Scripted mock VLM for orchestration tests.
 
-Plays a predetermined sequence of Plans: round 1 returns plans[0] rendered as a
-colour-block PNG, each correction round returns the next plan in the script.
-This isolates the ORCHESTRATION (correction loop, best-round, early-stop) from
-real VLM noise — exactly the mock-isolation called for by docs/agent §7.3.
+Each round of the real2color pipeline makes exactly 2 generate_image calls:
+  call 1 — realistic plan prompt
+  call 2 — convert to colour-block
+
+MockVLM returns the nth script plan for both calls in round n, advancing to
+the next plan every 2 calls. This isolates orchestration logic from real VLM noise.
 """
 from __future__ import annotations
 
@@ -24,11 +26,15 @@ class MockVLM:
         self.feedbacks: list[str] = []
 
     def generate_image(self, contents) -> bytes:
-        if isinstance(contents, list):  # correction round: [image bytes, feedback]
-            self.feedbacks.append(next(c for c in contents if isinstance(c, str)))
-        plan = self.script[min(self.calls, len(self.script) - 1)]
+        if isinstance(contents, list):
+            feedback_str = next((c for c in contents if isinstance(c, str)), None)
+            if feedback_str:
+                self.feedbacks.append(feedback_str)
+
+        round_idx = self.calls // 2  # 2 calls per round in real2color mode
+        plan = self.script[min(round_idx, len(self.script) - 1)]
         self.calls += 1
-        img = render_plan(plan, px_per_mm=0.05)
+
         buf = io.BytesIO()
-        img.save(buf, "PNG")
+        render_plan(plan, px_per_mm=0.05).save(buf, "PNG")
         return buf.getvalue()
