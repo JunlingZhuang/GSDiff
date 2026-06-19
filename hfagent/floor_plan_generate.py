@@ -29,6 +29,7 @@ def load_config(path: Path = DEFAULT_CONFIG) -> dict:
     return {
         "generation_mode": mode,
         "max_correction_rounds": int(cfg.get("max_correction_rounds", 3)),
+        "max_stall_rounds": int(cfg.get("max_stall_rounds", 2)),
     }
 
 
@@ -59,6 +60,7 @@ def generate_plan(
     out_dir: Path,
     name: str = "plan",
     max_rounds: int = 3,
+    max_stall_rounds: int = 2,
     generation_mode: str = "real2color",
 ) -> tuple[dict, dict, dict]:
     """Generate, parse, and repair a floor plan from a structured program.
@@ -111,10 +113,10 @@ def generate_plan(
         if not violations:
             break  # exact match — no point running more rounds
 
-        # stop early if violations haven't strictly improved for 2 consecutive rounds
+        # stop early if violations haven't strictly improved for max_stall_rounds consecutive rounds
         if len(rounds) >= 2 and len(violations) >= len(rounds[-2]["violations"]):
             stall_count += 1
-            if stall_count >= 2:
+            if stall_count >= max_stall_rounds:
                 stopped_early = True
                 break
         else:

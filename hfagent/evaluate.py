@@ -79,6 +79,7 @@ def main() -> None:
             report, _, _ = generate_plan(
                 program, client, out_dir, name=name,
                 max_rounds=cfg["max_correction_rounds"],
+                max_stall_rounds=cfg["max_stall_rounds"],
                 generation_mode=generation_mode,
             )
         except Exception as e:

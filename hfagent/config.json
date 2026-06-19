@@ -2,5 +2,7 @@
   "generation_mode": "real2color",
   "_generation_mode_doc": "real2color = realistic architectural plan -> convert to colour-block (image-space chain-of-thought).",
   "max_correction_rounds": 3,
-  "_max_correction_rounds_doc": "hard cap on verifier-driven correction rounds per program; on cap, the least-violating round is kept"
+  "_max_correction_rounds_doc": "hard cap on VLM correction rounds; on cap the least-violating round is kept",
+  "max_stall_rounds": 2,
+  "_max_stall_rounds_doc": "stop early if violations do not strictly decrease for this many consecutive rounds"
 }
