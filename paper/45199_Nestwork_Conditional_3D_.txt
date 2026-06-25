@@ -1,0 +1,979 @@
+
+---PAGE 1---
+Nestwork: Conditional 3D Furnished House Layout Generation through Latent
+Heterogeneous Graph Diffusion
+Anonymous CVPR submission
+Abstract
+This paper introduces Nestwork, a unified latent-diffusion 001
+framework for conditional 3D furnished house layout gen- 002
+eration using a heterogeneous graph of rooms and furni- 003
+ture. Designing reasonable and controllable 3D layouts 004
+that reflect the underlying semantic structure of a house is 005
+a key challenge in AI-assisted architectural design. Exist- 006
+ing graph-based methods either produce unfurnished multi- 007
+room layouts or generate furnished scenes one room at a 008
+time, preventing joint reasoning over room structure and 009
+furniture placement. Nestwork represents an entire house 010
+as a heterogeneous graph with typed room and furniture 011
+nodes and multiple spatial relations. A single unconditional 012
+autoencoder based on a heterogeneous graph attention net- 013
+work embeds this graph into a compact latent space, and 014
+a low-rank relational field compensates for missing geo- 015
+metric edge information at test time. A diffusion denoiser 016
+is trained once using random masking, enabling the same 017
+model to operate under different conditioning strengths, 018
+from topology-only to fully annotated graphs. Multi-level 019
+conditioning combines masked node-level attention with 020
+graph-level embeddings to support flexible user control, in- 021
+cluding layouts specified through natural-language descrip- 022
+tions. Experiments on the 3D-FRONT dataset show that 023
+Nestwork achieves high fidelity, structural consistency, and 024
+diversity. Controlled ablations further validate the contri- 025
+butions of each component.026
+1. Introduction027
+Generating fully furnished 3D house layouts is a founda- 028
+tional task in architectural design, mixed reality, and vir- 029
+tual environment synthesis. Professional applications re- 030
+quire solutions that capture both theglobal structureof 031
+room adjacencies, and thelocal precisionof furniture place- 032
+ment and geometry. Scene graphs offer a natural and inter- 033
+pretable interface for controlling layout generation: users 034
+can insert, delete, or mask nodes and edges to constrain 035the structure while deferring geometric inference to the036
+model. However, existing methods divide the task by037
+spatial scale. House-level models generate unfurnished038
+layouts using room graphs alone [14, 16, 26, 33], while039
+room-level models generate furniture arrangements in iso-040
+lation [1, 6, 48, 49]. Multi-stage systems that combine both041
+suffer from error accumulation and spatial inconsistencies042
+due to recursive and disjoint pipelines.043
+Merging rooms and furniture into asinglegraph intro-044
+duces two key challenges. First, the semantic and geomet-045
+ric disparity between rooms and furniture requires feature-046
+aware modeling: rooms encode high-level spatial logic such047
+as adjacency and containment, while furniture carries fine-048
+grained geometric attributes and diverse categories. Ho-049
+mogeneous GNNs [32], which share parameters across all050
+nodes, often fail to capture this structural heterogeneity051
+and result in oversmoothing. In contrast, Heterogeneous052
+GNNs (HGNNs) [40] preserve type-specific message pass-053
+ing and are more appropriate for multi-scale scene synthe-054
+sis. Second, the generator must support diverse condition-055
+ing modes, from unlabeled topologies to fully annotated056
+graphs without requiring retraining or hierarchical schedul-057
+ing. While diffusion models [13] have shown strong poten-058
+tial for improving fidelity in scene-graph-conditioned 3D059
+synthesis [22, 48, 49], most existing denoising backbones060
+are built on 1D U-Nets [31] or Transformers [37] treat061
+nodes independently and lack explicit structural inductive062
+bias. Although recent work [1, 49] incorporates graph-level063
+message passing during denoising, it still relies on homoge-064
+neous representations. In general, the use of graph-aware,065
+type-sensitive diffusion backbones remains underexplored066
+in 3D layout generation.067
+Nestworkaddresses these limitations with a unified gen-068
+erative framework that operates directly on aheterogeneous069
+house graphcapturing rooms, furniture, and typed spa-070
+tial relations. A single unconditional autoencoder com-071
+presses the entire house graph into a latent representation,072
+where a heterogeneous graph attention backbone preserves073
+type-specific structure and a low-rank relational field pro-074
+vides relational context without requiring geometric edge075
+1REDACTED
+REDACTED
+
+---PAGE 2---
+Figure 1. Flexible graph conditioning and natural-language inter-
+face
+inputs at test time. A latent diffusion model is trained 076
+once using a random masking strategy, allowing the same 077
+denoiser to operate seamlessly across diverse conditioning 078
+strengths—from topology-only to fully annotated semantic 079
+graphs. Multi-level conditioning integrates masked node- 080
+level cross-attention and graph-level embeddings, support- 081
+ing flexible user control including room adjacency, house 082
+bounding boxes, and natural-language descriptions. The fi- 083
+nal denoised latents are decoded in a single pass into a co- 084
+herent, fully furnished 3D house layout.085
+We summarize our contributions as follows.(1)We in- 086
+troduceHG-FRONT, the first heterogeneous house-scale 087
+graph dataset unifying rooms, furniture, and typed spa- 088
+tial relations in a single representation.(2)We propose 089
+aunified unconditional autoencoderbased on a hetero- 090
+geneous graph attention backbone, with a low-rank rela- 091
+tional field that compensates for missing geometric rela- 092
+tion information at test time.(3)We develop asingle la- 093
+tent diffusion modeltrained with random masking, en- 094
+abling flexible conditioning without retraining—from full 095
+semantic graphs to room-only, sparse, or topology-only in- 096
+puts.(4)We introducemulti-level conditioningthrough 097
+masked node-level cross-attention and graph-level embed- 098
+dings (e.g., house bounding boxes and text prompts), en- 099
+abling flexible user control and a natural-language inter- 100
+face that maps free-form descriptions into masked semantic 101
+graphs forcontrollable3D layout synthesis.102
+2. Related works103
+2.1. Graph-constrained Layout Generation104
+Scene graphs have long served as structured representations 105
+for image retrieval and manipulation [18, 24, 43] and now 106
+underpin architectural layout generation across house and 107
+room scales. At thehouselevel, models such as House- 108
+GAN [26], Graph2Plan [14], HouseDiffusion [33], and GS- 109
+Diff [16] map room-relation or structural graphs to 2D floor 110plans under geometric constraints (e.g., wall alignment,111
+boundary adherence) but omit explicit 3D furniture layouts.112
+At theroomlevel, methods capture fine-grained object rela-113
+tions via semantic or hierarchical graphs: GRAINS [20] and114
+SceneHGN [10] use recursive graph V AEs, while Graph-115
+to-3D [6] trains a conditional graph V AE to complete116
+3D arrangements from user-specified graphs. Recent ap-117
+proaches [1, 5, 22, 29, 39, 48, 49] introduce autoregressive118
+or diffusion priors to boost fidelity.119
+Furnished house-scale generation has recently emerged:120
+CHOrD [35] generates collision-free 3D layouts from text121
+or floor-plan inputs using diffusion and retrieval, but re-122
+mains globally conditioned without explicit room–furniture123
+graphs or masked-graph control. LLM-based agents [7, 9,124
+46] also synthesize layouts from text via reasoning and re-125
+trieval, using graphs only as transient reasoning aids rather126
+than learned conditioning. To our knowledge, no prior work127
+unifies rooms and furniture within a heterogeneous graph to128
+enablesingle-pass3D generation with flexible, multi-level129
+conditioning as proposed in our framework.130
+2.2. Heterogeneous graphs131
+Heterogeneous graphs (HGs) offer a principled framework132
+for representing complex relational structures with multiple133
+node and edge types. They have been widely adopted in134
+domains such as bibliographic networks, where they dif-135
+ferentiate between relations likeAuthor–Publishes–Paper136
+andPaper–Cites–Paper. In graph mining, Heterogeneous137
+Graph Neural Networks (HGNNs) exploit this typed struc-138
+ture using mechanisms such as meta-paths and type-aware139
+attention to capture semantic and topological signals for140
+tasks including node classification and link prediction [17,141
+27, 40]. In computer vision, HGs have been used for 2D142
+scene graph generation to model distinct entity categories143
+such as humans, animals, and objects, as demonstrated in144
+HetSGG [47]. These approaches demonstrate the utility of145
+HGs for fine-grained relational reasoning across semanti-146
+cally diverse elements.147
+2.3. Diffusion Models148
+Diffusion models [13] synthesize data by reversing a noise149
+process, while latent diffusion [31] improves efficiency by150
+denoising in a compressed feature space. For 3D scenes,151
+non-graph methods diffuse (i) over voxelized or gridded152
+fields—denoising feature or occupancy grids with U-Net153
+backbones [3, 19, 30, 45]—or (ii) over unordered object154
+sets by denoising per-object attributes such as size, posi-155
+tion, and category [15, 36]. To capture structural priors,156
+graph-conditioned diffusion models have emerged: Com-157
+monScenes [48], EchoScene [49], InstructScene [22] and158
+FreeScene [1] integrate graph encoders with node-wise or159
+graph-conditioned denoising to jointly model layout and160
+shape. However, these frameworks rely on homogeneous161
+2REDACTED
+
+---PAGE 3---
+Figure 2. Overview of our proposed pipeline, which encodes a heterogeneous house graph into a latent space via autoencoding, performs
+masked-graph-conditioned denoising through latent diffusion, and decodes the output into a complete 3D layout.
+GNNs and operate at the object level, limiting type-specific 162
+relational reasoning. Beyond architecture, graph diffusion 163
+has been explored for molecules, relational reasoning, and 164
+recommendation [42, 44, 51]; recent work such as Diff- 165
+Graph [21] introduces heterogeneous denoising. Yet latent 166
+diffusion on heterogeneous graphs remains underexplored 167
+in 3D house synthesis, where joint reasoning over rooms 168
+and furniture within a structured, type-aware graph is cru- 169
+cial.170
+3. Methods171
+Nestwork performs diffusion directly in the latent space of 172
+a heterogeneous house graph (§3.1), enabling joint reason- 173
+ing over room adjacencies and furniture placement in a sin- 174
+gle pass. At the core of our representation is a Heteroge- 175
+neous Graph Attention Network (HetGAT) (§3.2), which 176
+performs type-specific message passing over the three node 177
+types and five relation types present in house-scale scenes. 178
+A single unified autoencoder (§3.3) uses this HetGAT back- 179
+bone to encode each node into a compact latent. Its un- 180
+conditional decoder incorporates a low-rank relational field 181
+(LRF) to reconstruct edge embeddings from node latents, 182
+compensating for the absence of geometric edge features 183
+at test time. On this latent graph, we train one HetGAT- 184
+based diffusion denoiser (§3.4) under a 50% random mask- 185
+ing scheme, allowing a single model to operate under varied 186
+conditioning inputs. The denoiser supports multi-level con- 187
+ditioning: (i) node-level masked semantic conditioning via 188
+cross-attention, and (ii) graph-level conditioning through 189
+the house bounding box and optional text embeddings 190
+(§3.5). Optional post-processing aligns room boundaries 191
+and inserts architectural details for visualization (§3.6).192
+3.1. Problem Definition193
+We represent a furnished 3D house as aheterogeneous 194
+graphG=⟨V, E, T V, TE, XV, XE⟩,where nodesV= 195VH∪VR∪VFdenote the virtual house, rooms, and fur-196
+niture, and typed edgesE⊆V×Vencode their spatial197
+relations. Each node and edge has featuresX V∈R|V|×d v198
+andX E∈R|E|×d e.TVandT Edenote the sets of node and199
+edge types, which are used for type-specific message pass-200
+ing. The virtual house node aggregates global context and201
+stores the overall house bounding box.202
+Node Attributes.Each nodeu∈Vhas featurex u=203
+[c;b;o;s],wherecis the category,b∈R6encodes box204
+location and size,ois a discretized orientation class, ands205
+is a latent shape code. For furniture,sis a DeepSDF la-206
+tent [6, 28, 48]; for rooms,sis a learnable embedding con-207
+ditioned on both category and bounding box. All bound-208
+ing boxes are defined in local coordinates—rooms rela-209
+tive to the house root and furniture relative to their parent210
+room—so hierarchical containment is enforced by construc-211
+tion.212
+Edge Taxonomy.Edges capture five relation types:213
+E=E F↔F∪EF↔R∪Eadj
+R↔R∪Efar
+R↔R∪ER↔H.214
+Furniture nodes form a cliqueE F↔F , allowing users to215
+specify only furniture categories and counts per room, while216
+the model infers intra-room spatial relations automatically.217
+Room–room edges are labeled asadjacentorfarby a218
+distance threshold to capture coarse circulation patterns.219
+Ground-truth edge attributes inX E(relative distances, size220
+ratios, etc.) are used only by the encoder to embed geomet-221
+ric priors. During decoding, we replace them with learnable222
+type-specific edge embeddings, preserving relational cues223
+without exposing ground-truth geometry at test time.224
+Graph Formats for Conditioning.We define three input225
+graph types for conditioning: (1) asemantic graphG sem=226
+⟨V, E, T V, TE, XV={c}, X E=∅⟩, which contains only227
+node categories and topology; (2) amasked semantic graph228
+˜Gsem, where arbitrary node labels are replaced with a learn-229
+able [MASK] token for category inpainting; and (3) atopo-230
+3REDACTED
+
+---PAGE 4---
+logical graphG top=⟨V, E, T V, TE, XV=∅, X E=∅⟩, 231
+which retains only node and edge types(T V, TE)and con- 232
+nectivity structure, serving as the structural backbone for 233
+message passing when no geometric or semantic attributes 234
+are provided.235
+Task.Given ˜Gsem, the model generates the complete 236
+graphG, predicting bounding boxesb, orientationso, cate- 237
+goriescfor masked nodes, and shape codessfor furniture. 238
+This unified heterogeneous representation enables one-pass 239
+reasoning across rooms and furniture and scales room-level 240
+V AEs to full-house layouts (§4.5).241
+3.2. Heterogeneous Graph Attention Network242
+Our graph backbone adopts the standard Graph Attention 243
+Network (GAT) [38], extends it with edge-featured atten- 244
+tion as in EGAT [41], and incorporates the heterogeneous 245
+type-specific transformations from HEAT [25]. This de- 246
+sign aligns with our house graphs, which contain three node 247
+types and five relation types. At each layerl, node states and 248
+edge features are first updated by type-specific projections: 249
+h(l)
+u=W(n)
+TV(u)h(l−1)
+u , ande(l)
+u→v =E(e)
+TE(u→v)∥fu→v, 250
+whereE(e)is the edge-type embedding table andf u→vde- 251
+notes the edge features supplied to the layer. The encoder 252
+provides geometric edge attributes, the decoder provides 253
+learned edge embeddings, and the diffusion denoiser omits 254
+numeric attributes (using edge-type embeddings only). For 255
+attention headh, logits and weights are computed as256
+s(l)
+uv,h= LeakyReLU
+q⊤
+h
+h(l)
+u∥h(l)
+v∥e(l)
+u→v
+,
+α(l)
+uv,h=exp(s(l)
+uv,h)
+P
+k∈N(u)exp(s(l)
+uk,h).(1) 257
+Node updates are obtained via multi-head aggregation:258
+h(l+1)
+u =H
+h=1σ
+X
+v∈N(u)α(l)
+uv,hWh
+h(l)
+v∥e(l)
+u→v
+,(2) 259
+followed by a two-layer feed-forward network with resid- 260
+ual connection. StackingLsuch layers yields the HetGAT 261
+backbone used in our encoder, decoder, and diffusion de- 262
+noiser.263
+3.3. Graph Autoencoder264
+To provide diffusion with a compact and continuous latent 265
+space, we pretrain a unified graph autoencoder. The en- 266
+coderEmaps a heterogeneous house graphGto node-level 267
+latent codesZ={z u}u∈V, and the decoderDreconstructs 268
+ˆGfromZand the topology graphG top. As the decoder is 269
+unconditional, it can be pretrained once and reused across 270
+all diffusion stacks. We employ the HetGAT backbone from 271
+§3.2 for both encoder and decoder, and compare it with ho- 272
+mogeneous GCN variants [6, 24] in §4.5.273Encoding.Node attributes are embedded as274
+h0
+u=MLP(c)∥MLP(b)∥MLP(o)∥MLP(s),(3)275
+and numeric edge attributes ase u→v=MLP(x u→v).After276
+LHetGAT layers, node statesh(L)
+uare mapped by two MLP277
+heads to(µu,logσ2
+u). We apply the reparameterization278
+trick to samplez u=µu+ exp 1
+2logσ2
+u
+ϵ,ϵ∼ N(0, I).279
+Decoding and Low-Rank Relational Field.The decoder280
+operates in two stages: it first reconstructs missing edge281
+representations, then predicts node attributes. Receiving282
+only the latent codesZand the topology graphG top(with283
+XV=X E=∅), it relies on aLow-Rank Relational284
+Field (LRF)module to infer geometric relations. LRF re-285
+constructs edge embeddings ˜eu→v∈Rdedirectly from node286
+latentsz u,zv. It serves as a relational prior, inferring pair-287
+wise structure by letting nodes attend to a small set of global288
+relation prototypes and interact through a low-rank factor-289
+ization.290
+Each node attends to a shared dictionary of relational291
+slotsD∈RK×d s(K=6;d s=d e) with an attention292
+scoreα u= softmax 
+MLP(z u)D⊤/τs
+, where tempera-293
+tureτ s=0.7. Edge embeddings are then produced by a low-294
+rank bilinear projection:295
+˜eu→v=MLP
+[αu(DU)∥α v(DV)∥α⊤
+uαv]
+,(4)296
+whereU,V∈Rds×r(r=32) are learnable projection bases.297
+This operation embeds node pairs into a shared relational298
+subspace and models directional and co-occurrence struc-299
+ture via the alignment termα⊤
+uαv. The resulting ˜eu→vis300
+used as edge input to the decoder HetGAT, providing rela-301
+tional structure without ground-truth geometry. To stabilize302
+optimization, gradients from decoder losses through ˜eu→v 303
+to the encoder are detached during the first half of training.304
+LRF is additionally supervised by reconstructing ground-305
+truth edge features ˆxu→v=MLP( ˜eu→v)with an auxiliary306
+ℓ1loss.307
+Finally, an MLP projectsz uto node features, followed308
+byLHetGAT layers using ˜eu→vas edge features, and four309
+MLP heads that predict ˆb,ˆo,ˆc,and ˆs.310
+Objective.The total loss combines reconstruction, KL311
+regularization, and LRF supervision:312
+L=L rec+λKLLKL+λLRFLLRF.(5)313
+We setλ KL= 10−4andλ LRF= 0.1empirically. Following314
+latent-diffusion practice [31, 51], the KL term regularizes315
+the latent distribution, preventing high-variance posteriors316
+while preserving reconstruction fidelity.317
+The reconstruction term decomposes as318
+Lrec=L box+L ang+L sem+L shp (6)319
+whereL boxcombines smooth-ℓ 1and distance-IoU losses320
+(λIoU=0.5) [4, 11, 50] to balance precise regression and321
+4REDACTED
+
+---PAGE 5---
+spatial overlap quality.L angandL semare cross-entropy 322
+losses for orientation and node category prediction, respec- 323
+tively, andL shpapplies anℓ 1loss on furniture-node shape 324
+codes.325
+3.4. Latent Diffusion on Heterogeneous Graphs326
+Denoising diffusion probabilistic models (DDPMs) [13] 327
+learn to reverse a Gaussian corruption process to gener- 328
+ate data samples. Given a pretrained autoencoder(E,D), 329
+we apply diffusion in the latent space of heterogeneous 330
+house graphs. The encoderE(G)produces node-level la- 331
+tent codesZ={z u}u∈V, paired with the topologyG top= 332
+(V, E, T V, TE)to form the latent graphG 0= (G top, Z). 333
+The forward process gradually perturbs node latents under 334
+a linear noise schedule:335
+Zt=√¯αtZ+√
+1−¯α tϵ,ϵ∼ N(0, I),(7) 336
+where¯α t=Qt
+s=1(1−β s)andβ sare linearly spaced noise 337
+levels. At each step, we formG t= (G top, Zt)and train a 338
+time-conditioned HetGAT denoiserϵ θto predict the noise: 339
+LLD(θ) =E E(G),t,ϵh
+∥ϵθ(Gt, t)−ϵ∥2
+2i
+.(8) 340
+The pretrained autoencoder is fixed during diffusion train- 341
+ing, and the decoderDreconstructs complete 3D layouts 342
+from the denoised latent graph in one pass.343
+3.5. Multi-Level Conditioning344
+We extend the latent diffusion model to conditional genera- 345
+tionp(Z| ˜Gsem,g), combining both node-level and graph- 346
+level conditioning. A single unconditional decoder (§3.3) is 347
+used for all setups, while the diffusion model is trained once 348
+with a random node-label masking ratio of 0.5. We later 349
+evaluate this unified model under four conditioning modes, 350
+detailed in the § 4.7.351
+Node-Level Conditioning.Node-level conditioning is 352
+introduced via the masked semantic graph ˜Gsem(§3.1), 353
+which shares the topology ofG topbut provides only par- 354
+tial node labels. Each denoising layer first performs self- 355
+attention via HetGAT, then applies a cross-attention block 356
+that conditions the resulting node states on semantic con- 357
+text. LetY={y u}u∈V denote embedded node labels, with 358
+learnable [MASK] tokens for unlabeled nodes. For nodeu, 359
+attention weights are computed as360
+Qu=W Qz(t)
+u, K v=W Kyv, V v=W Vyv,(9) 361
+and normalized across its neighborhoodN(u):362
+αuv=exp(Q⊤
+uKv/√
+d)P
+k∈N(u)exp(Q⊤uKk/√
+d).(10) 363
+The attended featurec u=P
+vαuvVvis added to the node 364
+state through a residual connection. This post-HetGAT op- 365
+eration injects semantic context while preserving the struc- 366
+tural aggregation flow.367Graph-Level Conditioning.Graph-level conditioning368
+provides global context that complements node-level se-369
+mantics through geometric and textual cues. The geometric370
+embeddingg geom is derived from the house-level bound-371
+ing box, while the optional textual embeddingg textencodes372
+high-level intent. During training, the masked graph is se-373
+rialized into a structured textual promptS(G,mask)and374
+encoded using a frozen BERT model (768 D). The pooled375
+text representation is projected to the latent dimension and376
+broadcast to all nodes. Both embeddings are projected in-377
+dependently and linearly combined using learnable coeffi-378
+cients:g=α geomVgeom(ggeom) +α textVtext(gtext). The379
+resulting residual vector is added to the cross-attention out-380
+put, before the final residual update:z(t)
+u←z(t)
+u+αca(cu+381
+g), whereα cais a learned scale. The conditional diffusion382
+objective is383
+Lcond
+LD(θ) =E G,t,ϵhϵθ(Gt, t,˜Gsem,g)−ϵ2
+2i
+(11)384
+This design enables flexible, multi-scale conditioning: par-385
+tial room graphs, incomplete furniture sets, or mixed-level386
+inputs can be coherently inpainted within a unified latent387
+graph framework.388
+3.6. Inference389
+At test time, users may provide either a masked semantic390
+graph ˜Gsemor a free-form textual description. For textual391
+input, an LLM agent translates the description into (i) a392
+masked adjacency graph with node and edge types and (ii) a393
+structured prompt in the same format used during training.394
+An optional house-level bounding box embeddingg geom 395
+may also be supplied; if absent, it is sampled based on the396
+number of rooms.397
+We sampleZ T∼ N(0, I)and run the DDPM reverse398
+process fromt=Tto0, conditioning each step with masked399
+cross-attention and the graph-level context (§3.5). The fi-400
+nal latentZ 0, together withG top, is passed to the pre-401
+trained decoder, which predicts per-node 3D boxes, orien-402
+tations, semantic labels, and furniture shape codes. Fur-403
+niture meshes are retrieved viaℓ 2nearest-neighbor search404
+in shape-code space [1, 36, 45], then scaled and placed to405
+form the furnished layout. For visualization, we apply light406
+post-processing following [14]: align room boundaries, re-407
+move small gaps, layer overlaps, and add doors and win-408
+dows. These operations affect visualization only and do not409
+modify reported metrics.410
+Figure 3. Post-processing pipeline.
+5REDACTED
+
+---PAGE 6---
+4. Experiments411
+To our knowledge, no prior method can generate a fully 412
+furnished 3D house from a single heterogeneous scene 413
+graph. Existing approaches either generate room layouts 414
+without furniture [14, 26, 33], place furniture at room scale 415
+[5, 6, 20, 22, 48, 49], or synthesize houses without graph 416
+conditioning [3, 10, 35]. In the absence of a directly 417
+comparable baseline, we design a comprehensive evalu- 418
+ation suite that examines each major component of our 419
+framework under controlled conditions. Specifically, we 420
+(i) benchmark against the strongest feasible graph-based 421
+house-scale alternative—a two-stage HouseDiffusion + Dif- 422
+fuScene pipeline, (ii) compare heterogeneous versus homo- 423
+geneous GNN backbones in the autoencoder, (iii) evaluate 424
+alternative latent priors (IID, autoregressive, diffusion), (iv) 425
+test a single model under four conditioning schemes, and 426
+(v) ablate key modules, including cross-attention and the 427
+Low-Rank Relational Field. All studies use identical data 428
+splits, metrics, and training setups, ensuring a fair and rig- 429
+orous assessment of each design choice.430
+4.1. Dataset431
+Experiments are conducted on the 3D-FRONT dataset [8], 432
+which provides 6,813 professionally designed furnished 433
+houses. Building upon it, we construct a new heteroge- 434
+neous house-graph dataset,HG-FRONT, that represents 435
+each house as a multi-type graph of rooms, furniture, and 436
+structural relations. Following preprocessing steps detailed 437
+in §3.1, we adopt room-level filtering criteria from prior 438
+work [22, 29, 36] and introduce additional house-level con- 439
+straints to remove implausible layouts, such as invalid adja- 440
+cencies. The resulting HG-FRONT dataset contains 3,110 441
+high-quality house graphs and serves as the foundation for 442
+all subsequent training and evaluation. Implementation de- 443
+tails are provided in the appendix.444
+4.2. Evaluation Metrics445
+We evaluate generation quality at the house, room, 446
+and furniture levels using five complementary metrics. 447
+(1)FID/KID.Following [29, 33, 45, 48, 49], we report 448
+Fr´echet Inception Distance (FID) [12] and Kernel Incep- 449
+tion Distance (KID) [2], computed from color-coded ren- 450
+derings in which each object is visualized by a unique 451
+class color [6, 36, 48]. Metrics are computed over eight 452uniformly sampled views (256×256 resolution) per gen-453
+erated layout. (2)KL divergence.This metric quanti-454
+fies how well the predicted label distribution of masked455
+nodes matches the ground-truth label distribution across456
+the dataset. (3)Room-graph constraint satisfaction.For457
+each generated house, we verify whether room pairs labeled458
+asadjacentorfarsatisfy their corresponding spatial con-459
+straints, following [6, 33, 48, 49]. We report the percentage460
+of correctly satisfied edges. (4)Furniture collision rate.461
+Extending [23, 45], we compute pairwise 3D Intersection-462
+over-Union (IoU) [52] between all furniture objects and re-463
+port the proportion of pairs with non-zero overlap. (5)Lay-464
+out diversity.Following [6, 48], we measure the standard465
+deviation of 3D box sizes, positions (in meters), and yaw466
+angles (in radians) over 10 random samples per input to as-467
+sess generative diversity.468
+4.3. Implementation Details469
+All models are trained using a 70/15/15 train/validation/test470
+split. Autoencoders use a latent dimension of 128. Opti-471
+mization uses AdamW with weight decay 1e-4, an initial472
+learning rate of 1e-4, and ReduceLROnPlateau scheduling473
+(factor 0.5, patience 100 epochs, min LR 1e-6). Autoen-474
+coders are trained for 400 epochs, and diffusion models475
+for 2000 epochs with 200 denoising time steps on a single476
+NVIDIA A100 (40GB) on Colab. All experiments are con-477
+ducted in PyTorch with PyTorch Geometric; further details478
+are available in the appendix material.479
+4.4. Two-Stage vs. Unified One-Pass Generation480
+Because no prior method can generate a fully furnished481
+house from a heterogeneous scene graph, we compare our482
+unified one-pass model against the strongest feasible al-483
+ternative: a two-stage pipeline composed ofHouseDiffu-484
+sion[33] for room-polygon generation followed byDif-485
+fuScene[36] for furniture placement. For fairness, we re-486
+train HouseDiffusion on HG-FRONT for 250k steps using487
+its official configuration, then provide its predicted room488
+polygons and per-room furniture counts to DiffuScene.489
+This combined setup—conditioning on the room adjacency490
+graph and room-level furniture counts—corresponds di-491
+rectly to ourRoomGraphconditioning mode, where all fur-492
+niture nodes are masked. Although this two-stage pipeline493
+is the closest analogue to a house-scale baseline, it exhibits494
+strong error accumulation (Fig. 4): geometric distortions495
+Model FID↓KID↓(×100)Coll. (%)↓Graph (%)↑KL↓
+Ours (One-Pass)7.26±0.430.26±0.0410.91±0.2191.91±1.010.0317±0.0025
+Two-Stage (HD + DS)41.90±0.402.97±0.029.84±0.0878.60±0.560.1823±0.0001
+Table 1.Unified one-pass vs. two-stage generation.Numbers report mean±std over three random seeds. Graph/Coll. are percentages;
+lower is better for FID, KID, Coll. (HG-FRONT GT baseline 9.80%) and KL divergence.
+6REDACTED
+
+---PAGE 7---
+Figure 4. Color-coded top-down layouts from our method (top)
+and the two-stage baseline.
+or irregular room shapes produced by HouseDiffusion of- 496
+ten lead DiffuScene to generate sparse, inconsistent, or im- 497
+plausible furniture arrangements. Table 1 reports results 498
+averaged over three random seeds. Our unified one-pass 499
+model achieves substantial improvements across most met- 500
+rics, demonstrating the benefits of jointly modeling rooms 501
+and furniture within a single latent graph and eliminating 502
+cross-stage failure modes.503
+4.5. Autoencoder Backbone Study504
+We evaluate how different autoencoder GNN backbones af- 505
+fect downstream generation quality while keepingall other 506
+components fixed. All variants are evaluated under full- 507
+semantic conditioningG sem. Following prior work in latent 508
+diffusion [34], we do not report reconstruction error, which 509
+correlates weakly with generative performance in latent dif- 510
+fusion models.511
+We compare two homogeneous GNN backbones widely 512
+used in prior graph-based generative systems—SLN- 513
+Box[24] andTripletGCN[6, 48, 49]—embedded into our 514
+heterogeneous house-graph representation, against our het- 515
+erogeneousHetGATencoder–decoder (Nestwork). SLN- 516
+Box is originally designed forbox-onlyprediction and 517
+therefore uses a compact 64-d latent; TripletGCN and our 518
+HetGAT autoencoder both use a 128-d latent to support 519
+both layouts and furniture shape modeling.This setup iso- 520
+lates the backbone’s contribution under an identical dif- 521
+fusion stack. As shown in Table 2, our heterogeneous 522
+backbone achieves better fidelity, lower collision rates, and 523
+higher graph-constraint satisfaction while maintaining com- 524
+petitive diversity—indicating a more expressive latent space 525
+for house-scale generation.5264.6. Ablation on Latent Priors527
+We study how different latent dependency assumptions af-528
+fect house-scale generation. Under a fixed HetGAT en-529
+coder–decoder and full-semantic conditioningG sem, we re-530
+place the latent prior with three alternatives: (1)IID prior:531
+each latentz uis drawn independently fromN(0, I)and532
+decoded unconditionally; (2)Autoregressive (AR) prior:533
+adapted from [5], room features fromG seminitialize a GRU534
+that autoregressively samples up toN=15furniture latents535
+per room viap(z i|zj<i); (3)Diffusion prior (ours): a536
+latent-space DDPM trained to denoise the full heteroge-537
+neous scene latent (§3.4). Table 4 shows that the IID and538
+AR priors fail to capture global scene dependencies—IID539
+yields high diversity but poor structural fidelity, while AR540
+improves local coherence yet suffers from distortion and541
+low diversity. In contrast, our diffusion prior achieves542
+markedly better fidelity and structural consistency while543
+maintaining strong diversity.544
+4.7. Conditional Generation545
+Flexible Semantic Conditioning.To evaluate robust-546
+ness under varying specification levels, we train asin-547
+glediffusion denoiser using a fixed 50% random mask-548
+ing scheme, while keeping the unconditional autoencoder549
+frozen. At test time, we evaluate the same model un-550
+der four conditioning modes:FullGraph(no masking),551
+RoomGraph(room labels only),Topology(no labels),552
+andRandMask(50% random masking). Table 3 re-553
+ports quantitative metrics under each mode. As illus-554
+trated in Figure 5, the model adapts consistently across555
+all settings—respecting available labels, inpainting miss-556
+ing categories, and producing plausible defaults even un-557
+der severe under-specification—demonstrating that masked558
+cross-attention enables a single diffusion prior to generalize559
+across a continuum of conditioning strengths.560
+Natural Language Interface.We also support text-561
+driven generation by integrating an LLM that translates562
+free-form descriptions into (i) a masked semantic graph and563
+(ii) the structured text prompt used for graph-level condi-564
+tioning (§3.5). For example, “three bedrooms and a cen-565
+tral living room” is converted into an editable masked graph566
+within our web UI. After user confirmation, the graph and567
+its structured prompt are provided to the diffusion model568
+for inference. This LLM–graph–diffusion pipeline offers569
+Backbone FID↓KID↓(×100)Coll.%↓Graph%↑Size↑Loc.↑Angle↑
+TripletGCN7.50±0.270.34±0.0311.91±0.3288.29±0.330.33 1.50 0.93
+SLN-Box7.64±0.210.30±0.0214.80±0.2588.02±0.470.32 1.39 0.94
+HetGAT (ours)7.13±0.140.29±0.0111.21±0.1992.34±0.140.38 1.52 0.95
+Table 2.Autoencoder backbone comparison.All variants are evaluated under full semantic graph conditioning. Diversity metrics
+(Size/Loc./Angle) are computed over 10 samples per input.
+7REDACTED
+
+---PAGE 8---
+Conditioning Mode FID↓KID↓(×100)Coll.%↓Graph%↑KL↓
+FullGraph7.13±0.140.29±0.0111.21±0.1992.34±0.14–
+RoomGraph7.26±0.430.26±0.0410.91±0.2191.91±1.010.0317±0.0025
+Topology7.75±0.150.29±0.0110.60±0.2992.00±0.650.0378±0.0018
+RandMask6.96±0.030.27±0.0211.16±0.0592.59±0.110.0210±0.0031
+Table 3.Conditional generation.Thesame diffusion modelis evaluated under four conditioning modes.
+Figure 5. Comparison of generated layouts across four condition-
+ing modes applied to the same house graph.
+an intuitive natural-language interface, enabling concept- 570
+driven layout generation without CAD expertise and sup- 571
+porting early design exploration, game-level worldbuilding, 572
+and MR asset workflows.573
+4.8. Additional Ablations574
+We further examine two components of our model: the 575
+node-level cross-attention (§ 3.5) in the denoiser and the 576
+Low-Rank Relational Field (LRF) in the decoder (§ 3.3). 577
+All variants keep the autoencoder, diffusion prior, and train- 578
+ing setup fixed, and are evaluated under full-semantic con- 579
+ditioning.(1) Without Cross-Attention.We ablate node- 580
+level cross-attention by replacing each layer’s semantic at- 581
+tention block with a single linear projection of the con- 582
+ditioning embeddings, added directly to the noisy node 583
+features. Graph-level conditioning remains unchanged. 584
+This variant collapses across all metrics, indicating that 585
+masked semantic inpainting requires structured, topology- 586
+aware conditioning rather than feature injection.(2) With- 587
+out LRF.When removing LRF, decoder edge features 588
+are constructed by concatenating the latent codes[z u;zv] 589
+and projecting them to the edge feature dimension ex- 590
+pected by HetGAT. We observe a clear increase in furni- 591
+ture collisions and stronger degradation in fidelity and KID, 592
+confirming that LRF supplies essential relational informa- 593
+tion—compensating for the absence of ground-truth geome- 594
+try and supporting accurate clique-level furniture modeling. 595
+Table 5 summarizes quantitative results over three seeds.596Quality metrics
+Prior FID↓KID↓(×100)Graph%↑Coll.%↓
+IID24.64±1.261.82±0.1264.61±0.1113.71±0.61
+AR61.43±0.895.89±0.0967.41±0.4010.89±0.05
+Ours7.13±0.140.29±0.0192.34±0.1411.21±0.19
+Diversity metrics
+Prior Size↑Loc.↑Angle↑
+IID0.591.36 0.71
+AR 0.48 0.78 0.32
+Ours 0.381.52 0.95
+Table 4.Latent–prior ablation.
+Ablate FID↓KID↓Col.%↓Graph%↑
+CA76.35±36.096.64±3.4969.28±13.4255.02±9.84
+LRF20.42±0.291.54±0.0321.54±0.3292.16±0.07
+Full7.13±0.140.29±0.0111.21±0.1992.34±0.14
+Table 5.Module ablations.KID is reported as×100.
+5. Conclusion597
+We have introducedNestwork, the first single-pass dif-598
+fusion framework that jointly generates both room lay-599
+outs and furniture arrangements from a unified hetero-600
+geneous graph. Our heterogeneous GNN backbone and601
+latent-graph diffusion model achieve strong realism, struc-602
+tural compliance, and diversity on 3D-FRONT, while sup-603
+porting flexible, mask-based conditioning.Despite these604
+strengths, several limitations remain. The current sys-605
+tem does not explicitly verify the functional plausibility606
+of generated layouts—circulation paths, for example, may607
+be obstructed. These constraints limit its use to ideation608
+rather than finalized design, suggesting future work should609
+incorporate algorithmic checks or planning-aware objec-610
+tives. Additionally, Nestwork currently relies on struc-611
+tured semantic graphs; extending Nestwork to accept multi-612
+modal conditioning inputs —such as floor-plan images and613
+sketches—could further enhance its usability in architec-614
+tural design and interactive media.615
+8REDACTED
+
+---PAGE 9---
+References616
+[1] Tongyuan Bai, Wangyuanfan Bai, Dong Chen, Tieru Wu, 617
+Manyi Li, and Rui Ma. Freescene: Mixed graph diffusion 618
+for 3d scene synthesis from free prompts. InProceedings 619
+of the Computer Vision and Pattern Recognition Conference, 620
+pages 5893–5903, 2025. 1, 2, 5621
+[2] Mikolaj Binkowski, Danica J. Sutherland, Michal Arbel, 622
+and Arthur Gretton. Demystifying mmd gans.ArXiv, 623
+abs/1801.01401, 2018. 6624
+[3] Alexey Bokhovkin, Quan Meng, Shubham Tulsiani, and An- 625
+gela Dai. Scenefactor: Factored latent 3d diffusion for con- 626
+trollable 3d scene generation, 2024. 2, 6627
+[4] Nicolas Carion, Francisco Massa, Gabriel Synnaeve, Nicolas 628
+Usunier, Alexander Kirillov, and Sergey Zagoruyko. End-to- 629
+end object detection with transformers. InComputer Vision 630
+– ECCV 2020, pages 213–229, Cham, 2020. Springer Inter- 631
+national Publishing. 4632
+[5] Aditya Chattopadhyay, Xi Zhang, David Paul Wipf, Himan- 633
+shu Arora, and Ren ´e Vidal. Learning graph variational au- 634
+toencoders with constraints and structured priors for condi- 635
+tional indoor 3d scene generation.2023 IEEE/CVF Win- 636
+ter Conference on Applications of Computer Vision (WACV), 637
+pages 785–794, 2023. 2, 6, 7638
+[6] Helisa Dhamo, Fabian Manhardt, Nassir Navab, and Fed- 639
+erico Tombari. Graph-to-3d: End-to-end generation and ma- 640
+nipulation of 3d scenes using scene graphs. InIEEE Inter- 641
+national Conference on Computer Vision (ICCV), 2021. 1, 642
+2, 3, 4, 6, 7643
+[7] Weixi Feng, Wanrong Zhu, Tsu-jui Fu, Varun Jampani, Ar- 644
+jun Akula, Xuehai He, Sugato Basu, Xin Eric Wang, and 645
+William Yang Wang. Layoutgpt: Compositional visual plan- 646
+ning and generation with large language models.Advances 647
+in Neural Information Processing Systems, 36:18225–18250, 648
+2023. 2649
+[8] Huan Fu, Bowen Cai, Lin Gao, Ling-Xiao Zhang, Jiaming 650
+Wang, Cao Li, Qixun Zeng, Chengyue Sun, Rongfei Jia, 651
+Binqiang Zhao, and Hao Zhang. 3d-front: 3d furnished 652
+rooms with layouts and semantics. In2021 IEEE/CVF In- 653
+ternational Conference on Computer Vision (ICCV), pages 654
+10913–10922, 2021. 6655
+[9] Rao Fu, Zehao Wen, Zichen Liu, and Srinath Sridhar. Any- 656
+home: Open-vocabulary generation of structured and tex- 657
+tured 3d homes. InEuropean Conference on Computer Vi- 658
+sion, pages 52–70. Springer, 2024. 2659
+[10] Lin Gao, Jia-Mu Sun, Kaichun Mo, Yu-Kun Lai, Leonidas J 660
+Guibas, and Jie Yang. Scenehgn: Hierarchical graph net- 661
+works for 3d indoor scene generation with fine-grained ge- 662
+ometry.IEEE Transactions on Pattern Analysis and Machine 663
+Intelligence, 2023. 2, 6664
+[11] Ross Girshick. Fast r-cnn. In2015 IEEE International 665
+Conference on Computer Vision (ICCV), pages 1440–1448, 666
+2015. 4667
+[12] Martin Heusel, Hubert Ramsauer, Thomas Unterthiner, 668
+Bernhard Nessler, and Sepp Hochreiter. Gans trained by a 669
+two time-scale update rule converge to a local nash equilib- 670
+rium. InAdvances in Neural Information Processing Sys- 671
+tems. Curran Associates, Inc., 2017. 6672[13] Jonathan Ho, Ajay Jain, and Pieter Abbeel. Denoising dif-673
+fusion probabilistic models.Advances in neural information674
+processing systems, 33:6840–6851, 2020. 1, 2, 5675
+[14] Ruizhen Hu, Zeyu Huang, Yuhan Tang, Oliver Matias van676
+Kaick, Hao Zhang, and Hui Huang. Graph2plan: learning677
+floorplan generation from layout graphs.ACM Transactions678
+on Graphics (TOG), 39:118:1 – 118:14, 2020. 1, 2, 5, 6679
+[15] Siyi Hu, Diego Martin Arroyo, Stephanie Debats, Fabian680
+Manhardt, Luca Carlone, and Federico Tombari. Mixed681
+diffusion for 3d indoor scene synthesis.arXiv preprint682
+arXiv:2405.21066, 2024. 2683
+[16] Sizhe Hu, Wenming Wu, Yuntao Wang, Benzhu Xu, and684
+Liping Zheng. Gsdiff: Synthesizing vector floorplans via685
+geometry-enhanced structural graph generation. InProceed-686
+ings of the AAAI Conference on Artificial Intelligence, pages687
+17323–17332, 2025. 1, 2688
+[17] Ziniu Hu, Yuxiao Dong, Kuansan Wang, and Yizhou Sun.689
+Heterogeneous graph transformer. InProceedings of The690
+Web Conference 2020, page 2704–2710, New York, NY ,691
+USA, 2020. Association for Computing Machinery. 2692
+[18] Justin Johnson, Ranjay Krishna, Michael Stark, Li-Jia Li,693
+David A. Shamma, Michael S. Bernstein, and Li Fei-Fei.694
+Image retrieval using scene graphs.2015 IEEE Conference695
+on Computer Vision and Pattern Recognition (CVPR), pages696
+3668–3678, 2015. 2697
+[19] Xiaoliang Ju, Zhaoyang Huang, Yijin Li, Guofeng Zhang,698
+Yu Qiao, and Hongsheng Li. Diffindscene: Diffusion-based699
+high-quality 3d indoor scene generation. InProceedings of700
+the IEEE/CVF Conference on Computer Vision and Pattern701
+Recognition, pages 4526–4535, 2024. 2702
+[20] Manyi Li, Akshay Gadi Patil, Kai Xu, Siddhartha Chaudhuri,703
+Owais Khan, Ariel Shamir, Changhe Tu, Baoquan Chen,704
+Daniel Cohen-Or, and Hao Zhang. Grains: Generative re-705
+cursive autoencoders for indoor scenes.ACM Transactions706
+on Graphics, 37, 2018. 2, 6707
+[21] Zongwei Li, Lianghao Xia, Hua Hua, Shijie Zhang,708
+Shuangyang Wang, and Chao Huang. Diffgraph: Heteroge-709
+neous graph diffusion model. InProceedings of the Eigh-710
+teenth ACM International Conference on Web Search and711
+Data Mining, pages 40–49, 2025. 3712
+[22] Chenguo Lin and Yadong Mu. Instructscene: Instruction-713
+driven 3d indoor scene synthesis with semantic graph prior.714
+InInternational Conference on Learning Representations715
+(ICLR), 2024. 1, 2, 6716
+[23] Lu Ling, Chen-Hsuan Lin, Tsung-Yi Lin, Yifan Ding, Yu717
+Zeng, Yichen Sheng, Yunhao Ge, Ming-Yu Liu, Aniket Bera,718
+and Zhaoshuo Li. Scenethesis: A language and vision agen-719
+tic framework for 3d scene generation, 2025. 6720
+[24] Andrew Luo, Zhoutong Zhang, Jiajun Wu, and Joshua B.721
+Tenenbaum. End-to-end optimization of scene layout.2020722
+IEEE/CVF Conference on Computer Vision and Pattern723
+Recognition (CVPR), pages 3753–3762, 2020. 2, 4, 7724
+[25] Xiaoyu Mo, Zhiyu Huang, Yang Xing, and Chen Lv.725
+Multi-agent trajectory prediction with heterogeneous edge-726
+enhanced graph attention network.IEEE Transactions on727
+Intelligent Transportation Systems, 23(7):9554–9567, 2022.728
+4729
+9REDACTED
+
+---PAGE 10---
+[26] Nelson Nauata, Kai-Hung Chang, Chin-Yi Cheng, Greg 730
+Mori, and Yasutaka Furukawa. House-gan: Relational gener- 731
+ative adversarial networks for graph-constrained house lay- 732
+out generation. InEuropean Conference on Computer Vi- 733
+sion, pages 162–177. Springer, 2020. 1, 2, 6734
+[27] Azad Noori, Mohammad Ali Balafar, Asgarali Bouyer, and 735
+Khosro Salmani. Review of heterogeneous graph embedding 736
+methods based on deep learning techniques and comparing 737
+their efficiency in node classification.Social Network Anal- 738
+ysis and Mining, 14:1–24, 2024. 2739
+[28] Jeong Joon Park, Peter Florence, Julian Straub, Richard 740
+Newcombe, and Steven Lovegrove. Deepsdf: Learning con- 741
+tinuous signed distance functions for shape representation. 742
+InThe IEEE Conference on Computer Vision and Pattern 743
+Recognition (CVPR), 2019. 3744
+[29] Despoina Paschalidou, Amlan Kar, Maria Shugrina, Karsten 745
+Kreis, Andreas Geiger, and Sanja Fidler. Atiss: Autoregres- 746
+sive transformers for indoor scene synthesis. InAdvances in 747
+Neural Information Processing Systems (NeurIPS), 2021. 2, 748
+6749
+[30] Barbara Roessle, Norman M ¨uller, Lorenzo Porzi, Samuel 750
+Rota Bul `o, Peter Kontschieder, Angela Dai, and Matthias 751
+Nießner. L3dg: Latent 3d gaussian diffusion. InSIGGRAPH 752
+Asia 2024 Conference Papers, page 1–11. ACM, 2024. 2753
+[31] Robin Rombach, Andreas Blattmann, Dominik Lorenz, 754
+Patrick Esser, and Bj ¨orn Ommer. High-resolution image 755
+synthesis with latent diffusion models. InProceedings of 756
+the IEEE/CVF conference on computer vision and pattern 757
+recognition, pages 10684–10695, 2022. 1, 2, 4758
+[32] Franco Scarselli, Marco Gori, Ah Chung Tsoi, Markus Ha- 759
+genbuchner, and Gabriele Monfardini. The graph neural net- 760
+work model.IEEE Transactions on Neural Networks, 20(1): 761
+61–80, 2009. 1762
+[33] Mohammad Amin Shabani, Sepidehsadat Hosseini, and Ya- 763
+sutaka Furukawa. Housediffusion: Vector floorplan genera- 764
+tion via a diffusion model with discrete and continuous de- 765
+noising.arXiv preprint arXiv:2211.13287, 2022. 1, 2, 6766
+[34] Ivan Skorokhodov, Sharath Girish, Benran Hu, Willi Mena- 767
+pace, Yanyu Li, Rameen Abdal, Sergey Tulyakov, and Aliak- 768
+sandr Siarohin. Improving the diffusability of autoencoders, 769
+2025. 7770
+[35] Chong Su, Yingbin Fu, Zheyuan Hu, Jing Yang, Param 771
+Hanji, Shaojun Wang, Xuan Zhao, Cengiz ¨Oztireli, and 772
+Fangcheng Zhong. Chord: Generation of collision-free, 773
+house-scale, and organized digital twins for 3d indoor scenes 774
+with controllable floor plans and optimal layouts.arXiv 775
+preprint arXiv:2503.11958, 2025. 2, 6776
+[36] Jiapeng Tang, Yinyu Nie, Lev Markhasin, Angela Dai, Justus 777
+Thies, and Matthias Nießner. Diffuscene: Denoising diffu- 778
+sion models for generative indoor scene synthesis. InPro- 779
+ceedings of the IEEE/CVF Conference on Computer Vision 780
+and Pattern Recognition, 2024. 2, 5, 6781
+[37] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszko- 782
+reit, Llion Jones, Aidan N. Gomez, Lukasz Kaiser, and Illia 783
+Polosukhin. Attention is all you need, 2023. 1784
+[38] Petar Veli ˇckovi ´c, Guillem Cucurull, Arantxa Casanova, 785
+Adriana Romero, Pietro Li `o, and Yoshua Bengio. Graph 786Attention Networks.International Conference on Learning787
+Representations, 2018. accepted as poster. 4788
+[39] Kai Wang, Yu-An Lin, Ben Weissmann, Manolis Savva, An-789
+gel Chang, and Daniel Ritchie. Planit: planning and instanti-790
+ating indoor scenes with relation graph and spatial prior net-791
+works.ACM Transactions on Graphics, 38:1–15, 2019. 2792
+[40] Xiao Wang, Houye Ji, Chuan Shi, Bai Wang, Yanfang Ye,793
+Peng Cui, and Philip S Yu. Heterogeneous graph atten-794
+tion network. InThe World Wide Web Conference, page795
+2022–2032, New York, NY , USA, 2019. Association for796
+Computing Machinery. 1, 2797
+[41] Ziming Wang, Jun Chen, and Haopeng Chen. Egat:798
+Edge-featured graph attention network. InInternational799
+Conference on Artificial Neural Networks, pages 253–264.800
+Springer, 2021. 4801
+[42] Minkai Xu, Alexander S Powers, Ron O Dror, Stefano Er-802
+mon, and Jure Leskovec. Geometric latent diffusion models803
+for 3d molecule generation. InInternational Conference on804
+Machine Learning, pages 38592–38610. PMLR, 2023. 3805
+[43] Jianwei Yang, Jiasen Lu, Stefan Lee, Dhruv Batra, and Devi806
+Parikh. Graph r-cnn for scene graph generation. InComputer807
+Vision – ECCV 2018: 15th European Conference, Munich,808
+Germany, September 8-14, 2018, Proceedings, Part I, page809
+690–706, Berlin, Heidelberg, 2018. Springer-Verlag. 2810
+[44] Ling Yang, Zhilin Huang, Zhilong Zhang, Zhongyi Liu,811
+Shenda Hong, Wentao Zhang, Wenming Yang, Bin Cui, and812
+Luxia Zhang. Graphusion: Latent diffusion for graph gener-813
+ation.IEEE Transactions on Knowledge and Data Engineer-814
+ing, 2024. 3815
+[45] Yandan Yang, Baoxiong Jia, Peiyuan Zhi, and Siyuan816
+Huang. Physcene: Physically interactable 3d scene synthesis817
+for embodied ai. InProceedings of Conference on Computer818
+Vision and Pattern Recognition (CVPR), 2024. 2, 5, 6819
+[46] Yue Yang, Fan-Yun Sun, Luca Weihs, Eli VanderBilt, Al-820
+varo Herrasti, Winson Han, Jiajun Wu, Nick Haber, Ranjay821
+Krishna, Lingjie Liu, et al. Holodeck: Language guided gen-822
+eration of 3d embodied ai environments. InProceedings of823
+the IEEE/CVF Conference on Computer Vision and Pattern824
+Recognition, pages 16227–16237, 2024. 2825
+[47] Kanghoon Yoon, Kibum Kim, Jinyoung Moon, and Chany-826
+oung Park. Unbiased heterogeneous scene graph genera-827
+tion with relation-aware message passing neural network. In828
+AAAI Conference on Artificial Intelligence, 2022. 2829
+[48] Guangyao Zhai, Evin Pınar ¨Ornek, Shun-Cheng Wu, Yan830
+Di, Federico Tombari, Nassir Navab, and Benjamin Busam.831
+Commonscenes: Generating commonsense 3d indoor scenes832
+with scene graph diffusion. InThirty-seventh Conference on833
+Neural Information Processing Systems, 2023. 1, 2, 3, 6, 7834
+[49] Guangyao Zhai, Evin Pinar ¨Ornek, Dave Zhenyu Chen, Ruo-835
+tong Liao, Yan Di, Nassir Navab, Federico Tombari, and836
+Benjamin Busam. Echoscene: Indoor scene generation via837
+information echo over scene graph diffusion.arXiv preprint838
+arXiv:2405.00915, 2024. 1, 2, 6, 7839
+[50] Zhaohui Zheng, Ping Wang, Wei Liu, Jinze Li, Rongguang840
+Ye, and Dongwei Ren. Distance-iou loss: Faster and better841
+learning for bounding box regression.Proceedings of the842
+AAAI Conference on Artificial Intelligence, 34(07):12993–843
+13000, 2020. 4844
+10REDACTED
+
+---PAGE 11---
+[51] Cai Zhou, Xiyuan Wang, and Muhan Zhang. Unifying gen- 845
+eration and prediction on graphs with latent graph diffu- 846
+sion.Advances in Neural Information Processing Systems, 847
+37:61963–61999, 2024. 3, 4848
+[52] Dingfu Zhou, Jin Fang, Xibin Song, Chenye Guan, Junbo 849
+Yin, Yuchao Dai, and Ruigang Yang. Iou loss for 2d/3d ob- 850
+ject detection, 2019. 6851
+11REDACTED
