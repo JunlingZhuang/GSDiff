@@ -18,9 +18,9 @@ def run_pipeline(text: str, client, out_dir: str | Path) -> dict:
     out_dir = Path(out_dir)
     cfg = load_config()
     program = understand(text, client)
-    report, plan, wallgraph = generate_plan(
+    report, plan, room_graph = generate_plan(
         program, client, out_dir,
         max_rounds=cfg["max_correction_rounds"],
         generation_mode=cfg["generation_mode"],
     )
-    return {"program": program, "report": report, "plan": plan, "wallgraph": wallgraph}
+    return {"program": program, "report": report, "plan": plan, "room_graph": room_graph}

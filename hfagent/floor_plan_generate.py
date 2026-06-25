@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Core generation pipeline: program -> generate -> parse -> verify -> fix -> wallgraph.
+"""Core generation pipeline: program -> generate -> parse -> verify -> fix -> room graph.
 
 This is the heart of the agent: one function that takes a structured program and
-a client, runs the VLM correction loop, repairs counts deterministically, and returns
-(report, plan_dict, wallgraph_dict).
+a client, runs the VLM correction loop, repairs counts deterministically, reads the
+room adjacency (doors) from the best realistic plan, and returns
+(report, plan_dict, room_graph_dict).
 """
 from __future__ import annotations
 
@@ -12,11 +13,12 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from hfagent.tools.wallgraph import plan_to_wallgraph
 from hfagent.tools.image_parser import cv_parse
 from hfagent.tools.floor_plan_generator import FloorPlanGenerator
+from hfagent.tools.door_placer import place_doors
 from hfagent.tools.plan_fixes import fix_room_counts
 from hfagent.tools.render_plan import render_plan
+from hfagent.schema.plan import AdjacencyGraph, AdjEdge
 
 DEFAULT_CONFIG = Path(__file__).parent / "config.json"
 
@@ -38,6 +40,7 @@ class _BestRound:
     round_num: int
     plan: object
     png_path: Path
+    real_png: bytes
 
 
 def _count_violations(required_rooms: dict, actual_counts: Counter) -> list[str]:
@@ -60,20 +63,26 @@ def generate_plan(
     name: str = "plan",
     max_rounds: int = 3,
     generation_mode: str = "real2color",
+    boundary: bytes | None = None,
 ) -> tuple[dict, dict, dict]:
     """Generate, parse, and repair a floor plan from a structured program.
 
-    Runs a VLM correction loop (up to max_rounds), then deterministically repairs
-    any remaining count violations via relabel / merge / split.
+    Runs a VLM correction loop (up to max_rounds), deterministically repairs any
+    remaining count violations, then reads the room adjacency (doors) from the best
+    realistic plan image.
 
-    Returns (report, plan_dict, wallgraph_dict).
+    `boundary` (PNG bytes) is the optional second input entry: when given, the
+    realflow plan's outer walls follow that footprint. Everything downstream of the
+    realflow plan is identical with or without it.
+
+    Returns (report, plan_dict, room_graph_dict).
     Writes intermediate files to out_dir/name/.
     """
     work_dir = out_dir / name
     work_dir.mkdir(parents=True, exist_ok=True)
     required_rooms = {r["type"]: r.get("count", 1) for r in program["rooms"]}
 
-    generator = FloorPlanGenerator(program, client)
+    generator = FloorPlanGenerator(program, client, boundary=boundary)
     rounds: list[dict] = []
     best_round: _BestRound | None = None
     real_png: bytes | None = None
@@ -81,12 +90,11 @@ def generate_plan(
     for round_num in range(1, max_rounds + 1):
         png_path = work_dir / f"gemini_r{round_num}.png"
 
-        # ── generate colour-block image ──────────────────────────────────────
+        # ── real2color: realistic plan -> colour-block ───────────────────────
         if round_num == 1:
-            generator.run(png_path)
-            real_png = png_path.with_suffix(".real.png").read_bytes()
+            real_png = generator.generate_real_plan()
         else:
-            # apply violation feedback to the realistic plan, then re-convert to colour blocks
+            # apply violation feedback to the realistic plan, then re-convert
             violation_feedback = (
                 "The architectural floor plan above violates its room program:\n- "
                 + "\n- ".join(rounds[-1]["violations"])
@@ -94,8 +102,8 @@ def generate_plan(
                 "remove extra ones). Keep the same drawing style, footprint and circulation."
             )
             real_png = client.generate_image([real_png, violation_feedback])
-            png_path.with_suffix(".real.png").write_bytes(real_png)
-            png_path.write_bytes(generator.to_colorblock(real_png))
+        png_path.with_suffix(".real.png").write_bytes(real_png)
+        png_path.write_bytes(generator.to_colorblock(real_png))
 
         # ── parse + verify ───────────────────────────────────────────────────
         parsed_plan = cv_parse(str(png_path))
@@ -104,7 +112,7 @@ def generate_plan(
         rounds.append({"round": round_num, "actual_rooms": dict(actual_counts), "violations": violations})
 
         if best_round is None or len(violations) < best_round.violation_count:
-            best_round = _BestRound(len(violations), round_num, parsed_plan, png_path)
+            best_round = _BestRound(len(violations), round_num, parsed_plan, png_path, real_png)
 
         if not violations:
             break  # all room counts match — skip remaining rounds
@@ -116,8 +124,22 @@ def generate_plan(
     (work_dir / "fixed.json").write_text(fixed_plan.model_dump_json(indent=2), encoding="utf-8")
     render_plan(fixed_plan, px_per_mm=1.0).save(work_dir / "recon.png")
 
-    wallgraph = plan_to_wallgraph(fixed_plan)
-    (work_dir / "wallgraph.json").write_text(wallgraph.model_dump_json(indent=2), encoding="utf-8")
+    # ── room adjacency (doors) read from the best realistic plan ─────────────
+    # LLM returns connectivity only; door_placer hangs each door on the real wall the
+    # two connected rooms physically share, and reports which rooms each door links.
+    room_graph = generator.extract_room_adjacency(best_round.real_png)
+    (work_dir / "graph.json").write_text(room_graph.model_dump_json(indent=2), encoding="utf-8")
+
+    # assemble the authoritative plan (docs/agent/02-data-model.md §3.2):
+    # rooms + complete walls + doors-on-walls + adjacency_graph (edges link via door id)
+    plan, door_pairs = place_doors(fixed_plan, room_graph)
+    plan.building_type = program.get("building_type", plan.building_type)
+    plan.adjacency_graph = AdjacencyGraph(
+        nodes=[r.id for r in plan.rooms],
+        edges=[AdjEdge(from_=a, to=b, type="door", via=did) for did, a, b in door_pairs],
+    )
+    (work_dir / "plan.json").write_text(plan.model_dump_json(indent=2, by_alias=True), encoding="utf-8")
+    render_plan(plan, px_per_mm=1.0).save(work_dir / "recon_with_door.png")
 
     vlm_converged = not rounds[best_round.round_num - 1]["violations"]
     report = {
@@ -133,12 +155,13 @@ def generate_plan(
         "converged_in": best_round.round_num if vlm_converged else None,
         "count_fix": count_fix,
         "final_count_exact": vlm_converged or count_fix["fixed"],
-        "wallgraph": {
-            "nodes": len(wallgraph.nodes),
-            "walls": len(wallgraph.walls),
-            "party_walls": len(wallgraph.adjacency()),
+        "room_graph": {
+            "rooms": len(room_graph.rooms),
+            "doors": len(room_graph.doors),       # logical edges from the LLM
+            "placed_doors": len(plan.doors),       # doors hung on real walls
+            "walls": len(plan.walls),              # complete geometry-layer wall list
         },
     }
     (work_dir / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
 
-    return report, fixed_plan.model_dump(), wallgraph.model_dump()
+    return report, plan.model_dump(by_alias=True), room_graph.model_dump()

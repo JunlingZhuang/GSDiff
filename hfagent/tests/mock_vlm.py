@@ -7,10 +7,15 @@ Each round of the real2color pipeline makes exactly 2 generate_image calls:
 
 MockVLM returns the nth script plan for both calls in round n, advancing to
 the next plan every 2 calls. This isolates orchestration logic from real VLM noise.
+
+generate_json is also stubbed: returns `door_script` as a JSON array on each call,
+defaulting to an empty list (no doors). Tests that exercise door extraction pass
+a list of door dicts: [{"room_a": "...", "room_b": "...", "x": 0.5, "y": 0.5}].
 """
 from __future__ import annotations
 
 import io
+import json
 
 from hfagent.schema.plan import Plan
 from hfagent.tools.render_plan import render_plan
@@ -20,8 +25,9 @@ class MockVLM:
     image_model = "mock-vlm"
     text_model = "mock-llm"
 
-    def __init__(self, script: list[Plan]):
+    def __init__(self, script: list[Plan], door_script: list[dict] | None = None):
         self.script = script
+        self.door_script: list[dict] = door_script or []
         self.calls = 0
         self.feedbacks: list[str] = []
 
@@ -38,3 +44,6 @@ class MockVLM:
         buf = io.BytesIO()
         render_plan(plan, px_per_mm=0.05).save(buf, "PNG")
         return buf.getvalue()
+
+    def generate_json(self, contents, schema=None) -> str:
+        return json.dumps(self.door_script)

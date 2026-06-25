@@ -17,11 +17,45 @@ Backward/forward compatibility contract:
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import os
 import re
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+# image magic bytes -> mime type
+_MAGIC = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF8", "image/gif"),
+    (b"RIFF", "image/webp"),  # RIFF....WEBP
+)
+
+
+def _sniff_mime(raw: bytes) -> str | None:
+    for magic, mime in _MAGIC:
+        if raw.startswith(magic):
+            return mime
+    return None
+
+
+def decode_image_bytes(data) -> bytes:
+    """Return real image bytes from a model response part.
+
+    Some image models (e.g. gemini-3-pro-image) put base64-encoded text in
+    inline_data.data instead of raw bytes; decode it. Already-binary images are
+    returned unchanged.
+    """
+    raw = data.encode("ascii", "ignore") if isinstance(data, str) else bytes(data)
+    if _sniff_mime(raw):
+        return raw  # already a real image
+    try:
+        decoded = base64.b64decode(raw, validate=True)
+    except (binascii.Error, ValueError):
+        return raw  # not base64 — hand back as-is, caller validates
+    return decoded if _sniff_mime(decoded) else raw
 
 # Newest-first preference per capability. Plain substring match against the
 # available model list; first hit wins.
@@ -39,6 +73,10 @@ IMAGE_MODEL_PREFERENCE = [
     "gemini-3-flash-image",
     "gemini-2.5-flash-image",
 ]
+# Pin the generated image size so the px-based wall/parse geometry is deterministic.
+# Gemini sizes are tiers (1K/2K/4K), not arbitrary pixels: 1K @ 16:9 = 1376x768.
+IMAGE_ASPECT_RATIO = os.environ.get("HFAGENT_IMAGE_ASPECT", "16:9")
+IMAGE_SIZE = os.environ.get("HFAGENT_IMAGE_SIZE", "1K")
 # image models we must NOT pick for text and vice versa
 _IMAGE_MARKER = re.compile(r"image|imagen")
 
@@ -114,7 +152,24 @@ class GeminiClient:
         resp = self.client.models.generate_content(model=model or self.text_model, contents=prompt)
         return resp.text or ""
 
-    def generate_json(self, prompt: str, schema: dict | None = None, model: str | None = None) -> str:
+    @staticmethod
+    def _to_parts(contents):
+        """Wrap raw image bytes as Parts with a sniffed mime type; pass strings through."""
+        from google.genai import types
+
+        if not isinstance(contents, list):
+            return contents
+        out = []
+        for c in contents:
+            if isinstance(c, (bytes, bytearray)):
+                mime = _sniff_mime(bytes(c)) or "image/png"
+                out.append(types.Part.from_bytes(data=bytes(c), mime_type=mime))
+            else:
+                out.append(c)
+        return out
+
+    def generate_json(self, contents, schema: dict | None = None, model: str | None = None) -> str:
+        """Returns JSON string. `contents` may be a str prompt or a list mixing str and image bytes."""
         from google.genai import types
 
         cfg = types.GenerateContentConfig(
@@ -122,7 +177,7 @@ class GeminiClient:
             **({"response_json_schema": schema} if schema else {}),
         )
         resp = self.client.models.generate_content(
-            model=model or self.text_model, contents=prompt, config=cfg
+            model=model or self.text_model, contents=self._to_parts(contents), config=cfg
         )
         return resp.text or ""
 
@@ -131,22 +186,21 @@ class GeminiClient:
 
         `contents` may be a prompt string or a list mixing str and raw image
         bytes — the multi-turn editing path of the correction loop sends
-        [previous_image_bytes, feedback_text].
+        [previous_image_bytes, feedback_text]. Handles models that return the
+        image as base64 text (see decode_image_bytes).
         """
         from google.genai import types
 
-        if isinstance(contents, list):
-            contents = [
-                types.Part.from_bytes(data=c, mime_type="image/png") if isinstance(c, bytes) else c
-                for c in contents
-            ]
-        cfg = types.GenerateContentConfig(response_modalities=["TEXT", "IMAGE"])
+        cfg = types.GenerateContentConfig(
+            response_modalities=["TEXT", "IMAGE"],
+            image_config=types.ImageConfig(aspect_ratio=IMAGE_ASPECT_RATIO, image_size=IMAGE_SIZE),
+        )
         resp = self.client.models.generate_content(
-            model=model or self.image_model, contents=contents, config=cfg
+            model=model or self.image_model, contents=self._to_parts(contents), config=cfg
         )
         for cand in resp.candidates or []:
             for part in (cand.content.parts or []) if cand.content else []:
                 data = getattr(part, "inline_data", None)
                 if data and data.data:
-                    return data.data
+                    return decode_image_bytes(data.data)
         raise RuntimeError(f"model {model or self.image_model} returned no image part")

@@ -80,8 +80,11 @@ def test_pipeline_end_to_end_with_mocks(tmp_path):
     assert result["program"]["building_type"] == "community clinic"
     assert result["report"]["final_count_exact"]
     assert len(result["plan"]["rooms"]) == 5
-    assert result["wallgraph"]["walls"] and result["wallgraph"]["nodes"]
-    assert (tmp_path / "plan" / "wallgraph.json").exists()
+    assert result["plan"]["walls"]                 # geometry layer populated
+    assert "adjacency_graph" in result["plan"]      # topology layer present
+    assert result["room_graph"]["rooms"]  # one node per room instance
+    assert (tmp_path / "plan" / "graph.json").exists()
+    assert (tmp_path / "plan" / "plan.json").exists()  # authoritative output
 
 
 # ── ③ API ─────────────────────────────────────────────────────────────────────

@@ -49,3 +49,27 @@ def l_shape() -> Plan:
 
 
 ALL = {"simple_clinic": simple_clinic, "ward_wing": ward_wing, "l_shape": l_shape}
+
+
+def make_plan_for_program(program: dict, cell: int = 5000) -> Plan:
+    """Grid layout — one square cell per room instance — matching the program exactly.
+
+    Used to build a 'perfect' MockVLM script for any programs.json entry without
+    hand-writing a synthetic plan per program.
+    """
+    total = sum(r.get("count", 1) for r in program["rooms"])
+    cols = max(3, int(total ** 0.5) + 1)
+    col = row = 0
+    rooms = []
+    for r_spec in program["rooms"]:
+        for _ in range(r_spec.get("count", 1)):
+            rooms.append(Room(
+                id=f"r{len(rooms)}",
+                type=r_spec["type"],
+                polygon=rect(col * cell, row * cell, cell, cell),
+            ))
+            col += 1
+            if col >= cols:
+                col = 0
+                row += 1
+    return Plan(plan_id="synth-prog", rooms=rooms)

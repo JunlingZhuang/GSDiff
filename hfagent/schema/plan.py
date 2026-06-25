@@ -7,7 +7,7 @@ optional fields so later phases extend this schema instead of replacing it.
 """
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 SCHEMA_VERSION = "0.1"
 
@@ -16,6 +16,8 @@ class Room(BaseModel):
     id: str
     type: str
     polygon: list[tuple[float, float]] = Field(min_length=3)  # closed implied (last != first)
+    name: str | None = None   # human label (docs/agent §3.2); optional
+    zone: str | None = None   # functional zone, e.g. "ward"; optional
 
     def area(self) -> float:
         pts = self.polygon
@@ -43,6 +45,21 @@ class Door(BaseModel):  # Phase >=1; hangs on a wall (wall_id + position 0..1)
     type: str = "door"
 
 
+class AdjEdge(BaseModel):
+    """Topology-layer edge: two rooms connected, realised by a door (docs §3.2)."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    from_: str = Field(alias="from")  # room id (or "exterior")
+    to: str                            # room id (or "exterior")
+    type: str = "door"
+    via: str | None = None             # the Door.id that realises this edge
+
+
+class AdjacencyGraph(BaseModel):
+    nodes: list[str] = []   # room ids
+    edges: list[AdjEdge] = []
+
+
 class Plan(BaseModel):
     schema_version: str = SCHEMA_VERSION
     plan_id: str = "p0"
@@ -52,6 +69,7 @@ class Plan(BaseModel):
     rooms: list[Room] = []
     walls: list[Wall] = []
     doors: list[Door] = []
+    adjacency_graph: AdjacencyGraph = Field(default_factory=AdjacencyGraph)
 
     def bounds(self) -> tuple[float, float, float, float]:
         xs = [x for r in self.rooms for x, _ in r.polygon]

@@ -53,7 +53,7 @@ def generate(req: GenerateRequest, client: GeminiClient = Depends(get_client)) -
     session.mkdir(parents=True, exist_ok=True)
     try:
         program = understand(req.text, client)
-        report, plan, wallgraph = generate_plan(
+        report, plan, room_graph = generate_plan(
             program, client, session,
             max_rounds=_cfg["max_correction_rounds"],
             generation_mode=_cfg["generation_mode"],
@@ -65,5 +65,5 @@ def generate(req: GenerateRequest, client: GeminiClient = Depends(get_client)) -
         "program": program,
         "report": report,
         "plan": plan,
-        "wallgraph": wallgraph,
+        "room_graph": room_graph,
     }

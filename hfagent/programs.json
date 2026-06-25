@@ -120,5 +120,27 @@
       ["exam_room", "corridor"],
       ["office", "corridor"]
     ]
+  },
+  "hospital-tower-floor": {
+    "building_type": "very large hospital inpatient tower floor, multiple wings around a central core (~80 rooms)",
+    "rooms": [
+      { "type": "patient_room",  "count": 40, "approx_area_m2": 16 },
+      { "type": "toilet",        "count": 16, "approx_area_m2": 4  },
+      { "type": "exam_room",     "count": 6,  "approx_area_m2": 18 },
+      { "type": "office",        "count": 6,  "approx_area_m2": 12 },
+      { "type": "nurse_station", "count": 4,  "approx_area_m2": 24 },
+      { "type": "storage",       "count": 4,  "approx_area_m2": 10 },
+      { "type": "corridor",      "count": 4   },
+      { "type": "waiting",       "count": 2,  "approx_area_m2": 30 }
+    ],
+    "adjacency": [
+      ["patient_room",  "corridor"],
+      ["toilet",        "patient_room"],
+      ["nurse_station", "corridor"],
+      ["exam_room",     "corridor"],
+      ["office",        "corridor"],
+      ["storage",       "corridor"],
+      ["waiting",       "corridor"]
+    ]
   }
 }

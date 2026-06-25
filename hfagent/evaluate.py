@@ -11,17 +11,20 @@ Test inputs live in hfagent/programs.json. Room types must exist in
 schema/palette.py; each room entry supports an optional "approx_area_m2" hint.
 
 Outputs per program under hfagent/out/<run>/<program>/:
-    gemini_r*.png   VLM images per correction round
-    parsed.json     cv_parse result (units px)
-    fixed.json      after deterministic count repair
-    recon.png       re-render of fixed plan
-    wallgraph.json  wall-graph structure
-    report.json     counts, rounds, fix ops
+    gemini_r*.png         colour-block VLM image per correction round
+    gemini_r*.real.png    realistic plan per round (doors visible here)
+    parsed.json           cv_parse result (units px)
+    fixed.json            after deterministic count repair
+    recon.png             re-render of fixed plan
+    graph.json            room adjacency graph (rooms + doors)
+    recon_with_door.png   recon.png with door markers overlaid
+    report.json           counts, rounds, fix ops
 """
 from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 
 from hfagent.llm import GeminiClient
@@ -42,16 +45,21 @@ def load_programs(path: Path) -> dict:
                 f"program '{name}' uses unknown room types {unknown} — "
                 "add their colours to hfagent/schema/palette.py first"
             )
+        if prog.get("boundary") and not (Path(__file__).parent / prog["boundary"]).exists():
+            raise SystemExit(f"program '{name}': boundary image not found: {prog['boundary']}")
     return programs
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=None, help="run only the first N programs")
-    ap.add_argument("--only", default=None, help="comma-separated program names")
+    ap.add_argument("--only", "--program", "-p", dest="only", default=None,
+                    help="run only these program(s) by name (comma-separated)")
     ap.add_argument("--programs", default=DEFAULT_PROGRAMS, help="path to programs JSON")
     ap.add_argument("--generation-mode", default=None, dest="generation_mode",
                     help="override config.json generation_mode (real2color)")
+    ap.add_argument("--boundary", default=None,
+                    help="building-outline image to fit (overrides any per-program boundary)")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
@@ -71,15 +79,28 @@ def main() -> None:
     print(f"image model:      {client.image_model}")
     print(f"generation mode:  {generation_mode} (max {cfg['max_correction_rounds']} correction rounds)")
 
-    out_dir = Path(args.out) if args.out else Path(__file__).parent / "out" / "phase0a"
+    # timestamped run dir so repeated evaluations never clobber each other
+    out_dir = Path(args.out) if args.out else (
+        Path(__file__).parent / "out" / "eval" / time.strftime("%Y%m%d-%H%M%S")
+    )
+    def resolve(p: str) -> Path:
+        cand = Path(p)
+        return cand if cand.exists() else Path(__file__).parent / p
+
     reports = []
     for name, program in list(programs.items())[: args.n]:
-        print(f"-- {name} ...")
+        # optional second entry: --boundary flag (all programs) or a per-program field
+        boundary = None
+        bpath = args.boundary or program.get("boundary")
+        if bpath:
+            boundary = resolve(bpath).read_bytes()
+        print(f"-- {name} ...{' [boundary]' if boundary else ''}")
         try:
             report, _, _ = generate_plan(
                 program, client, out_dir, name=name,
                 max_rounds=cfg["max_correction_rounds"],
                 generation_mode=generation_mode,
+                boundary=boundary,
             )
         except Exception as e:
             report = {"program": name, "error": str(e)}

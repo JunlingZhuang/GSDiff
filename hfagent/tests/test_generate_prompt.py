@@ -34,17 +34,21 @@ class FakeClient:
         self.calls.append(contents)
         return b"\x89PNG fake " + str(len(self.calls)).encode()
 
+    def generate_json(self, contents, schema=None) -> str:
+        return "[]"  # no doors — room adjacency extraction is exercised in test_orchestration
 
-def test_real2color_makes_two_calls_and_writes_both_files(tmp_path: Path):
+
+def test_real2color_makes_two_calls_and_writes_outputs(tmp_path: Path):
     client = FakeClient()
     generator = FloorPlanGenerator(PROGRAM, client)
     out = generator.run(tmp_path / "plan.png")
-    # call 1: realistic prompt (string); call 2: [realistic image bytes, convert prompt]
+    # 2 image calls — call 1: realistic-plan prompt (string); call 2: [realistic bytes, convert prompt]
     assert len(client.calls) == 2
-    assert isinstance(client.calls[0], str) and "realistic" in client.calls[0].lower()
+    assert isinstance(client.calls[0], str) and "architectural floor plan" in client.calls[0].lower()
     assert isinstance(client.calls[1], list)
     assert client.calls[1][0] == b"\x89PNG fake 1"   # realistic bytes forwarded
     assert "Preserve every room" in client.calls[1][1]
-    # colour-block output is pass-2; realistic intermediate saved alongside
+    # colour-block output is pass-2; realistic intermediate + room graph saved alongside
     assert out.read_bytes() == b"\x89PNG fake 2"
     assert (tmp_path / "plan.real.png").read_bytes() == b"\x89PNG fake 1"
+    assert (tmp_path / "plan.graph.json").exists()
