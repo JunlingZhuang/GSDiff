@@ -6,7 +6,9 @@ any quality gap measured later on real Gemini images is attributable to the
 VLM image alone.
 """
 import pytest
+from PIL import Image, ImageDraw
 
+from hfagent.schema.palette import ROOM_RGB, WALL_RGB
 from hfagent.metrics import compare_plans
 from hfagent.tests.synth import ALL
 from hfagent.tools.image_parser import cv_parse
@@ -33,3 +35,19 @@ def test_roundtrip(name):
     assert m["type_accuracy"] == 1.0, m
     assert m["mean_iou"] >= 0.85, m
     assert m["min_iou"] >= 0.75, m
+
+
+def test_parser_tolerates_internal_black_holes():
+    img = Image.new("RGB", (220, 120), "white")
+    draw = ImageDraw.Draw(img)
+    draw.rectangle((10, 10, 95, 110), fill=ROOM_RGB["exam_room"])
+    draw.rectangle((105, 10, 210, 110), fill=ROOM_RGB["corridor"])
+    draw.rectangle((96, 10, 104, 110), fill=WALL_RGB)
+    draw.rectangle((35, 42, 68, 58), fill=WALL_RGB)
+    draw.rectangle((140, 45, 180, 62), fill=WALL_RGB)
+
+    parsed = cv_parse(img, min_room_px=500, grid_px=4, gap_fill_px=8)
+    counts = {t: sum(1 for r in parsed.rooms if r.type == t) for t in ("exam_room", "corridor")}
+
+    assert counts == {"exam_room": 1, "corridor": 1}
+    assert all(r.area() > 7000 for r in parsed.rooms)
