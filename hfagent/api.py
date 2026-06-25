@@ -10,16 +10,17 @@ a database arrives in Phase 5).
 from __future__ import annotations
 
 import itertools
+import json
 import time
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from hfagent.llm import GeminiClient
 from hfagent.floor_plan_generate import generate_plan, load_config
-from hfagent.nodes.understand import understand
+from hfagent.nodes.understand import sanitize_program, understand
 
 OUT_ROOT = Path(__file__).parent / "out" / "api"
 _counter = itertools.count(1)
@@ -63,6 +64,35 @@ def generate(req: GenerateRequest, client: GeminiClient = Depends(get_client)) -
     return {
         "id": next(_counter),
         "program": program,
+        "report": report,
+        "plan": plan,
+        "room_graph": room_graph,
+    }
+
+
+@app.post("/api/agent/generate-from-boundary")
+def generate_from_boundary(
+    program: str = Form(...),          # JSON-encoded structured room program
+    boundary: UploadFile = File(...),  # building outline image
+    client: GeminiClient = Depends(get_client),
+) -> dict:
+    """Second entry: structured program + building outline -> plan. Only pass-1
+    differs from /generate; everything downstream of the realflow plan is shared."""
+    session = OUT_ROOT / time.strftime("%Y%m%d-%H%M%S")
+    session.mkdir(parents=True, exist_ok=True)
+    try:
+        prog = sanitize_program(json.loads(program))
+        report, plan, room_graph = generate_plan(
+            prog, client, session,
+            max_rounds=_cfg["max_correction_rounds"],
+            generation_mode=_cfg["generation_mode"],
+            boundary=boundary.file.read(),
+        )
+    except ValueError as e:  # bad JSON, no usable rooms, etc.
+        raise HTTPException(status_code=422, detail=str(e))
+    return {
+        "id": next(_counter),
+        "program": prog,
         "report": report,
         "plan": plan,
         "room_graph": room_graph,
