@@ -1,6 +1,8 @@
 # Phase 0-B 验证结果（2026-06-10）
 
 > 计划文档：[docs/agent/](../../docs/agent/README.md) ｜ 0-A 报告：[phase0a-findings.md](phase0a-findings.md)
+>
+> ⚠️ **部分已被取代（2026-06-22）**：下文"震荡止损（stall）"纪律及对应测试 `test_oscillation_stops_early_and_keeps_best` / `stopped_early` 上报**已移除**——`max_correction_rounds` 单一上限已足够。详见 [phase1-doors-findings.md](phase1-doors-findings.md)。其余纪律（量化反馈、best-round 保留、确定性兜底）仍有效。
 
 ## 结论一句话
 
