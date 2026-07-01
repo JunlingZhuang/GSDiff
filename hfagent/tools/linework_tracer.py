@@ -8,23 +8,34 @@ plan rooms flanking each detected door. No OCR, no room typing, no model calls:
 1. WALLS  — trace exactly the walls that exist: ``_merge_overlaps(_cluster_axes(
    _raw_segments(...)))`` with NO gap bridging, plus a short-stub pass so legitimately
    short walls (door jambs, T-junction piers) below the ``_raw_segments`` length floor
-   are kept. Nothing is invented.
+   are kept. Nothing is invented. Acceptance is THICKNESS-AGNOSTIC: a run is a wall
+   from a small absolute cross floor upward (clears arc/leaf strokes) as long as its
+   ink anchors to the image-spanning wall network (drops floating label text), because
+   image models draw thickness inconsistently — fat perimeter bands over thin
+   partitions in the same drawing. Each run keeps its own measured thickness.
 2. DOORS  — a wall gap becomes a door ONLY if a real quarter-circle swing arc (radius
-   ~= the opening width, centred on one jamb) straddles it. Collinear gaps + terminal
-   gaps (wall end -> crossing perpendicular wall) are split at crossing perpendicular
-   walls (real piers) into door-scale sub-gaps; a sub-gap with no traced jamb at either
-   end is rejected outright (kills phantom doors on axis-rounding coincidences). Each
-   gap is ink-trimmed first so hidden jamb/corner stubs become traced wall and the arc
-   test sees the true opening. The arc test demands angular quarter-turn coverage,
-   radial inlier concentration and continuity, so stray ink and neighbouring arcs fail.
+   ~= the opening width for a single leaf, ~= half of it for a double door, centred on
+   one jamb) straddles it. Candidate gaps come from three sources: collinear gaps +
+   terminal gaps (wall end -> crossing perpendicular wall), both split at crossing
+   perpendicular walls (real piers) into door-scale sub-gaps, and SLOT gaps (white
+   slots cut into a band whose wall line never breaks — the door-as-window-symbol
+   style). A sub-gap with no traced jamb at either end is rejected outright (kills
+   phantom doors on axis-rounding coincidences). Each gap is ink-trimmed and ink-split
+   first so hidden jamb/corner stubs and untraced ornament piers become traced wall
+   and the arc test sees the true opening(s). The arc test demands angular
+   quarter-turn coverage, radial inlier concentration and continuity, and arc ink is
+   exclusive to one door, so stray ink, label text and neighbouring arcs fail.
 3. BRIDGE — walls are made continuous ONLY across confirmed doors; every other gap
    stays open (real passage / corridor connection).
 4. POST   — ``postprocess_walls``: absorb parallel door-frame posts, merge re-traced
    wall faces, junction snap, ink-gated L-corner snap (never seals a real opening),
    overhang trim, whisker drop. Then shapely polygonizes the closed rooms.
 
-All thresholds are wall_width-relative, so the same parameters handle 1K (~6 px walls)
-and 2K (~12 px walls) renders.
+``wall_width`` — the scale anchor for door/gap/stub/postprocess factors — is the MEDIAN
+of the accepted runs' own cross thickness (robust to fat exteriors), never an
+acceptance gate; wall ACCEPTANCE floors are absolute fractions of the image dimension,
+so the same parameters handle 1K renders, 2K renders and mixed-thickness drawings.
+A 3x3 solidify close fuses hairline-split wall faces before extraction.
 
 Fixed artifacts (returned as PNG bytes, written by the pipeline into the work dir):
     walls_overlay.png    faithful traced walls in red on the source drawing
@@ -55,28 +66,39 @@ from hfagent.tools.wall_graph import (
     _cluster_axes,
     _directional_masks,
     _estimate_stroke_thickness,
-    _estimate_wall_width,
+    _ink_anchor,
+    _is_anchored,
+    _median_wall_width,
     _merge_overlaps,
     _raw_segments,
     _snap_junctions,
+    _solidify,
 )
 
 # ---- tunable parameters (kept in one place so they can be swept) -------------------
 PARAMS = dict(
-    # short-stub trace: keep wall-thick components down to this length (in wall_width)
+    # wall acceptance: ABSOLUTE floors, never wall_width-relative — thickness varies
+    # wildly within one drawing (thin partitions under fat perimeter bands)
+    min_cross_frac=0.0033,        # thickness floor, * min image dim (clears arc/leaf strokes)
+    anchor_reach_frac=0.10,       # min ink-component reach, * min image dim (drops label text)
+    anchor_area_frac=0.10,        # min ink area vs the largest component (drops merged words)
+    max_symbol_density=0.18,      # max bbox ink fill for detached door-symbol components
+    # short-stub trace: keep wall runs down to this length (in wall_width)
     stub_min_len_factor=1.0,      # min length of a kept short stub, * wall_width
-    stub_min_cross_factor=0.60,   # min cross thickness, * wall_width (== _raw_segments)
     stub_min_density=0.45,        # min fill density of the component bbox (== _raw_segments)
     # gap -> door search  (door-scale: a swing arc fits a single-leaf opening)
     door_gap_lo_factor=1.6,       # opening must be wider than this * wall_width
     door_gap_hi_factor=10.0,      # ... and narrower than this * wall_width (else passage)
-    radius_scales=(0.9, 1.0, 1.1),  # door fills the opening: r ~= gap width (tight band)
+    # swing radius as a fraction of the opening: ~1.0 = single leaf fills the opening,
+    # ~0.5 = double door (two mirrored leaves), 0.7-0.8 = undersized leaf in a wide mouth
+    radius_scales=(0.45, 0.5, 0.55, 0.7, 0.8, 0.9, 1.0, 1.1),
     band_factor=0.16,             # annulus half-width = max(0.4*ww, band_factor * r)
     ang_tol_deg=14.0,             # angular slack outside the [0,90] quarter
     ang_bins=18,                  # bins across the 90 deg quarter (5 deg each)
     coverage_thresh=0.60,         # min fraction of quarter-turn bins occupied
     inlier_ratio_thresh=0.45,     # min fraction of quadrant ink lying ON the annulus
     max_empty_run=4,              # reject arcs with a > this consecutive-empty-bin gap
+    arc_claim_max_overlap=0.75,   # drop a door whose arc ink is mostly already claimed
     min_pixels_factor=1.2,        # min residual pixels supporting the arc = factor * ww
     # gap ink trim / jamb-stub recovery (hidden corner stubs inside a gap)
     gap_ink_frac=0.50,            # cross-band ink fraction that counts as wall ink
@@ -84,6 +106,9 @@ PARAMS = dict(
     # postprocess corner snap (L-corner pinholes; ink-gated, never crosses an opening)
     corner_snap_reach=2.5,        # max free-end extension onto a perpendicular, * ww
     corner_ink_cover=0.80,        # min fraction of ink-covered positions on the extension
+    # stub thickness must match its aligned wall's (a jamb IS that wall; a door leaf
+    # drawn as a solid bar is thinner than the wall whose axis it happens to align with)
+    stub_thickness_match=(0.55, 1.8),
     # diagnostics: polygons above this image fraction are corridor-scale, not room-scale
     room_max_area_frac=0.02,
 )
@@ -123,46 +148,44 @@ class LineworkTrace:
 
 # ---- faithful wall trace ----------------------------------------------------------
 
-def _thick_ink(dark: np.ndarray, wall_width: int) -> np.ndarray:
-    """Wall-thick ink only: opening by an ellipse drops thin text/arc strokes (~1-2px)."""
-    k = max(3, wall_width - 2)
-    return cv2.morphologyEx(dark, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
-
-
 def _short_stub_segments(
     dark: np.ndarray,
     hm: np.ndarray,
     vm: np.ndarray,
-    wall_axes: dict[str, list[float]],
+    wall_axes: dict[str, list[tuple[float, float]]],
     wall_width: int,
+    min_cross: int,
+    anchor: tuple[np.ndarray, np.ndarray],
 ) -> list[WallSegment]:
-    """Recover wall-thick stubs (door jambs, T-junction piers) the long trace drops.
+    """Recover short wall stubs (door jambs, T-junction piers) the long trace drops.
 
-    ``_directional_masks`` opens with a >=15px kernel, so it erases any wall piece
+    ``_directional_masks`` opens with a long kernel, so it erases any wall piece
     shorter than that - exactly the door jambs (the short wall between an opening and a
     corner) and the short piers at T-junctions. We re-open ``dark`` with a *short*
-    directional kernel, intersect with the wall-thick mask (kills thin text/arc ink),
-    drop what the long trace already owns, and keep only short runs that line up with an
-    existing wall axis of the same orientation. That alignment test rejects door leaves
-    (a leaf sits inside the opening, perpendicular to the wall, at an axis no wall shares),
-    so jambs are *traced*, never invented.
+    directional kernel, drop what the long trace already owns, and keep only short runs
+    that (a) clear the same absolute thickness floor as the long trace (kills arc/leaf
+    strokes), (b) are anchored to the image-spanning wall network (kills label text),
+    and (c) line up with a traced wall axis of the same orientation AND match that
+    wall's own thickness. A jamb is a piece of the wall it aligns with, so their
+    thickness agrees; a door LEAF drawn as a solid bar (some styles do) hangs at
+    whatever axis a nearby partition happens to share but is leaf-thin relative to it,
+    so the thickness match rejects it - jambs are *traced*, never invented.
     """
-    thick = _thick_ink(dark, wall_width)
     stub_k = max(3, round(wall_width * 0.9))
     raw_floor = max(8, wall_width * 2)
     stub_floor = max(2, round(wall_width * PARAMS["stub_min_len_factor"]))
-    min_cross = max(2, math.ceil(wall_width * PARAMS["stub_min_cross_factor"]))
     align_tol = wall_width * 1.5
+    match_lo, match_hi = PARAMS["stub_thickness_match"]
 
-    h_short = cv2.morphologyEx(dark, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (stub_k, 1))) & thick
-    v_short = cv2.morphologyEx(dark, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (1, stub_k))) & thick
+    h_short = cv2.morphologyEx(dark, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (stub_k, 1)))
+    v_short = cv2.morphologyEx(dark, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (1, stub_k)))
     hm_d = cv2.dilate(hm, np.ones((3, 3), np.uint8))
     vm_d = cv2.dilate(vm, np.ones((3, 3), np.uint8))
     h_new = ((h_short > 0) & (hm_d == 0)).astype(np.uint8)
     v_new = ((v_short > 0) & (vm_d == 0)).astype(np.uint8)
 
     def collect(mask, orientation, axes):
-        count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+        count, comp_labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
         out = []
         for index in range(1, count):
             x, y, width, height, area = stats[index]
@@ -171,44 +194,100 @@ def _short_stub_segments(
             density = area / max(1, width * height)
             if not (stub_floor <= length < raw_floor) or cross < min_cross or density < PARAMS["stub_min_density"]:
                 continue
-            ys, xs = np.where(labels == index)
+            ys, xs = np.where(comp_labels == index)
             axis = float(np.median(ys)) if orientation == "horizontal" else float(np.median(xs))
-            if not any(abs(axis - a) <= align_tol for a in axes):
+            if not any(abs(axis - a) <= align_tol and match_lo <= cross / t <= match_hi
+                       for a, t in axes):
                 continue
             if orientation == "horizontal":
-                out.append(WallSegment(orientation, axis, float(x), float(x + width - 1), float(cross)))
+                stub = WallSegment(orientation, axis, float(x), float(x + width - 1), float(cross))
             else:
-                out.append(WallSegment(orientation, axis, float(y), float(y + height - 1), float(cross)))
+                stub = WallSegment(orientation, axis, float(y), float(y + height - 1), float(cross))
+            if _is_anchored(stub, anchor):
+                out.append(stub)
         return out
 
     return collect(h_new, "horizontal", wall_axes["horizontal"]) + collect(v_new, "vertical", wall_axes["vertical"])
 
 
+def _drop_leaf_bars(segments: list[WallSegment], wall_width: int) -> list[WallSegment]:
+    """Drop door LEAVES traced as walls (styles that draw the open leaf as a solid bar).
+
+    A leaf bar is door-length, hangs off its hinge wall into open room space, and is
+    leaf-thin. Geometrically: a run no longer than a door opening whose line has no
+    collinear sibling of similar thickness (a jamb piece is part of an interrupted
+    wall LINE; a leaf sits on its own axis) and whose far end touches no perpendicular
+    run (a real pier terminates on walls at both ends; a leaf tip floats). Only runs
+    failing BOTH tests are dropped, so door-pierced walls and short piers survive.
+    """
+    max_len = wall_width * PARAMS["door_gap_hi_factor"]
+    sibling_tol = max(1.0, wall_width * 0.5)
+    touch_tol = wall_width * 1.2
+    match_lo, match_hi = PARAMS["stub_thickness_match"]
+
+    def has_collinear_sibling(s: WallSegment) -> bool:
+        return any(
+            o is not s and o.orientation == s.orientation
+            and abs(o.axis - s.axis) <= sibling_tol
+            and match_lo <= s.thickness / max(1.0, o.thickness) <= match_hi
+            for o in segments
+        )
+
+    def both_ends_on_walls(s: WallSegment) -> bool:
+        for p in (s.start, s.end):
+            x, y = (p, s.axis) if s.orientation == "horizontal" else (s.axis, p)
+            if not any(
+                o.orientation != s.orientation
+                and abs((x if s.orientation == "horizontal" else y) - o.axis) <= touch_tol
+                and o.start - touch_tol <= (y if s.orientation == "horizontal" else x) <= o.end + touch_tol
+                for o in segments
+            ):
+                return False
+        return True
+
+    return [s for s in segments
+            if (s.end - s.start) > max_len or has_collinear_sibling(s) or both_ends_on_walls(s)]
+
+
 def trace_walls(gray: np.ndarray):
     """Faithful directional-morphology wall trace with a short-stub recovery pass.
 
-    Returns ``(walls, wall_width, dark, wall_pixels, raw_count, stub_count)``.
+    Acceptance is thickness-agnostic (see ``_raw_segments``): image models vary wall
+    thickness wildly across AND within drawings (a 6-room clinic gets ~55 px perimeter
+    bands over ~15 px partitions where an 80-room tower draws uniform ~11 px), so runs
+    are accepted from a small absolute floor upward and ``wall_width`` — the scale
+    anchor for door/gap/postprocess factors — is the MEDIAN of the accepted runs' own
+    cross thickness, never an acceptance gate.
+
+    Returns ``(walls, wall_width, dark, wall_pixels, raw_count, stub_count, anchor)``
+    — ``anchor`` is the ink component labels/reach pair the anchoring gates share.
     """
     _, dark = cv2.threshold(gray, 0, 1, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    # image models vary wall thickness wildly with plan size (a 6-room clinic can get
-    # ~55 px bands at 2K where an 80-room tower gets ~11 px), so the directional
-    # kernels and the wall-width cap must follow the measured stroke, not the image.
+    dark = _solidify(dark)
+    # the directional opening kernels must exceed the THICKEST band (else perpendicular
+    # bands leak into both masks), so they follow the measured heaviest stroke.
     stroke = _estimate_stroke_thickness(dark)
     hm, vm = _directional_masks(dark, min_len=max(15, round(stroke * 1.6)))
-    ww = _estimate_wall_width(hm, vm, gray.shape,
-                              max_width=max(round(min(gray.shape) * 0.03), stroke + 2))
 
-    raw = _raw_segments(hm, "horizontal", ww) + _raw_segments(vm, "vertical", ww)
+    min_cross = max(3, round(min(gray.shape) * PARAMS["min_cross_frac"]))
+    min_reach = max(64.0, min(gray.shape) * PARAMS["anchor_reach_frac"])
+    anchor = _ink_anchor(dark, min_reach, PARAMS["anchor_area_frac"],
+                         PARAMS["max_symbol_density"])
+    raw = _raw_segments(hm, "horizontal", min_cross) + _raw_segments(vm, "vertical", min_cross)
+    raw = [s for s in raw if _is_anchored(s, anchor)]
+    ww = _median_wall_width(raw, gray.shape)
+    raw = _drop_leaf_bars(raw, ww)
+
     wall_axes = {
-        "horizontal": [s.axis for s in raw if s.orientation == "horizontal"],
-        "vertical": [s.axis for s in raw if s.orientation == "vertical"],
+        "horizontal": [(s.axis, max(1.0, s.thickness)) for s in raw if s.orientation == "horizontal"],
+        "vertical": [(s.axis, max(1.0, s.thickness)) for s in raw if s.orientation == "vertical"],
     }
-    stubs = _short_stub_segments(dark, hm, vm, wall_axes, ww)
+    stubs = _short_stub_segments(dark, hm, vm, wall_axes, ww, min_cross, anchor)
 
     clustered = _cluster_axes(raw + stubs, tolerance=max(1.0, ww * 0.5))
     walls = _merge_overlaps(clustered, tolerance=max(1.0, ww * 0.5))
     wall_pixels = ((hm > 0) | (vm > 0)).astype(np.uint8)
-    return walls, ww, dark, wall_pixels, len(raw), len(stubs)
+    return walls, ww, dark, wall_pixels, len(raw), len(stubs), anchor
 
 
 # ---- gaps -------------------------------------------------------------------------
@@ -274,6 +353,56 @@ def add_terminal_gaps(segments: list[WallSegment], wall_width: int):
     return out
 
 
+def find_slot_gaps(segments, dark: np.ndarray, wall_width: int):
+    """Door-slot styles: gaps cut INTO a wall band whose traced line never breaks.
+
+    Some drawings keep every wall line continuous and mark a door as a white slot
+    inside the band (exactly like their window symbol) with the swing arc alongside —
+    the collinear/terminal gap finders see no break at all. Scan each traced wall's
+    band for interior low-ink runs at door scale and emit them as gap candidates with
+    real jambs (the band continues on both sides). Only a swing arc confirms them, so
+    window slots stay walls. Only segments of real BAND thickness are scanned: a
+    door-leaf line traced as a wall must not fabricate slot gaps under the door's own
+    arc (which would out-claim the true opening's candidate).
+    """
+    height, width = dark.shape
+    half = wall_width // 2 + 1
+    lo_w = wall_width * PARAMS["door_gap_lo_factor"]
+    hi_w = wall_width * PARAMS["door_gap_hi_factor"]
+    min_band = max(2 * max(3, round(min(dark.shape) * PARAMS["min_cross_frac"])),
+                   0.5 * wall_width)
+    gaps = []
+    for s in segments:
+        if s.thickness < min_band:
+            continue
+        axis = int(round(s.axis))
+        lo, hi = int(math.floor(s.start)), int(math.ceil(s.end))
+        if s.orientation == "horizontal":
+            band = dark[max(0, axis - half):min(height, axis + half + 1), max(0, lo):min(width, hi)]
+            frac = band.mean(axis=0) if band.size else np.zeros(0)
+        else:
+            band = dark[max(0, lo):min(height, hi), max(0, axis - half):min(width, axis + half + 1)]
+            frac = band.mean(axis=1) if band.size else np.zeros(0)
+        n = int(frac.shape[0])
+        if n == 0:
+            continue
+        is_open = frac < PARAMS["gap_ink_frac"]
+        position = 0
+        while position < n:
+            if is_open[position]:
+                begin = position
+                while position < n and is_open[position]:
+                    position += 1
+                if begin > 0 and position < n and lo_w <= (position - begin) <= hi_w:
+                    gaps.append(dict(orientation=s.orientation, axis=float(s.axis),
+                                     start=float(lo + begin), end=float(lo + position),
+                                     width=float(position - begin),
+                                     real_start=True, real_end=True))
+            else:
+                position += 1
+    return gaps
+
+
 def split_gaps_at_piers(gaps, segments, wall_width):
     """Split each collinear gap wherever a perpendicular wall (a real pier) crosses it.
 
@@ -309,16 +438,20 @@ def split_gaps_at_piers(gaps, segments, wall_width):
 
 # ---- gap ink trim (hidden jamb-stub recovery) ---------------------------------------
 
-def trim_gap_ink(gap, dark: np.ndarray, wall_width: int):
-    """Shrink a gap past contiguous wall-thick ink at either end; recover that ink.
+def trim_gap_ink(gap, dark: np.ndarray, wall_width: int,
+                 anchor: tuple[np.ndarray, np.ndarray] | None = None):
+    """Shrink/split a gap on contiguous wall-thick ink in its band; recover that ink.
 
-    The directional trace drops jamb stubs that merge into a perpendicular wall's body
-    (a 13px-thick wall survives the short directional opening, so the stub's component
-    exceeds the stub-length ceiling). Those stubs are still plain wall ink in ``dark``:
-    walk inward from each gap end while the cross-band ink fraction stays wall-like and
-    emit the consumed run as a traced ``WallSegment`` (nothing invented - it is ink).
-    Returns ``(trimmed_gap_or_None, recovered_stubs)``; ``None`` when no opening remains
-    (the whole gap was ink, i.e. a wall piece the trace missed outright).
+    The directional trace drops wall pieces that are not axis-aligned runs: jamb stubs
+    merged into a perpendicular wall's body, and ORNAMENT PIERS (diagonal diamond
+    hinge posts some styles draw mid-opening). Both are still plain wall ink in
+    ``dark``: scan the gap band for runs where the cross-band ink fraction stays
+    wall-like. Runs at the gap ends shrink the gap; a long-enough interior run that is
+    ANCHORED to the wall network is an untraced pier that SPLITS the gap into
+    door-scale pieces (label text floating on the gap line is not anchored and never
+    splits). Every consumed run is emitted as a traced ``WallSegment`` (nothing
+    invented - it is ink). Returns ``(gap_pieces, recovered_stubs)``; no pieces when
+    no opening remains.
     """
     h, w = dark.shape
     half = wall_width // 2 + 1
@@ -337,34 +470,69 @@ def trim_gap_ink(gap, dark: np.ndarray, wall_width: int):
         frac = band.mean(axis=1) if band.size else np.zeros(0)
     n = int(frac.shape[0])
     if n == 0:
-        return None, []
+        return [], []
     is_wall = frac >= PARAMS["gap_ink_frac"]
-    left = 0
-    while left < n and is_wall[left]:
-        left += 1
-    right = 0
-    while right < n - left and is_wall[n - 1 - right]:
-        right += 1
+
+    # contiguous wall-ink runs across the band, as [start, end) offsets
+    runs, position = [], 0
+    while position < n:
+        if is_wall[position]:
+            begin = position
+            while position < n and is_wall[position]:
+                position += 1
+            runs.append((begin, position))
+        else:
+            position += 1
 
     min_run = wall_width * PARAMS["stub_recover_factor"]
-    stubs = []
-    if left >= min_run:
-        stubs.append(WallSegment(gap["orientation"], gap["axis"],
-                                 float(lo), float(lo + left), float(wall_width)))
-    if right >= min_run:
-        stubs.append(WallSegment(gap["orientation"], gap["axis"],
-                                 float(hi - right), float(hi), float(wall_width)))
-    new_start, new_end = float(lo + left), float(hi - right)
-    if new_end - new_start <= wall_width * 0.75:
-        return None, stubs
-    trimmed = dict(gap, start=new_start, end=new_end, width=new_end - new_start)
-    return trimmed, stubs
+    stubs, cuts = [], []
+    for begin, end in runs:
+        run_len = end - begin
+        at_edge = begin == 0 or end == n
+        stub = WallSegment(gap["orientation"], gap["axis"],
+                           float(lo + begin), float(lo + end), float(wall_width))
+        if at_edge:
+            cuts.append((begin, end))          # end ink always trims the opening
+            if run_len >= min_run:
+                stubs.append(stub)             # ... and long enough to keep as wall
+            continue
+        # interior ink = candidate untraced pier; only long wall-network ink splits
+        if run_len >= min_run and anchor is not None and _is_anchored(stub, anchor):
+            stubs.append(stub)
+            cuts.append((begin, end))
+
+    # ink-free pieces between consumed runs (and the gap ends)
+    bounds, cursor = [], 0
+    for begin, end in cuts:
+        bounds.append((cursor, begin))
+        cursor = end
+    bounds.append((cursor, n))
+    pieces = []
+    for begin, end in bounds:
+        if (end - begin) <= wall_width * 0.75:
+            continue
+        pieces.append(dict(gap, start=float(lo + begin), end=float(lo + end),
+                           width=float(end - begin),
+                           real_start=bool(gap.get("real_start", True)) if begin == 0 else True,
+                           real_end=bool(gap.get("real_end", True)) if end == n else True))
+    return pieces, stubs
 
 
 # ---- door-arc detector ------------------------------------------------------------
 
-def _residual_mask(dark, wall_pixels):
-    return ((dark > 0) & (wall_pixels == 0)).astype(np.uint8)
+def _residual_mask(dark, wall_pixels, anchor):
+    """Non-wall ink that may support a swing arc — no label text.
+
+    Door symbols usually touch the wall network (anchored); some styles draw them
+    fully detached, in which case they are still sparse thin curves (symbol_like).
+    Label text is neither — dense floating glyphs — and is excluded so room labels
+    cannot score as arc evidence (a floating word inside a big axis-coincidence
+    gap can otherwise outscore real doors).
+    """
+    labels, anchored, symbol_like = anchor
+    resid = ((dark > 0) & (wall_pixels == 0)).astype(np.uint8)
+    resid[~(anchored | symbol_like)[labels]] = 0
+    return resid
 
 
 def _arc_score(pts_a, pts_p, r, band, ang_tol, ang_bins):
@@ -406,7 +574,16 @@ def _arc_score(pts_a, pts_p, r, band, ang_tol, ang_bins):
 
 
 def detect_door_at_gap(resid_pts, gap, wall_width):
-    """Return the best TracedDoor for a gap, or None. Tests both jambs x both swing sides."""
+    """Return ``(best TracedDoor, supporting resid_pts indices)`` for a gap, or None.
+
+    Tests both jambs x both swing sides x every ``radius_scales`` regime: single leaf
+    (r ~= gap), double door (two mirrored leaves, each r ~= gap/2 — either arc alone
+    confirms it, so wide waiting/corridor double doors bridge like any opening) and
+    an undersized leaf in a wide mouth (r ~= 0.7-0.8 gap). The supporting indices
+    are the winning arc's annulus inliers — ``detect_doors`` uses them to make arc
+    ink EXCLUSIVE to one door, killing phantom gaps scored on a neighbouring door's
+    arc.
+    """
     w = gap["width"]
     if not (wall_width * PARAMS["door_gap_lo_factor"] <= w <= wall_width * PARAMS["door_gap_hi_factor"]):
         return None
@@ -421,7 +598,8 @@ def detect_door_at_gap(resid_pts, gap, wall_width):
         jambs = [((axis, e0), np.array([0.0, 1.0])), ((axis, e1), np.array([0.0, -1.0]))]
         perp_dirs = [np.array([-1.0, 0.0]), np.array([1.0, 0.0])]
 
-    r_hi = w * max(PARAMS["radius_scales"])
+    radius_scales = PARAMS["radius_scales"]
+    r_hi = w * max(radius_scales)
     # window around the gap to limit candidate residual points
     if orientation == "horizontal":
         gx0, gx1 = min(e0, e1), max(e0, e1)
@@ -434,14 +612,15 @@ def detect_door_at_gap(resid_pts, gap, wall_width):
     local = resid_pts[win]
     if local.shape[0] < min_pixels:
         return None
+    win_idx = np.where(win)[0]
 
-    best = None  # (score, cov, ratio, empty, npix, hinge, perp, r)
+    best = None  # (score, cov, ratio, empty, npix, hinge, along, perp, r)
     for (hinge, along_unit) in jambs:
         rel = local - np.array(hinge)
         a_all = rel @ along_unit
         for perp_unit in perp_dirs:
             p_all = rel @ perp_unit
-            for scale in PARAMS["radius_scales"]:
+            for scale in radius_scales:
                 r = w * scale
                 band = max(band_floor, PARAMS["band_factor"] * r)
                 cov, npix, ratio, empty = _arc_score(a_all, p_all, r, band,
@@ -454,41 +633,65 @@ def detect_door_at_gap(resid_pts, gap, wall_width):
                     continue
                 score = cov * ratio
                 if best is None or score > best[0]:
-                    best = (score, cov, ratio, empty, npix, hinge, perp_unit, r)
+                    best = (score, cov, ratio, empty, npix, hinge, along_unit, perp_unit, r)
     if best is None:
         return None
-    _, cov, ratio, empty, npix, hinge, perp_unit, r = best
-    return TracedDoor(orientation, axis, e0, e1, (float(hinge[0]), float(hinge[1])),
+    _, cov, ratio, empty, npix, hinge, along_unit, perp_unit, r = best
+    # winning arc's annulus inliers, as global resid_pts indices (its exclusive ink)
+    rel = local - np.array(hinge)
+    a_all, p_all = rel @ along_unit, rel @ perp_unit
+    d = np.hypot(a_all, p_all)
+    ang = np.degrees(np.arctan2(p_all, a_all))
+    band = max(band_floor, PARAMS["band_factor"] * r)
+    in_band = ((ang >= -PARAMS["ang_tol_deg"]) & (ang <= 90.0 + PARAMS["ang_tol_deg"])
+               & (d >= 0.45 * r) & (d <= 1.55 * r) & (np.abs(d - r) <= band))
+    door = TracedDoor(orientation, axis, e0, e1, (float(hinge[0]), float(hinge[1])),
                       (float(perp_unit[0]), float(perp_unit[1])), float(r), float(cov), int(npix),
                       float(ratio))
+    return door, win_idx[in_band]
 
 
-def detect_doors(segments, dark, wall_pixels, wall_width):
+def detect_doors(segments, dark, wall_pixels, wall_width, anchor):
     """Return ``(raw_gaps, sub_gaps, doors, jamb_stubs)``.
 
     Doors are confirmed on pier-split sub-gaps of collinear + terminal gaps. A sub-gap
     whose BOTH ends are pier cuts has no traced wall jamb at all - it is a rounding
     coincidence of far-apart walls sharing an axis (the source of phantom doors bridged
     in mid-room on a neighbouring door's arc ink) - and is rejected outright. Each
-    surviving gap is first ink-trimmed so hidden corner/jamb stubs become walls and the
-    arc test sees the true opening width.
+    surviving gap is then ink-trimmed AND ink-split (``trim_gap_ink``) so hidden
+    corner/jamb stubs and untraced ornament piers become walls and the arc test sees
+    the true opening(s).
+
+    Arc ink is EXCLUSIVE to one door: candidates are ranked by arc quality and each
+    residual point supports only the first door that claims it, so an axis-rounding
+    gap whose annulus merely grazes a NEIGHBOUR's swing arc (its own opening has no
+    arc) finds its ink already claimed and dies. Real doors own disjoint arcs.
     """
-    resid = _residual_mask(dark, wall_pixels)
+    resid = _residual_mask(dark, wall_pixels, anchor)
     ys, xs = np.where(resid > 0)
     resid_pts = np.column_stack([xs.astype(np.float64), ys.astype(np.float64)])
     raw_gaps = find_gaps(segments, wall_width) + add_terminal_gaps(segments, wall_width)
-    sub_gaps = split_gaps_at_piers(raw_gaps, segments, wall_width)
-    doors, jamb_stubs = [], []
+    sub_gaps = (split_gaps_at_piers(raw_gaps, segments, wall_width)
+                + find_slot_gaps(segments, dark, wall_width))
+    candidates, jamb_stubs = [], []
     for gap in sub_gaps:
         if not (gap.get("real_start", True) or gap.get("real_end", True)):
             continue
-        trimmed, stubs = trim_gap_ink(gap, dark, wall_width)
+        pieces, stubs = trim_gap_ink(gap, dark, wall_width, anchor)
         jamb_stubs.extend(stubs)
-        if trimmed is None:
+        for piece in pieces:
+            detected = detect_door_at_gap(resid_pts, piece, wall_width)
+            if detected is not None:
+                candidates.append(detected)
+
+    claimed = np.zeros(resid_pts.shape[0], dtype=bool)
+    doors = []
+    for door, support in sorted(candidates, key=lambda c: c[0].coverage * c[0].inlier_ratio,
+                                reverse=True):
+        if support.size and float(claimed[support].mean()) > PARAMS["arc_claim_max_overlap"]:
             continue
-        door = detect_door_at_gap(resid_pts, trimmed, wall_width)
-        if door is not None:
-            doors.append(door)
+        claimed[support] = True
+        doors.append(door)
     return raw_gaps, sub_gaps, _dedupe_doors(doors, wall_width), jamb_stubs
 
 
@@ -950,8 +1153,9 @@ def trace_linework(png: bytes) -> LineworkTrace:
         raise ValueError("trace_linework: could not decode the plan image")
     gray = cv2.cvtColor(src_bgr, cv2.COLOR_BGR2GRAY)
 
-    walls, wall_width, dark, wall_pixels, raw_count, stub_count = trace_walls(gray)
-    raw_gaps, sub_gaps, doors, jamb_stubs = detect_doors(walls, dark, wall_pixels, wall_width)
+    walls, wall_width, dark, wall_pixels, raw_count, stub_count, anchor = trace_walls(gray)
+    raw_gaps, sub_gaps, doors, jamb_stubs = detect_doors(walls, dark, wall_pixels, wall_width,
+                                                         anchor)
     bridged, bridge_count = bridge_at_doors(walls, doors, wall_width, extra=jamb_stubs)
     post, post_stats = postprocess_walls(bridged, wall_width, dark)
     polygons = polygonize_rooms(post, gray.shape)

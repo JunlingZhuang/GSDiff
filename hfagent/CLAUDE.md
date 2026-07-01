@@ -63,9 +63,16 @@ block with its own `text_model` / `image_model` / `boundary`; the active one is
   confirms a door ONLY where a quarter-circle swing arc straddles a wall gap, bridges the
   walls at confirmed doors, post-processes (posts absorbed, faces merged, ink-gated corner
   snap, whiskers dropped) and polygonizes the closed rooms into an untyped px-unit `Plan`
-  (`type="unknown"`, ids `r1..rN`). Runs a **single round** — untyped rooms give no
-  per-type violation signal — and the report compares total rooms traced vs the program
-  total. Every run writes the fixed trace artifacts (see Output artifacts).
+  (`type="unknown"`, ids `r1..rN`). Wall ACCEPTANCE is thickness-agnostic — image models
+  draw fat perimeter bands over thin partitions in one drawing, so runs are accepted from
+  a small absolute floor upward (wall-network anchoring drops label text) and `wall_width`
+  (the scale anchor for door/postprocess factors) is the MEDIAN of the accepted runs' own
+  thickness, never an acceptance gate. Door gaps come from breaks, terminal spans AND
+  slots cut into an unbroken band; single/double/undersized leaves all confirm. Runs a
+  **single round** — untyped rooms give no per-type violation signal — and the report
+  compares total rooms traced vs the program total. Every run writes the fixed trace
+  artifacts (see Output artifacts). Known limits: orthogonal walls only (diagonal wings
+  do not close) and a diagonal leaf on a diagonal pier is not confirmable.
 
 All structure modes share the SAME downstream (`fix_room_counts` → `plan_to_walls` /
 `place_doors` → unified `Plan`). The divergence is ONLY in how the `Plan` is produced —

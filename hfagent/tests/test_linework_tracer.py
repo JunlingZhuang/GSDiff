@@ -54,6 +54,102 @@ def synthetic_line_plan_png() -> bytes:
     return buf.tobytes()
 
 
+def _png(image: np.ndarray) -> bytes:
+    ok, buf = cv2.imencode(".png", image)
+    assert ok
+    return buf.tobytes()
+
+
+def two_room_plan(draw_extras) -> bytes:
+    """Outer rect + one vertical partition with a door gap; ``draw_extras(image)``
+    adds the style variation under test (leaf bar, label text, second arc...)."""
+    image = np.full((540, 820, 3), 255, np.uint8)
+    black = (0, 0, 0)
+    cv2.rectangle(image, (30, 30), (790, 510), black, 10)
+    cv2.line(image, (410, 30), (410, 240), black, 10)             # partition above the door
+    cv2.line(image, (410, 280), (410, 510), black, 10)            # partition below the door
+    draw_extras(image)
+    return _png(image)
+
+
+def test_mixed_wall_thickness_is_accepted_and_ww_is_the_thin_mode():
+    """Fat perimeter bands over thin partitions (one drawing) must all trace.
+
+    The old estimate-then-gate design took wall_width from an ink percentile (pulled
+    up by the fat exterior) and rejected every wall thinner than 0.6x it — exactly
+    the thin partitions. Acceptance is now thickness-agnostic and wall_width is the
+    median of the accepted runs' own thickness (the partition mode).
+    """
+    image = np.full((540, 820, 3), 255, np.uint8)
+    black = (0, 0, 0)
+    cv2.rectangle(image, (30, 30), (790, 510), black, 24)         # fat exterior
+    for y in (220, 320):                                          # thin corridor walls
+        cv2.line(image, (42, y), (160, y), black, 7)
+        cv2.line(image, (200, y), (560, y), black, 7)
+        cv2.line(image, (600, y), (778, y), black, 7)
+    cv2.line(image, (410, 42, ), (410, 220), black, 7)            # thin partitions
+    cv2.line(image, (410, 320), (410, 498), black, 7)
+    for hinge_x in (200, 600):                                    # arcs + leaves at the gaps
+        cv2.ellipse(image, (hinge_x, 220), (40, 40), 0, 180, 270, black, 2)
+        cv2.line(image, (hinge_x, 220), (hinge_x, 180), black, 2)
+        cv2.ellipse(image, (hinge_x, 320), (40, 40), 0, 90, 180, black, 2)
+        cv2.line(image, (hinge_x, 320), (hinge_x, 360), black, 2)
+
+    trace = trace_linework(_png(image))
+    assert len(trace.plan.rooms) == 5                             # nothing lost to the fat bands
+    assert trace.diagnostics["doors_detected"] == 4
+    assert 6 <= trace.diagnostics["wall_width"] <= 10             # thin (partition) mode, not 24
+
+
+def test_solid_leaf_bar_is_not_traced_as_a_wall():
+    """Some styles draw the open door leaf as a SOLID bar; it must not become a wall
+    (a leaf-wall cuts the gap into pier fragments and the door is lost)."""
+    def extras(image):
+        black = (0, 0, 0)
+        cv2.line(image, (370, 240), (410, 240), black, 6)         # leaf bar into the left room
+        cv2.ellipse(image, (410, 240), (40, 40), 0, 90, 180, black, 2)
+
+    trace = trace_linework(two_room_plan(extras))
+    assert len(trace.plan.rooms) == 2
+    assert trace.diagnostics["doors_detected"] == 1
+
+
+def test_floating_label_text_is_not_wall_and_not_arc_evidence():
+    """Fat label glyphs float in room interiors: they must neither trace as walls nor
+    score as swing-arc ink (phantom doors bridged mid-room on label strokes)."""
+    def door_only(image):
+        cv2.ellipse(image, (410, 240), (40, 40), 0, 90, 180, (0, 0, 0), 2)
+
+    def door_and_text(image):
+        door_only(image)
+        cv2.putText(image, "exam_room_1", (100, 160), cv2.FONT_HERSHEY_SIMPLEX,
+                    1.2, (0, 0, 0), 5)                            # fat isolated glyph strokes
+
+    clean = trace_linework(two_room_plan(door_only))
+    labelled = trace_linework(two_room_plan(door_and_text))
+    assert len(labelled.plan.rooms) == len(clean.plan.rooms) == 2
+    assert labelled.diagnostics["doors_detected"] == clean.diagnostics["doors_detected"] == 1
+    assert labelled.diagnostics["walls_traced"] == clean.diagnostics["walls_traced"]
+
+
+def test_double_leaf_door_confirms_on_half_gap_arc():
+    """A double door draws two mirrored quarter arcs, each spanning HALF the opening;
+    either leaf's arc alone must confirm the door (r ~= gap/2 radius regime)."""
+    image = np.full((540, 820, 3), 255, np.uint8)
+    black = (0, 0, 0)
+    cv2.rectangle(image, (30, 30), (790, 510), black, 10)
+    cv2.line(image, (410, 30), (410, 230), black, 10)             # wide 80px opening
+    cv2.line(image, (410, 310), (410, 510), black, 10)
+    cv2.line(image, (410, 230), (370, 230), black, 2)                 # upper leaf + arc
+    cv2.ellipse(image, (410, 230), (40, 40), 0, 90, 180, black, 2)
+    cv2.line(image, (410, 310), (370, 310), black, 2)                 # lower leaf + arc
+    cv2.ellipse(image, (410, 310), (40, 40), 0, 180, 270, black, 2)
+
+    trace = trace_linework(_png(image))
+    assert len(trace.plan.rooms) == 2
+    assert trace.diagnostics["doors_detected"] == 1
+
+
 class LineworkImageStub:
     """Minimal image client: every generate_image call returns the synthetic drawing."""
     image_model = "stub-linework-image"
