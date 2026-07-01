@@ -74,11 +74,50 @@ IMAGE_MODEL_PREFERENCE = [
     "gemini-2.5-flash-image",
 ]
 # Pin the generated image size so the px-based wall/parse geometry is deterministic.
-# Gemini sizes are tiers (1K/2K/4K), not arbitrary pixels: 1K @ 16:9 = 1376x768.
-IMAGE_ASPECT_RATIO = os.environ.get("HFAGENT_IMAGE_ASPECT", "16:9")
-IMAGE_SIZE = os.environ.get("HFAGENT_IMAGE_SIZE", "1K")
+# Gemini sizes are tiers (1K/2K/4K), not arbitrary pixels: 1K @ 16:9 = 1376x768,
+# 2K @ 16:9 = 2752x1536. The tier is config-driven (config.json: image_size); the
+# resolved value lives on the client instance (see GeminiClient.__init__).
+DEFAULT_IMAGE_ASPECT = "16:9"
+DEFAULT_IMAGE_SIZE = "1K"
 # image models we must NOT pick for text and vice versa
 _IMAGE_MARKER = re.compile(r"image|imagen")
+
+# Gemini image output aspect tokens (docs) -> width/height ratio.
+_SUPPORTED_ASPECTS = {
+    "1:1": 1.0, "3:2": 1.5, "2:3": 2 / 3, "3:4": 0.75, "4:3": 4 / 3,
+    "4:5": 0.8, "5:4": 1.25, "9:16": 9 / 16, "16:9": 16 / 9, "21:9": 21 / 9,
+}
+
+
+def _nearest_aspect_token(width: int, height: int) -> str | None:
+    if not width or not height:
+        return None
+    ratio = width / height
+    return min(_SUPPORTED_ASPECTS, key=lambda token: abs(_SUPPORTED_ASPECTS[token] - ratio))
+
+
+def _first_image_aspect(contents) -> str | None:
+    """Aspect token matching the FIRST input image in a multimodal contents list.
+
+    Image models ignore — or reshuffle the layout of — a reference image when the
+    requested output aspect conflicts with it (a documented behaviour: a tall input
+    forced to 16:9 comes back resized/ignored). So when conditioning on an input
+    image (a boundary outline, or a previous-round image in the correction loop), the
+    output aspect must FOLLOW that image rather than a fixed default. Returns None for
+    pure text-to-image (no input image), where the configured default applies.
+    """
+    if not isinstance(contents, list):
+        return None
+    for c in contents:
+        if isinstance(c, (bytes, bytearray)):
+            try:
+                import io
+                from PIL import Image
+                width, height = Image.open(io.BytesIO(bytes(c))).size
+                return _nearest_aspect_token(width, height)
+            except Exception:
+                return None
+    return None
 
 
 def _load_env() -> None:
@@ -97,7 +136,13 @@ def _api_key() -> str | None:
 
 
 class GeminiClient:
-    def __init__(self, text_model: str | None = None, image_model: str | None = None):
+    def __init__(
+        self,
+        text_model: str | None = None,
+        image_model: str | None = None,
+        image_size: str | None = None,
+        image_aspect: str | None = None,
+    ):
         _load_env()
         from google import genai  # imported lazily so unit tests need no SDK
 
@@ -123,6 +168,9 @@ class GeminiClient:
         self.image_model = image_model or os.environ.get("HFAGENT_IMAGE_MODEL") or self._resolve(
             IMAGE_MODEL_PREFERENCE, want_image=True
         )
+        # image output tier: explicit arg (config.json) wins, then env, then default
+        self.image_size = image_size or os.environ.get("HFAGENT_IMAGE_SIZE") or DEFAULT_IMAGE_SIZE
+        self.image_aspect = image_aspect or os.environ.get("HFAGENT_IMAGE_ASPECT") or DEFAULT_IMAGE_ASPECT
 
     # ── model discovery ─────────────────────────────────────────────────────
     def available_models(self) -> list[str]:
@@ -181,26 +229,40 @@ class GeminiClient:
         )
         return resp.text or ""
 
-    def generate_image(self, contents, model: str | None = None) -> bytes:
+    def generate_image(self, contents, model: str | None = None, attempts: int = 3) -> bytes:
         """Returns PNG/JPEG bytes of the first image part in the response.
 
         `contents` may be a prompt string or a list mixing str and raw image
         bytes — the multi-turn editing path of the correction loop sends
         [previous_image_bytes, feedback_text]. Handles models that return the
         image as base64 text (see decode_image_bytes).
+
+        Image models intermittently return only a text part (no image), especially
+        on multi-turn edits; the same request usually succeeds on retry, so we retry
+        up to `attempts` times before giving up.
         """
         from google.genai import types
 
+        # When conditioning on an input image (boundary outline / previous-round image),
+        # the output aspect must follow that image — forcing a conflicting aspect makes
+        # the model ignore or reshuffle the reference. Pure text-to-image uses the default.
+        aspect = _first_image_aspect(contents) or self.image_aspect
         cfg = types.GenerateContentConfig(
             response_modalities=["TEXT", "IMAGE"],
-            image_config=types.ImageConfig(aspect_ratio=IMAGE_ASPECT_RATIO, image_size=IMAGE_SIZE),
+            image_config=types.ImageConfig(aspect_ratio=aspect, image_size=self.image_size),
         )
-        resp = self.client.models.generate_content(
-            model=model or self.image_model, contents=self._to_parts(contents), config=cfg
+        parts = self._to_parts(contents)
+        target = model or self.image_model
+        last_text = ""
+        for _ in range(max(1, attempts)):
+            resp = self.client.models.generate_content(model=target, contents=parts, config=cfg)
+            for cand in resp.candidates or []:
+                for part in (cand.content.parts or []) if cand.content else []:
+                    data = getattr(part, "inline_data", None)
+                    if data and data.data:
+                        return decode_image_bytes(data.data)
+            last_text = (resp.text or "").strip().replace("\n", " ")[:200]
+        raise RuntimeError(
+            f"model {target} returned no image part after {max(1, attempts)} attempts"
+            + (f" (last text: {last_text!r})" if last_text else "")
         )
-        for cand in resp.candidates or []:
-            for part in (cand.content.parts or []) if cand.content else []:
-                data = getattr(part, "inline_data", None)
-                if data and data.data:
-                    return decode_image_bytes(data.data)
-        raise RuntimeError(f"model {model or self.image_model} returned no image part")
