@@ -46,7 +46,7 @@ def test_parser_tolerates_internal_black_holes():
     draw.rectangle((35, 42, 68, 58), fill=WALL_RGB)
     draw.rectangle((140, 45, 180, 62), fill=WALL_RGB)
 
-    parsed = cv_parse(img, min_room_px=500, grid_px=4, gap_fill_px=8)
+    parsed = cv_parse(img, min_room_px=500, wall_px=8)
     counts = {t: sum(1 for r in parsed.rooms if r.type == t) for t in ("exam_room", "corridor")}
 
     assert counts == {"exam_room": 1, "corridor": 1}
