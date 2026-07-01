@@ -6,7 +6,6 @@ default colorblock path stays unchanged. Both share the whole downstream.
 from hfagent.floor_plan_generate import generate_plan
 from hfagent.tools.rectify import building_aspect, rectify
 from hfagent.tools.structure_reader import RoomShape
-from hfagent.schema.roomgraph import RoomGraph, RoomNode
 from hfagent.tests.mock_vlm import MockVLM
 from hfagent.tests.synth import simple_clinic
 
@@ -67,36 +66,4 @@ def test_colorblock_mode_unaffected(out_dir):
     assert r["structure_mode"] == "colorblock"
     assert (out_dir / "cb" / "gemini_r1.png").exists()
     assert not (out_dir / "cb" / "structure_r1.json").exists()
-    assert len(plan["rooms"]) == 5
-
-
-def test_linework_mode_skips_ai_colorblock(out_dir, monkeypatch):
-    parsed = simple_clinic()
-    graph = RoomGraph(
-        rooms=[RoomNode(id=room.id, type=room.type) for room in parsed.rooms],
-        doors=[],
-    )
-    diagnostics = {
-        "room_regions": 5,
-        "labelled_rooms": 5,
-        "unlabelled_rooms": 0,
-        "door_candidates": [],
-        "parser_confident": True,
-    }
-
-    monkeypatch.setattr(
-        "hfagent.floor_plan_generate.parse_linework",
-        lambda image, program: (parsed, graph, diagnostics, b"\x89PNG debug"),
-    )
-    client = MockVLM([parsed])
-    report, plan, _ = generate_plan(
-        PROGRAM, client, out_dir, name="lw", max_rounds=1, structure_mode="linework"
-    )
-
-    work = out_dir / "lw"
-    assert report["structure_mode"] == "linework"
-    assert client.calls == 1
-    assert (work / "linework_r1.json").exists()
-    assert (work / "linework_r1.debug.png").exists()
-    assert (work / "gemini_r1.png").exists()  # deterministic compatibility mask
     assert len(plan["rooms"]) == 5

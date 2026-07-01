@@ -21,7 +21,7 @@
       "boundary": ""
     },
     "linework": {
-      "description": "text -> realistic LINE drawing -> deterministic CV traces walls + detects door arcs (no AI mask).",
+      "description": "text -> realistic LINE drawing -> tools/linework_tracer: faithful wall trace, doors confirmed only by their swing arcs, rooms polygonized UNTYPED (geometry-only, no OCR). Single round; fixed artifacts walls_overlay/doors_overlay/recon/recon_post/rooms_colorful.",
       "text_model": "",
       "image_model": "",
       "boundary": ""

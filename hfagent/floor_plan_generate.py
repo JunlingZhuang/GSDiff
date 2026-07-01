@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hfagent.tools.image_parser import cv_parse
-from hfagent.tools.linework_parser import parse_linework
+from hfagent.tools.linework_tracer import trace_linework
 from hfagent.tools.floor_plan_generator import FloorPlanGenerator
 from hfagent.tools.door_placer import place_doors
 from hfagent.tools.plan_fixes import fix_room_counts
@@ -136,6 +136,10 @@ def generate_plan(
     work_dir = out_dir / name
     work_dir.mkdir(parents=True, exist_ok=True)
     required_rooms = {r["type"]: r.get("count", 1) for r in program["rooms"]}
+    if structure_mode == "linework":
+        # geometry-only mode: rooms are untyped, so the per-type count violations
+        # that drive the correction loop do not exist — exactly one round.
+        max_rounds = 1
     pipeline_started = time.perf_counter()
     _log(
         name,
@@ -161,7 +165,8 @@ def generate_plan(
         _log(name, f"round {round_num}/{max_rounds}: begin")
 
         round_graph = None
-        parser_diagnostics = None
+        trace_diag = None
+        round_image_path = png_path
 
         if structure_mode == "direct_colorblock":
             # ── one-pass: program text -> flat colour-block PNG ──────────────
@@ -236,15 +241,27 @@ def generate_plan(
                     json.dumps(structure_json, indent=2), encoding="utf-8"
                 )
             elif structure_mode == "linework":
-                _log(name, f"round {round_num}: OCR + CV parsing realistic linework")
-                parsed_plan, round_graph, parser_diagnostics, debug_png = parse_linework(
-                    real_png, program
+                # Faithful-trace backend (tools/linework_tracer): walls are traced
+                # exactly as drawn, a gap becomes a door only when a swing arc
+                # confirms it, and the closed wall graph is polygonized into UNTYPED
+                # rooms (type "unknown", ids r1..rN, px units). The trace's RoomGraph
+                # names the two plan room ids flanking each confirmed door
+                # ("exterior" when a side is open ground), so the shared downstream
+                # applies unchanged: place_doors hangs each edge on the wall that
+                # exact room pair shares (exact_connected) and plan_to_walls derives
+                # the wall list from the traced polygons.
+                _log(name, f"round {round_num}: tracing walls, door arcs and room polygons")
+                trace = trace_linework(real_png)
+                parsed_plan, round_graph = trace.plan, trace.room_graph
+                trace_diag = trace.diagnostics
+                round_image_path = real_path
+                for filename, payload in trace.artifacts.items():
+                    (work_dir / filename).write_bytes(payload)
+                _log(
+                    name,
+                    f"round {round_num}: traced {trace_diag['rooms_closed']} room(s), "
+                    f"{trace_diag['doors_detected']} door(s); wrote {', '.join(trace.artifacts)}",
                 )
-                render_plan(parsed_plan, px_per_mm=1.0).save(png_path)
-                (work_dir / f"linework_r{round_num}.json").write_text(
-                    json.dumps(parser_diagnostics, indent=2), encoding="utf-8"
-                )
-                (work_dir / f"linework_r{round_num}.debug.png").write_bytes(debug_png)
             else:
                 _log(name, f"round {round_num}: converting realistic plan to colour-block mask")
                 png_path.write_bytes(generator.to_colorblock(real_png))
@@ -252,21 +269,26 @@ def generate_plan(
                 parsed_plan = cv_parse(str(png_path))
 
         # ── verify ───────────────────────────────────────────────────────────
+        # linework rooms are untyped, so per-type counting is meaningless there;
+        # the check is total rooms traced vs the program's total instead.
         actual_counts = Counter(r.type for r in parsed_plan.rooms)
-        violations = _count_violations(required_rooms, actual_counts)
+        if structure_mode == "linework":
+            required_total = sum(required_rooms.values())
+            traced_total = len(parsed_plan.rooms)
+            violations = [] if traced_total == required_total else [
+                f"traced {traced_total} room(s); the program totals {required_total}"
+            ]
+        else:
+            violations = _count_violations(required_rooms, actual_counts)
         round_report = {
             "round": round_num,
             "actual_rooms": dict(actual_counts),
             "violations": violations,
         }
-        if parser_diagnostics is not None:
-            round_report["parser"] = {
-                "room_regions": parser_diagnostics["room_regions"],
-                "labelled_rooms": parser_diagnostics["labelled_rooms"],
-                "unlabelled_rooms": parser_diagnostics["unlabelled_rooms"],
-                "door_candidates": len(parser_diagnostics["door_candidates"]),
-                "parser_confident": parser_diagnostics["parser_confident"],
-            }
+        if trace_diag is not None:
+            round_report["rooms_traced"] = len(parsed_plan.rooms)
+            round_report["rooms_required_total"] = sum(required_rooms.values())
+            round_report["trace"] = trace_diag
         rounds.append(round_report)
         _log(
             name,
@@ -276,12 +298,8 @@ def generate_plan(
         _log(name, f"round {round_num}: room counts {dict(actual_counts)}")
 
         if best_round is None or len(violations) < best_round.violation_count:
-            best_round = _BestRound(len(violations), round_num, parsed_plan, png_path, real_png, round_graph)
+            best_round = _BestRound(len(violations), round_num, parsed_plan, round_image_path, real_png, round_graph)
             _log(name, f"round {round_num}: selected as current best")
-
-        if structure_mode == "linework" and violations and not parser_diagnostics["parser_confident"]:
-            _log(name, "linework parser is uncertain; skipping image-model correction")
-            break
 
         if not violations:
             _log(name, f"round {round_num}: room counts match; stopping correction loop")
@@ -293,22 +311,25 @@ def generate_plan(
 
     _log(name, "running deterministic room-count repair")
     if structure_mode == "linework":
+        # untyped rooms cannot be split/relabelled by type; the traced geometry IS
+        # the result and the check is the total room count.
         fixed_plan = best_round.plan.model_copy(deep=True)
-        final_counts = Counter(room.type for room in fixed_plan.rooms)
         count_fix = {
             "ops": [],
-            "fixed": not _count_violations(required_rooms, final_counts),
-            "fixed_rooms": dict(final_counts),
-            "skipped": "linework geometry is not split or relabelled by count repair",
+            "fixed": len(fixed_plan.rooms) == sum(required_rooms.values()),
+            "fixed_rooms": dict(Counter(room.type for room in fixed_plan.rooms)),
+            "skipped": "linework rooms are untyped; per-type count repair does not apply",
         }
     else:
         fixed_plan, count_fix = fix_room_counts(best_round.plan, required_rooms)
     (work_dir / "fixed.json").write_text(fixed_plan.model_dump_json(indent=2), encoding="utf-8")
-    render_plan(fixed_plan, px_per_mm=1.0).save(work_dir / "recon.png")
-    _log(name, f"count repair fixed={count_fix['fixed']}; rendered recon.png")
+    if structure_mode != "linework":  # the trace already wrote recon.png / recon_post.png
+        render_plan(fixed_plan, px_per_mm=1.0).save(work_dir / "recon.png")
+    _log(name, f"count repair fixed={count_fix['fixed']}")
 
     # ── room adjacency (doors) ───────────────────────────────────────────────
-    # json/linework already read the doors alongside the rooms; direct_colorblock has no
+    # json read the doors alongside the rooms; linework detected them geometrically
+    # (arc-confirmed, edges naming exact plan room ids); direct_colorblock has no
     # realistic plan so it takes connectivity straight from the program; colorblock reads
     # it from the best realistic plan now. Either way door_placer hangs each door on the
     # real wall the two connected rooms physically share.
@@ -352,7 +373,7 @@ def generate_plan(
         "final_count_exact": vlm_converged or count_fix["fixed"],
         "room_graph": {
             "rooms": len(room_graph.rooms),
-            "doors": len(room_graph.doors),       # logical edges from the LLM
+            "doors": len(room_graph.doors),       # logical edges (LLM read or trace)
             "placed_doors": len(plan.doors),       # doors hung on real walls
             "walls": len(plan.walls),              # complete geometry-layer wall list
         },

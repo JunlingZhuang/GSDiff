@@ -1,6 +1,5 @@
 google-genai>=1.0
 opencv-python>=4.9
-easyocr>=1.7
 shapely>=2.0
 numpy>=1.26
 pillow>=10.0

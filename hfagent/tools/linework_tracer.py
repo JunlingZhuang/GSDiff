@@ -1,54 +1,64 @@
 # -*- coding: utf-8 -*-
-"""Offline prototype: faithful wall trace + door-arc-driven gap bridging (linework mode).
+"""Faithful wall trace + arc-confirmed door detection: the linework structure engine.
 
-EXPERIMENTAL / PARKED. This module is NOT wired into the hfagent pipeline and makes
-ZERO network/Gemini calls. It re-architects linework wall+door extraction away from
-the gap-classification heuristic in ``tools/wall_graph.py`` toward:
+``trace_linework(png_bytes)`` turns a realistic line-plan drawing into a geometry-only
+``Plan`` (untyped rooms, px units) plus a ``RoomGraph`` whose door edges name the two
+plan rooms flanking each detected door. No OCR, no room typing, no model calls:
 
-1. WALLS - trace exactly the walls that exist. Faithful set is
-   ``_merge_overlaps(_cluster_axes(_raw_segments(...)))`` with NO gap bridging, plus a
-   dedicated short-stub pass so legitimately-short walls (door jambs, T-junction piers)
-   that ``_raw_segments`` drops on its ``min_length`` floor are kept. Nothing is invented.
-2. DOORS - a gap between two collinear traced walls becomes a wall ONLY if a real door
-   swing arc (quarter circle at door scale, centred on one jamb, radius ~= the opening
-   width) actually straddles that gap. The gap localises the arc search; an angular
-   quarter-turn coverage test on the non-wall residual confirms a genuine arc and rejects
-   stray ink / a neighbouring door's arc. Confirmed -> bridge the gap AND record a Door.
-   No arc -> leave the gap open (real passage / corridor connection).
+1. WALLS  — trace exactly the walls that exist: ``_merge_overlaps(_cluster_axes(
+   _raw_segments(...)))`` with NO gap bridging, plus a short-stub pass so legitimately
+   short walls (door jambs, T-junction piers) below the ``_raw_segments`` length floor
+   are kept. Nothing is invented.
+2. DOORS  — a wall gap becomes a door ONLY if a real quarter-circle swing arc (radius
+   ~= the opening width, centred on one jamb) straddles it. Collinear gaps + terminal
+   gaps (wall end -> crossing perpendicular wall) are split at crossing perpendicular
+   walls (real piers) into door-scale sub-gaps; a sub-gap with no traced jamb at either
+   end is rejected outright (kills phantom doors on axis-rounding coincidences). Each
+   gap is ink-trimmed first so hidden jamb/corner stubs become traced wall and the arc
+   test sees the true opening. The arc test demands angular quarter-turn coverage,
+   radial inlier concentration and continuity, so stray ink and neighbouring arcs fail.
+3. BRIDGE — walls are made continuous ONLY across confirmed doors; every other gap
+   stays open (real passage / corridor connection).
+4. POST   — ``postprocess_walls``: absorb parallel door-frame posts, merge re-traced
+   wall faces, junction snap, ink-gated L-corner snap (never seals a real opening),
+   overhang trim, whisker drop. Then shapely polygonizes the closed rooms.
 
-Run offline:
+All thresholds are wall_width-relative, so the same parameters handle 1K (~6 px walls)
+and 2K (~12 px walls) renders.
 
-    python -m hfagent.linework_trace_doors
+Fixed artifacts (returned as PNG bytes, written by the pipeline into the work dir):
+    walls_overlay.png    faithful traced walls in red on the source drawing
+    doors_overlay.png    faithful walls grey + every detected swing arc/leaf/hinge
+    recon.png            bridged walls (pre-postprocess) + door arc markers
+    recon_post.png       post-processed wall graph + door arc markers
+    rooms_colorful.png   each closed room filled with a distinct deterministic colour,
+                         walls black on top, doors as white gaps
 
-Writes all artifacts to ``hfagent/out/eval/<YYYYmmdd-HHMMSS>-linework-trace-doors/``.
+Offline debug harness (no pipeline, no model calls):
 
-It reuses the public helpers in ``tools/wall_graph.py`` without modifying them, so the
-existing ``reconstruct_wall_graph`` / ``parse_linework`` callers behave identically.
+    python -m hfagent.tools.linework_tracer <real_plan.png> [--out DIR]
 """
 from __future__ import annotations
 
-import json
 import math
-import os
 from dataclasses import dataclass
-from datetime import datetime
 
 import cv2
 import numpy as np
+from shapely.geometry import Point
+from shapely.ops import polygonize, unary_union
 
+from hfagent.schema.plan import Plan, Room
+from hfagent.schema.roomgraph import Door as DoorEdge, RoomGraph, RoomNode
 from hfagent.tools.wall_graph import (
     WallSegment,
     _cluster_axes,
     _directional_masks,
+    _estimate_stroke_thickness,
     _estimate_wall_width,
     _merge_overlaps,
     _raw_segments,
     _snap_junctions,
-)
-
-SRC = (
-    r"D:\Github\GSDiff\hfagent\out\eval\20260629-154509"
-    r"\hospital-tower-floor\gemini_r1.real.png"
 )
 
 # ---- tunable parameters (kept in one place so they can be swept) -------------------
@@ -74,13 +84,17 @@ PARAMS = dict(
     # postprocess corner snap (L-corner pinholes; ink-gated, never crosses an opening)
     corner_snap_reach=2.5,        # max free-end extension onto a perpendicular, * ww
     corner_ink_cover=0.80,        # min fraction of ink-covered positions on the extension
-    # metrics
-    room_max_area_frac=0.02,      # polygons above this image fraction are corridor-scale
+    # diagnostics: polygons above this image fraction are corridor-scale, not room-scale
+    room_max_area_frac=0.02,
 )
+
+# door-side probe distance from the wall axis, * wall_width (clears the wall band)
+_PROBE_OFFSET_FACTOR = 1.5
 
 
 @dataclass
-class Door:
+class TracedDoor:
+    """A physical door confirmed by its swing arc (all coordinates in px)."""
     orientation: str
     axis: float
     gap_start: float
@@ -96,6 +110,15 @@ class Door:
     def center(self) -> tuple[float, float]:
         mid = (self.gap_start + self.gap_end) / 2.0
         return (mid, self.axis) if self.orientation == "horizontal" else (self.axis, mid)
+
+
+@dataclass
+class LineworkTrace:
+    """Result of ``trace_linework``: geometry-only plan + doors + fixed artifacts."""
+    plan: Plan                      # untyped rooms (type "unknown", ids r1..rN, px units)
+    room_graph: RoomGraph           # door edges between flanking room ids / "exterior"
+    diagnostics: dict               # trace metrics (wall_width, counts, postprocess stats)
+    artifacts: dict[str, bytes]     # fixed artifact filename -> PNG bytes
 
 
 # ---- faithful wall trace ----------------------------------------------------------
@@ -162,28 +185,30 @@ def _short_stub_segments(
 
 
 def trace_walls(gray: np.ndarray):
-    """Faithful directional-morphology wall trace with a short-stub recovery pass."""
+    """Faithful directional-morphology wall trace with a short-stub recovery pass.
+
+    Returns ``(walls, wall_width, dark, wall_pixels, raw_count, stub_count)``.
+    """
     _, dark = cv2.threshold(gray, 0, 1, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    hm, vm = _directional_masks(dark)
-    ww = _estimate_wall_width(hm, vm, gray.shape)
+    # image models vary wall thickness wildly with plan size (a 6-room clinic can get
+    # ~55 px bands at 2K where an 80-room tower gets ~11 px), so the directional
+    # kernels and the wall-width cap must follow the measured stroke, not the image.
+    stroke = _estimate_stroke_thickness(dark)
+    hm, vm = _directional_masks(dark, min_len=max(15, round(stroke * 1.6)))
+    ww = _estimate_wall_width(hm, vm, gray.shape,
+                              max_width=max(round(min(gray.shape) * 0.03), stroke + 2))
 
     raw = _raw_segments(hm, "horizontal", ww) + _raw_segments(vm, "vertical", ww)
-    count_raw = len(raw)
     wall_axes = {
         "horizontal": [s.axis for s in raw if s.orientation == "horizontal"],
         "vertical": [s.axis for s in raw if s.orientation == "vertical"],
     }
     stubs = _short_stub_segments(dark, hm, vm, wall_axes, ww)
-    count_stub = len(stubs)
 
-    def finish(segs):
-        clustered = _cluster_axes(segs, tolerance=max(1.0, ww * 0.5))
-        return _merge_overlaps(clustered, tolerance=max(1.0, ww * 0.5))
-
-    walls_no_stub = finish(list(raw))
-    walls = finish(raw + stubs)
+    clustered = _cluster_axes(raw + stubs, tolerance=max(1.0, ww * 0.5))
+    walls = _merge_overlaps(clustered, tolerance=max(1.0, ww * 0.5))
     wall_pixels = ((hm > 0) | (vm > 0)).astype(np.uint8)
-    return walls, walls_no_stub, ww, dark, wall_pixels, count_raw, count_stub
+    return walls, ww, dark, wall_pixels, len(raw), len(stubs)
 
 
 # ---- gaps -------------------------------------------------------------------------
@@ -381,7 +406,7 @@ def _arc_score(pts_a, pts_p, r, band, ang_tol, ang_bins):
 
 
 def detect_door_at_gap(resid_pts, gap, wall_width):
-    """Return the best Door for a gap, or None. Tests both jambs x both swing sides."""
+    """Return the best TracedDoor for a gap, or None. Tests both jambs x both swing sides."""
     w = gap["width"]
     if not (wall_width * PARAMS["door_gap_lo_factor"] <= w <= wall_width * PARAMS["door_gap_hi_factor"]):
         return None
@@ -433,9 +458,9 @@ def detect_door_at_gap(resid_pts, gap, wall_width):
     if best is None:
         return None
     _, cov, ratio, empty, npix, hinge, perp_unit, r = best
-    return Door(orientation, axis, e0, e1, (float(hinge[0]), float(hinge[1])),
-                (float(perp_unit[0]), float(perp_unit[1])), float(r), float(cov), int(npix),
-                float(ratio))
+    return TracedDoor(orientation, axis, e0, e1, (float(hinge[0]), float(hinge[1])),
+                      (float(perp_unit[0]), float(perp_unit[1])), float(r), float(cov), int(npix),
+                      float(ratio))
 
 
 def detect_doors(segments, dark, wall_pixels, wall_width):
@@ -467,7 +492,7 @@ def detect_doors(segments, dark, wall_pixels, wall_width):
     return raw_gaps, sub_gaps, _dedupe_doors(doors, wall_width), jamb_stubs
 
 
-def _dedupe_doors(doors: list[Door], wall_width: int) -> list[Door]:
+def _dedupe_doors(doors: list[TracedDoor], wall_width: int) -> list[TracedDoor]:
     """Collapse twin detections of ONE physical opening.
 
     Axis rounding can leave the same opening on two nearly-identical collinear axes
@@ -476,7 +501,7 @@ def _dedupe_doors(doors: list[Door], wall_width: int) -> list[Door]:
     ~1 wall thickness in axis whose gap spans overlap are one door - keep the better
     arc (coverage * inlier_ratio).
     """
-    kept: list[Door] = []
+    kept: list[TracedDoor] = []
     for d in sorted(doors, key=lambda d: d.coverage * d.inlier_ratio, reverse=True):
         dup = False
         for k in kept:
@@ -760,15 +785,71 @@ def postprocess_walls(segments: list[WallSegment], wall_width: int,
 
 
 def polygonize_rooms(segments: list[WallSegment], image_shape) -> list:
-    """Room polygons from the wall graph (closed rings only; open edges vanish)."""
-    from shapely.ops import polygonize, unary_union
-
+    """Room polygons from the wall graph (closed rings only; open edges vanish),
+    ordered top-to-bottom then left-to-right so room ids are stable per image."""
     net = unary_union([s.line() for s in segments])
     min_area = image_shape[0] * image_shape[1] * 0.0004
-    return [p for p in polygonize(net) if p.area >= min_area]
+    rooms = [p for p in polygonize(net) if p.area >= min_area]
+    rooms.sort(key=lambda p: (p.centroid.y, p.centroid.x))
+    return rooms
 
 
-# ---- rendering --------------------------------------------------------------------
+# ---- plan + room-graph assembly ----------------------------------------------------
+
+def _rooms_from_polygons(polygons) -> list[Room]:
+    """Geometry-only rooms: untyped (type "unknown"), ids r1..rN, px coordinates."""
+    rooms = []
+    for polygon in polygons:
+        coords = [(float(x), float(y)) for x, y in list(polygon.exterior.coords)[:-1]]
+        if len(coords) < 3:
+            continue
+        rooms.append(Room(id=f"r{len(rooms) + 1}", type="unknown", polygon=coords))
+    return rooms
+
+
+def _door_edges(doors: list[TracedDoor], polygons, rooms: list[Room],
+                wall_width: int) -> list[DoorEdge]:
+    """Connect each detected door to the two room polygons flanking its opening.
+
+    Probes one point on each side of the door centre along the wall's perpendicular
+    (just past the wall band); the room polygon covering a probe names that side,
+    "exterior" when no room does. Duplicate pairs collapse to one edge.
+    """
+    offset = max(2.0, wall_width * _PROBE_OFFSET_FACTOR)
+    edges: list[DoorEdge] = []
+    seen: set[frozenset] = set()
+    for door in doors:
+        cx, cy = door.center
+        if door.orientation == "horizontal":
+            probes = (Point(cx, cy - offset), Point(cx, cy + offset))
+        else:
+            probes = (Point(cx - offset, cy), Point(cx + offset, cy))
+        sides = []
+        for probe in probes:
+            room_id = next(
+                (rooms[i].id for i, polygon in enumerate(polygons) if polygon.covers(probe)),
+                "exterior",
+            )
+            sides.append(room_id)
+        room_a, room_b = sides
+        if room_a == room_b:      # both open ground, or a door inside one region
+            continue
+        key = frozenset((room_a, room_b))
+        if key in seen:
+            continue
+        seen.add(key)
+        edges.append(DoorEdge(room_a=room_a, room_b=room_b))
+    return edges
+
+
+# ---- fixed artifacts ---------------------------------------------------------------
+
+def _png_bytes(image: np.ndarray) -> bytes:
+    ok, buf = cv2.imencode(".png", image)
+    if not ok:
+        raise RuntimeError("PNG encoding failed")
+    return buf.tobytes()
+
 
 def _draw_walls(canvas, segments, color, thickness):
     for s in segments:
@@ -781,7 +862,8 @@ def _draw_walls(canvas, segments, color, thickness):
         cv2.line(canvas, p0, p1, color, thickness)
 
 
-def _draw_door(canvas, door: Door, color):
+def _draw_door_symbol(canvas, door: TracedDoor, color):
+    """Swing arc + leaf + hinge dot at the door's detected geometry."""
     hinge = np.array(door.hinge)
     # opposite jamb = the gap endpoint that is not the hinge; along points hinge->opposite
     if door.orientation == "horizontal":
@@ -794,187 +876,146 @@ def _draw_door(canvas, door: Door, color):
     norm = np.hypot(*along_vec) or 1.0
     along = along_vec / norm
     perp = np.array(door.swing)
-    # arc from along (0) to perp (90)
     pts = []
-    for t in np.linspace(0, math.pi / 2, 24):
+    for t in np.linspace(0, math.pi / 2, 24):    # arc from along (0 deg) to perp (90 deg)
         v = math.cos(t) * along + math.sin(t) * perp
         pts.append(hinge + door.radius * v)
     pts = np.array(pts, np.int32).reshape((-1, 1, 2))
     cv2.polylines(canvas, [pts], False, color, 1, cv2.LINE_AA)
-    # leaf
     leaf_end = hinge + door.radius * perp
     cv2.line(canvas, tuple(hinge.astype(int)), tuple(leaf_end.astype(int)), color, 1, cv2.LINE_AA)
     cv2.circle(canvas, tuple(hinge.astype(int)), 3, color, -1)
 
 
-METHOD_NOTES = (
-    "Faithful trace = _merge_overlaps(_cluster_axes(_raw_segments + short_stub_pass)); "
-    "NO size-threshold gap bridging. Collinear gaps + terminal gaps (wall end -> crossing "
-    "perpendicular wall, for doors drawn against a room corner) are split at perpendicular "
-    "wall crossings (real piers) into door-scale sub-gaps; sub-gaps whose both ends are "
-    "pier cuts (no traced jamb) are rejected - kills phantom doors on axis-rounding "
-    "coincidences. Each gap is ink-trimmed first: contiguous wall-thick ink at a gap end "
-    "(jamb/corner stubs the directional trace merged into a perpendicular wall) is "
-    "recovered as traced wall and removed from the opening. A gap becomes a Door only if a "
-    "genuine quarter-circle swing arc straddles it: angular coverage >= {cov} over {bins} "
-    "bins, radial inlier-ratio >= {ratio}, max empty angular run <= {empty}, on an annulus "
-    "centred at a jamb with radius ~= opening width. Walls bridge ONLY at confirmed doors. "
-    "postprocess_walls: junction snap, ink-gated L-corner snap (free end -> perpendicular "
-    "wall line within {corner}*ww, only over solid source ink), overhang trim, whisker "
-    "drop. Short-stub min length = {stub}*wall_width. All thresholds are wall_width-"
-    "relative, so the same params handle 1K (~6px) and 2K (~12px)."
-)
+def _room_color(index: int) -> tuple[int, int, int]:
+    """Deterministic distinct BGR colour for room ``index`` (golden-angle hue walk),
+    so re-runs of the same plan colour the same regions comparably."""
+    hue = (index * 0.618033988749895) % 1.0
+    hsv = np.uint8([[[round(hue * 179), 150, 235]]])
+    b, g, r = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)[0, 0]
+    return int(b), int(g), int(r)
 
 
-def process(src_path: str, out_dir: str) -> dict:
-    """Trace walls + detect doors for one image; write the 4 artifacts; return metrics."""
-    gray = cv2.imread(src_path, cv2.IMREAD_GRAYSCALE)
-    src_bgr = cv2.imread(src_path, cv2.IMREAD_COLOR)
-    if gray is None:
-        raise SystemExit(f"could not read source: {src_path}")
-    os.makedirs(out_dir, exist_ok=True)
+def _render_artifacts(src_bgr, shape, walls, bridged, post, doors, polygons,
+                      wall_width) -> dict[str, bytes]:
+    """Render the five fixed linework artifacts (see module docstring)."""
+    overlay_w = max(2, round(wall_width * 0.4))
+    recon_w = max(2, wall_width // 2)
 
-    walls, walls_no_stub, ww, dark, wall_pixels, count_raw, count_stub = trace_walls(gray)
-    raw_gaps, sub_gaps, doors, jamb_stubs = detect_doors(walls, dark, wall_pixels, ww)
-    bridged, bridges = bridge_at_doors(walls, doors, ww, extra=jamb_stubs)
-
-    line_w = max(2, round(ww * 0.4))
-    # walls overlay (faithful, red) - verify no spurious corridor/toilet walls
     walls_overlay = src_bgr.copy()
-    _draw_walls(walls_overlay, walls, (0, 0, 255), line_w)
-    cv2.imwrite(os.path.join(out_dir, "walls_overlay.png"), walls_overlay)
+    _draw_walls(walls_overlay, walls, (0, 0, 255), overlay_w)
 
-    # doors overlay (faithful walls grey + detected swing arcs orange)
     doors_overlay = src_bgr.copy()
-    _draw_walls(doors_overlay, walls, (150, 150, 150), line_w)
+    _draw_walls(doors_overlay, walls, (150, 150, 150), overlay_w)
     for d in doors:
-        _draw_door(doors_overlay, d, (0, 140, 255))
-    cv2.imwrite(os.path.join(out_dir, "doors_overlay.png"), doors_overlay)
+        _draw_door_symbol(doors_overlay, d, (0, 140, 255))
 
-    # recon: walls bridged ONLY at confirmed doors (black), doors shown as blue markers
-    recon = np.full((*gray.shape, 3), 255, np.uint8)
-    _draw_walls(recon, bridged, (0, 0, 0), max(2, ww // 2))
-    for d in doors:
-        cv2.circle(recon, tuple(map(round, d.center)), max(3, ww), (255, 60, 60), 1)
-        _draw_door(recon, d, (255, 60, 60))
-    cv2.imwrite(os.path.join(out_dir, "recon.png"), recon)
+    def recon_image(segments):
+        canvas = np.full((*shape, 3), 255, np.uint8)
+        _draw_walls(canvas, segments, (0, 0, 0), recon_w)
+        for d in doors:
+            cv2.circle(canvas, tuple(map(round, d.center)), max(3, wall_width), (255, 60, 60), 1)
+            _draw_door_symbol(canvas, d, (255, 60, 60))
+        return canvas
 
-    # recon_post: snap pinholes closed + trim/drop whiskers, then re-render + rooms
-    post, post_stats = postprocess_walls(bridged, ww, dark)
-    recon_post = np.full((*gray.shape, 3), 255, np.uint8)
-    _draw_walls(recon_post, post, (0, 0, 0), max(2, ww // 2))
-    for d in doors:
-        cv2.circle(recon_post, tuple(map(round, d.center)), max(3, ww), (255, 60, 60), 1)
-        _draw_door(recon_post, d, (255, 60, 60))
-    cv2.imwrite(os.path.join(out_dir, "recon_post.png"), recon_post)
+    rooms_colorful = np.full((*shape, 3), 255, np.uint8)
+    for index, polygon in enumerate(polygons):
+        ring = np.array(polygon.exterior.coords, np.int32).reshape(-1, 1, 2)
+        cv2.fillPoly(rooms_colorful, [ring], _room_color(index))
+    _draw_walls(rooms_colorful, post, (0, 0, 0), recon_w)
+    for d in doors:                              # doors read as white gaps in the walls
+        gap = WallSegment(d.orientation, d.axis, d.gap_start, d.gap_end, float(wall_width))
+        _draw_walls(rooms_colorful, [gap], (255, 255, 255), recon_w + 2)
 
-    rooms = polygonize_rooms(post, gray.shape)
-    rooms_img = np.full((*gray.shape, 3), 255, np.uint8)
-    for p in rooms:
-        ext = np.array(p.exterior.coords, np.int32).reshape(-1, 1, 2)
-        cv2.fillPoly(rooms_img, [ext], (200, 200, 200))
-    _draw_walls(rooms_img, post, (0, 0, 0), max(2, ww // 2))
-    cv2.imwrite(os.path.join(out_dir, "rooms_uniform.png"), rooms_img)
+    return {
+        "walls_overlay.png": _png_bytes(walls_overlay),
+        "doors_overlay.png": _png_bytes(doors_overlay),
+        "recon.png": _png_bytes(recon_image(bridged)),
+        "recon_post.png": _png_bytes(recon_image(post)),
+        "rooms_colorful.png": _png_bytes(rooms_colorful),
+    }
+
+
+# ---- public entry -------------------------------------------------------------------
+
+def trace_linework(png: bytes) -> LineworkTrace:
+    """Trace a realistic line-plan drawing into rooms + doors, geometry only.
+
+    Returns a :class:`LineworkTrace` with an untyped px-unit :class:`Plan`, a
+    :class:`RoomGraph` whose door edges name the plan rooms flanking each detected
+    door (or "exterior"), trace diagnostics, and the five fixed artifact PNGs.
+    """
+    src_bgr = cv2.imdecode(np.frombuffer(png, np.uint8), cv2.IMREAD_COLOR)
+    if src_bgr is None:
+        raise ValueError("trace_linework: could not decode the plan image")
+    gray = cv2.cvtColor(src_bgr, cv2.COLOR_BGR2GRAY)
+
+    walls, wall_width, dark, wall_pixels, raw_count, stub_count = trace_walls(gray)
+    raw_gaps, sub_gaps, doors, jamb_stubs = detect_doors(walls, dark, wall_pixels, wall_width)
+    bridged, bridge_count = bridge_at_doors(walls, doors, wall_width, extra=jamb_stubs)
+    post, post_stats = postprocess_walls(bridged, wall_width, dark)
+    polygons = polygonize_rooms(post, gray.shape)
+
+    rooms = _rooms_from_polygons(polygons)
+    edges = _door_edges(doors, polygons, rooms, wall_width)
+    plan = Plan(units="px", rooms=rooms)
+    room_graph = RoomGraph(
+        rooms=[RoomNode(id=room.id, type=room.type) for room in rooms],
+        doors=edges,
+    )
 
     room_max_area = gray.shape[0] * gray.shape[1] * PARAMS["room_max_area_frac"]
-    true_room_closure = sum(1 for p in rooms if p.area <= room_max_area)
-    metrics = dict(
-        source=src_path,
+    diagnostics = dict(
         image_shape=[int(gray.shape[1]), int(gray.shape[0])],
-        wall_width=int(ww),
-        faithful_wall_count=len(walls),
-        faithful_wall_count_no_stub=len(walls_no_stub),
-        raw_segment_count=count_raw,
-        short_stub_count=count_stub,
-        gap_count=len(raw_gaps),
-        sub_gap_count=len(sub_gaps),
-        jamb_stub_count=len(jamb_stubs),
+        wall_width=int(wall_width),
+        raw_segments=raw_count,
+        short_stubs=stub_count,
+        walls_traced=len(walls),
+        gaps=len(raw_gaps),
+        sub_gaps=len(sub_gaps),
+        jamb_stubs=len(jamb_stubs),
         doors_detected=len(doors),
-        bridges_made=bridges,
+        bridges_made=bridge_count,
         postprocess=post_stats,
         rooms_closed=len(rooms),
-        true_room_closure=true_room_closure,
-        params=PARAMS,
-        method_notes=METHOD_NOTES.format(
-            cov=PARAMS["coverage_thresh"], bins=PARAMS["ang_bins"],
-            ratio=PARAMS["inlier_ratio_thresh"], empty=PARAMS["max_empty_run"],
-            stub=PARAMS["stub_min_len_factor"], corner=PARAMS["corner_snap_reach"],
+        room_scale_rooms=sum(1 for p in polygons if p.area <= room_max_area),
+        door_edges=dict(
+            interior=sum(1 for e in edges if "exterior" not in (e.room_a, e.room_b)),
+            exterior=sum(1 for e in edges if "exterior" in (e.room_a, e.room_b)),
         ),
     )
-    with open(os.path.join(out_dir, "metrics.json"), "w") as fh:
-        json.dump(metrics, fh, indent=2)
-
-    _save_verification_crops(out_dir, walls_overlay, doors_overlay)
-    _save_leak_diag(out_dir, src_bgr, recon_post, rooms_img)
-    return metrics
+    artifacts = _render_artifacts(src_bgr, gray.shape, walls, bridged, post, doors,
+                                  polygons, wall_width)
+    return LineworkTrace(plan=plan, room_graph=room_graph,
+                         diagnostics=diagnostics, artifacts=artifacts)
 
 
-def _save_verification_crops(out_dir, walls_overlay, doors_overlay):
-    """Zoomed crops (resolution-independent regions) for visual precision/recall checks."""
-    crops = os.path.join(out_dir, "crops")
-    os.makedirs(crops, exist_ok=True)
-    h, w = walls_overlay.shape[:2]
-    regions = {  # fractions of the image: a patient-room+toilet+jamb wing, and the central cross
-        "wing": (0.03, 0.30, 0.00, 0.42),
-        "cross": (0.28, 0.74, 0.31, 0.53),
-    }
-    for name, (fy0, fy1, fx0, fx1) in regions.items():
-        y0, y1, x0, x1 = round(fy0 * h), round(fy1 * h), round(fx0 * w), round(fx1 * w)
-        for src, tag in ((walls_overlay, "walls"), (doors_overlay, "doors")):
-            crop = cv2.resize(src[y0:y1, x0:x1], None, fx=3, fy=3, interpolation=cv2.INTER_NEAREST)
-            cv2.imwrite(os.path.join(crops, f"{tag}_{name}.png"), crop)
+def main() -> None:
+    """Thin offline debug harness: trace one PNG, write the artifacts, print metrics."""
+    import argparse
+    import json
+    import time
+    from pathlib import Path
 
+    ap = argparse.ArgumentParser(description="Trace a linework floor plan offline (no model calls).")
+    ap.add_argument("image", help="path to a realistic line-plan PNG")
+    ap.add_argument("--out", default=None, help="output dir (default: hfagent/out/eval/<ts>-linework-trace)")
+    args = ap.parse_args()
 
-# Historic leak regions (image fractions x0,y0,x1,y1) - each held an unclosed room in an
-# earlier iteration; the diag crops let one eyeball source vs recon_post vs rooms per run.
-DIAG_REGIONS = {
-    "A_exam2_left": (0.109, 0.280, 0.283, 0.495),
-    "B_exam5_toilets": (0.632, 0.208, 0.770, 0.495),
-    "C_nurse4_office7": (0.640, 0.514, 0.887, 0.801),
-    "D_office1_bl": (0.109, 0.658, 0.211, 0.801),
-    "E_toilet4_top": (0.298, 0.208, 0.367, 0.352),
-    "F_bottom_left": (0.051, 0.807, 0.171, 1.000),
-}
+    out_dir = Path(args.out) if args.out else (
+        Path(__file__).resolve().parents[1] / "out" / "eval"
+        / f"{time.strftime('%Y%m%d-%H%M%S')}-linework-trace"
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-
-def _save_leak_diag(out_dir, src_bgr, recon_post, rooms_img):
-    """Side-by-side source | recon_post | rooms crops for the historic leak regions."""
-    diag = os.path.join(out_dir, "diag")
-    os.makedirs(diag, exist_ok=True)
-    h, w = src_bgr.shape[:2]
-    for name, (fx0, fy0, fx1, fy1) in DIAG_REGIONS.items():
-        x0, y0, x1, y1 = round(fx0 * w), round(fy0 * h), round(fx1 * w), round(fy1 * h)
-        panels = []
-        for img in (src_bgr, recon_post, rooms_img):
-            crop = cv2.copyMakeBorder(img[y0:y1, x0:x1], 2, 2, 2, 2,
-                                      cv2.BORDER_CONSTANT, value=(0, 200, 0))
-            panels.append(crop)
-        row = np.hstack(panels)
-        scale = min(2.0, 2400.0 / row.shape[1])
-        row = cv2.resize(row, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
-        cv2.imwrite(os.path.join(diag, f"{name}.png"), row)
-
-
-# 2K validation source (same plan, double resolution) - confirms wall_width-relativity.
-SRC_2K = (
-    r"D:\Github\GSDiff\hfagent\out\eval\20260629-195311-2k-linework"
-    r"\hospital-tower-floor.real.png"
-)
-
-
-def main():
-    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    out_dir = os.path.join(r"D:\Github\GSDiff\hfagent\out\eval", f"{ts}-linework-trace-doors")
-    # 2K only — small features (toilet doors, jambs) resolve far better at 2K.
-    summary = {"2k": process(SRC_2K, out_dir)}
-    brief = {res: {k: m[k] for k in ("wall_width", "faithful_wall_count",
-                                     "short_stub_count", "jamb_stub_count",
-                                     "doors_detected", "bridges_made",
-                                     "rooms_closed", "true_room_closure")}
-             for res, m in summary.items()}
+    trace = trace_linework(Path(args.image).read_bytes())
+    for filename, payload in trace.artifacts.items():
+        (out_dir / filename).write_bytes(payload)
+    (out_dir / "trace.json").write_text(json.dumps(trace.diagnostics, indent=2), encoding="utf-8")
+    brief = {k: trace.diagnostics[k] for k in
+             ("wall_width", "walls_traced", "doors_detected", "rooms_closed", "door_edges")}
     print(json.dumps(brief, indent=2))
-    print("out_dir", out_dir)
-    return out_dir, summary
+    print(f"out: {out_dir}")
 
 
 if __name__ == "__main__":

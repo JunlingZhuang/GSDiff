@@ -6,11 +6,13 @@ Usage (from repo root, hfagent venv active):
     python -m hfagent.evaluate --n 1                 # quick smoke run (first program)
     python -m hfagent.evaluate --only ward-wing      # named subset (comma-separated)
     python -m hfagent.evaluate --programs my.json    # alternative program file
+    python -m hfagent.evaluate --repeat 4            # 4 independent runs per program
 
 Test inputs live in hfagent/programs.json. Room types must exist in
 schema/palette.py; each room entry supports an optional "approx_area_m2" hint.
 
-Outputs per program under hfagent/out/<run>/<program>/:
+Outputs per run under hfagent/out/<run>/<program>/ (with --repeat N the work dirs
+are <program>-r1 .. <program>-rN, each an independent full pipeline run):
     gemini_r*.png         colour-block VLM image per correction round
     gemini_r*.real.png    realistic plan per round (doors visible here)
     parsed.json           cv_parse result (units px)
@@ -19,6 +21,10 @@ Outputs per program under hfagent/out/<run>/<program>/:
     graph.json            room adjacency graph (rooms + doors)
     recon_with_door.png   recon.png with door markers overlaid
     report.json           counts, rounds, fix ops
+
+structure_mode=linework replaces the colour-block artifacts with the trace set:
+walls_overlay.png, doors_overlay.png, recon.png (bridged walls + door arcs),
+recon_post.png, rooms_colorful.png.
 """
 from __future__ import annotations
 
@@ -60,6 +66,9 @@ def main() -> None:
                     help="override config.json structure_mode (colorblock | json | linework | direct_colorblock)")
     ap.add_argument("--boundary", default=None,
                     help="building-outline image to fit (overrides per-program / per-mode boundary)")
+    ap.add_argument("--repeat", type=int, default=1,
+                    help="run each program N times as independent full pipeline runs; "
+                         "work dirs become <program>-r1 .. <program>-rN (default 1)")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
@@ -107,18 +116,20 @@ def main() -> None:
         bpath = args.boundary or program.get("boundary") or mode_boundary
         if bpath:
             boundary = resolve(bpath).read_bytes()
-        print(f"-- {name} ...{' [boundary]' if boundary else ''}")
-        try:
-            report, _, _ = generate_plan(
-                program, client, out_dir, name=name,
-                max_rounds=cfg["max_correction_rounds"],
-                boundary=boundary,
-                structure_mode=structure_mode,
-            )
-        except Exception as e:
-            report = {"program": name, "error": str(e)}
-        print(json.dumps(report, indent=2))
-        reports.append(report)
+        for run in range(1, args.repeat + 1):
+            run_name = name if args.repeat == 1 else f"{name}-r{run}"
+            print(f"-- {run_name} ...{' [boundary]' if boundary else ''}")
+            try:
+                report, _, _ = generate_plan(
+                    program, client, out_dir, name=run_name,
+                    max_rounds=cfg["max_correction_rounds"],
+                    boundary=boundary,
+                    structure_mode=structure_mode,
+                )
+            except Exception as e:
+                report = {"program": run_name, "error": str(e)}
+            print(json.dumps(report, indent=2))
+            reports.append(report)
 
     (out_dir / "summary.json").write_text(json.dumps(reports, indent=2), encoding="utf-8")
     ok = sum(1 for r in reports if r.get("room_count_exact"))

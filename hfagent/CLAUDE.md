@@ -57,6 +57,15 @@ block with its own `text_model` / `image_model` / `boundary`; the active one is
   gone — cleaner geometry, one image call per round, ~half the cost. Doors come from
   `program["adjacency"]`, not an image read (see Doors below). Best on `gemini-3-pro-image`
   for plans up to ~33–40 rooms; degrades past ~80 (see `docs/direct-colorblock-findings.md`).
+- `linework` — **geometry-only, no OCR, no room typing**: pass-1 draws a clean line plan
+  (`build_linework_prompt`), then `tools/linework_tracer.trace_linework` deterministically
+  traces exactly the drawn walls (faithful trace + short-stub pass, nothing invented),
+  confirms a door ONLY where a quarter-circle swing arc straddles a wall gap, bridges the
+  walls at confirmed doors, post-processes (posts absorbed, faces merged, ink-gated corner
+  snap, whiskers dropped) and polygonizes the closed rooms into an untyped px-unit `Plan`
+  (`type="unknown"`, ids `r1..rN`). Runs a **single round** — untyped rooms give no
+  per-type violation signal — and the report compares total rooms traced vs the program
+  total. Every run writes the fixed trace artifacts (see Output artifacts).
 
 All structure modes share the SAME downstream (`fix_room_counts` → `plan_to_walls` /
 `place_doors` → unified `Plan`). The divergence is ONLY in how the `Plan` is produced —
@@ -72,6 +81,8 @@ do not fork the downstream.
   repairs whatever the VLM never resolved.
 - There is no stall detection — `max_correction_rounds` is the single cap. Do not
   add stall counters.
+- `linework` is exempt: it always runs exactly ONE round (untyped rooms have no
+  per-type count signal to correct on) and skips `fix_room_counts`.
 
 ## Doors — LLM reads the graph, geometry places the door
 
@@ -97,6 +108,11 @@ Rules:
   (`_room_graph_from_program`), then the SAME `place_doors` hangs doors by type on shared
   walls. Same "connectivity + geometric placement" split — the connectivity is just the
   program the LLM already produced.
+- **`linework` sources connectivity from the drawing's own door arcs** — geometric
+  detection, no LLM read at all: each arc-confirmed door probes one point on either side
+  of its opening and names the two flanking plan room ids (`"exterior"` when a side is
+  not a room). Those edges use exact ids (`r1..rN`), so `place_doors` matches them via
+  `exact_connected`, not by type.
 - Matching is by room **type**, not instance — instance identity is lost in the colour
   block, and "every patient_room–corridor shared wall gets a door" is the intended
   behaviour without fragile disambiguation.
@@ -127,6 +143,18 @@ graph.json            RoomGraph: rooms + door edges (connectivity, no coords)
 doors.json            fixed plan with walls + doors placed on shared walls
 recon_with_door.png   recon.png with door openings cut into the shared walls
 report.json           counts, rounds, fixes, room_graph summary
+```
+
+`structure_mode=linework` replaces the colour-block round images and the rendered
+`recon.png` with the tracer's FIXED artifact set, written every run:
+
+```
+walls_overlay.png     faithful traced walls in red on the source drawing
+doors_overlay.png     faithful walls grey + every detected swing arc/leaf/hinge
+recon.png             bridged walls (pre-postprocess) + door arc markers
+recon_post.png        post-processed wall graph + door arc markers
+rooms_colorful.png    closed room polygons, distinct deterministic colours,
+                      walls black on top, doors as white gaps
 ```
 
 `generate_plan` returns `(report, plan_dict, room_graph_dict)` — the third element
