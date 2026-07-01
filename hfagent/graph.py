@@ -18,9 +18,16 @@ def run_pipeline(text: str, client, out_dir: str | Path) -> dict:
     out_dir = Path(out_dir)
     cfg = load_config()
     program = understand(text, client)
+    boundary = None
+    if cfg["boundary"]:
+        bpath = Path(cfg["boundary"])
+        if not bpath.exists():
+            bpath = Path(__file__).parent / cfg["boundary"]
+        boundary = bpath.read_bytes() if bpath.exists() else None
     report, plan, room_graph = generate_plan(
         program, client, out_dir,
         max_rounds=cfg["max_correction_rounds"],
-        generation_mode=cfg["generation_mode"],
+        boundary=boundary,
+        structure_mode=cfg["structure_mode"],
     )
     return {"program": program, "report": report, "plan": plan, "room_graph": room_graph}

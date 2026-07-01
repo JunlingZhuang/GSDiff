@@ -1,6 +1,38 @@
 {
-  "generation_mode": "real2color",
-  "_generation_mode_doc": "real2color = realistic architectural plan -> convert to colour-block (image-space chain-of-thought).",
+  "structure_mode": "colorblock",
+  "_structure_mode_doc": "Active mode — one of the keys under \"modes\". Override at runtime with --structure-mode.",
   "max_correction_rounds": 3,
-  "_max_correction_rounds_doc": "hard cap on VLM correction rounds; on cap the least-violating round is kept"
+  "_max_correction_rounds_doc": "hard cap on VLM correction rounds; on cap the least-violating round is kept",
+  "image_size": "2K",
+  "_image_size_doc": "Gemini image output tier: 1K|2K|4K. 2K (2752x1536 @16:9) is ~2x linear resolution of 1K, so small rooms/doors/walls land above the CV trace/parse thresholds. Env HFAGENT_IMAGE_SIZE overrides. NOTE: for boundary (image-to-image) the model may ignore this and return ~1K.",
+  "image_aspect": "16:9",
+  "_image_aspect_doc": "Gemini image aspect ratio for pure text-to-image. With a boundary/reference image the output aspect follows that image automatically (llm.py _first_image_aspect). Env HFAGENT_IMAGE_ASPECT overrides.",
+  "modes": {
+    "colorblock": {
+      "description": "Two-pass: text -> realistic architectural plan -> AI flat colour-block -> cv_parse. Legacy fallback; image models leak text / draw door-arc spikes.",
+      "text_model": "",
+      "image_model": "gemini-3.1-flash-image",
+      "boundary": "data/boundary/boundary_input_3_16_9.png"
+    },
+    "json": {
+      "description": "text -> realistic plan -> VLM reads it into a 32x18 grid-cell JSON (rooms as cells + doors) -> rectify into an orthogonal Plan.",
+      "text_model": "",
+      "image_model": "",
+      "boundary": ""
+    },
+    "linework": {
+      "description": "text -> realistic LINE drawing -> deterministic CV traces walls + detects door arcs (no AI mask).",
+      "text_model": "",
+      "image_model": "",
+      "boundary": ""
+    },
+    "direct_colorblock": {
+      "description": "One-pass: text -> flat colour-block directly (no realistic plan) -> cv_parse; doors from program adjacency. Cleaner geometry, ~half the cost; best <= ~33 rooms.",
+      "text_model": "",
+      "image_model": "gemini-3.1-flash-image",
+      "boundary": ""
+    }
+  },
+  "_models_doc": "Per mode: text_model / image_model are Gemini ids; empty = auto-resolve newest (llm.py preference). Env HFAGENT_TEXT_MODEL / HFAGENT_IMAGE_MODEL override.",
+  "_boundary_doc": "Per mode: path to a building-outline PNG (relative to hfagent/ or absolute); empty = no boundary. --boundary flag / per-program \"boundary\" field override at runtime. Boundary only affects pass-1 (see docs/boundary-pipeline-audit.md)."
 }

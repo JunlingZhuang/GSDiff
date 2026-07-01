@@ -56,15 +56,20 @@ def main() -> None:
     ap.add_argument("--only", "--program", "-p", dest="only", default=None,
                     help="run only these program(s) by name (comma-separated)")
     ap.add_argument("--programs", default=DEFAULT_PROGRAMS, help="path to programs JSON")
-    ap.add_argument("--generation-mode", default=None, dest="generation_mode",
-                    help="override config.json generation_mode (real2color)")
+    ap.add_argument("--structure-mode", default=None, dest="structure_mode",
+                    help="override config.json structure_mode (colorblock | json | linework | direct_colorblock)")
     ap.add_argument("--boundary", default=None,
-                    help="building-outline image to fit (overrides any per-program boundary)")
+                    help="building-outline image to fit (overrides per-program / per-mode boundary)")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
     cfg = load_config()
-    generation_mode = args.generation_mode or cfg["generation_mode"]
+    structure_mode = args.structure_mode or cfg["structure_mode"]
+    if structure_mode not in cfg["modes"]:
+        raise SystemExit(f"unknown structure_mode '{structure_mode}'; available: {sorted(cfg['modes'])}")
+    # the chosen mode (config default or --structure-mode) supplies its own models + boundary
+    mode_cfg = cfg["modes"][structure_mode]
+    mode_boundary = mode_cfg.get("boundary", "")
     programs = load_programs(Path(args.programs))
 
     if args.only:
@@ -74,24 +79,32 @@ def main() -> None:
             raise SystemExit(f"unknown programs {missing}; available: {list(programs)}")
         programs = {n: programs[n] for n in names}
 
-    client = GeminiClient()
+    client = GeminiClient(
+        text_model=(mode_cfg.get("text_model") or None),
+        image_model=(mode_cfg.get("image_model") or None),
+        image_size=cfg["image_size"],
+        image_aspect=cfg["image_aspect"],
+    )
     print(f"text model:       {client.text_model}")
     print(f"image model:      {client.image_model}")
-    print(f"generation mode:  {generation_mode} (max {cfg['max_correction_rounds']} correction rounds)")
+    print(f"image size:       {client.image_size} @ {client.image_aspect}")
+    print(f"structure mode:   {structure_mode} (max {cfg['max_correction_rounds']} correction rounds)")
+    print(f"mode boundary:    {mode_boundary or '(none)'}")
 
     # timestamped run dir so repeated evaluations never clobber each other
     out_dir = Path(args.out) if args.out else (
         Path(__file__).parent / "out" / "eval" / time.strftime("%Y%m%d-%H%M%S")
     )
+    out_dir.mkdir(parents=True, exist_ok=True)  # so summary.json survives a failing program
     def resolve(p: str) -> Path:
         cand = Path(p)
         return cand if cand.exists() else Path(__file__).parent / p
 
     reports = []
     for name, program in list(programs.items())[: args.n]:
-        # optional second entry: --boundary flag (all programs) or a per-program field
+        # second entry, priority: --boundary flag > per-program field > active mode's config path
         boundary = None
-        bpath = args.boundary or program.get("boundary")
+        bpath = args.boundary or program.get("boundary") or mode_boundary
         if bpath:
             boundary = resolve(bpath).read_bytes()
         print(f"-- {name} ...{' [boundary]' if boundary else ''}")
@@ -99,8 +112,8 @@ def main() -> None:
             report, _, _ = generate_plan(
                 program, client, out_dir, name=name,
                 max_rounds=cfg["max_correction_rounds"],
-                generation_mode=generation_mode,
                 boundary=boundary,
+                structure_mode=structure_mode,
             )
         except Exception as e:
             report = {"program": name, "error": str(e)}

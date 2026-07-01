@@ -10,7 +10,7 @@ program, which becomes a labelled architectural plan, which becomes a flat
 colour-block image, which is parsed back into a vector plan plus a **room graph**
 (rooms connected by doors). FastAPI serves it; the frontend renders/edits it.
 
-## Pipeline (the only flow — there is no "direct" mode)
+## Pipeline (one flow; the path is chosen by `config.json` structure_mode)
 
 ```
 text
@@ -22,9 +22,45 @@ text
              extract_room_adjacency(real_png)   image -> RoomGraph (doors)
 ```
 
-This two-pass image chain is called **real2color** (`generation_mode` in
-`config.json`). It is the only mode; do not reintroduce a "direct" mode or a
-`pipeline` parameter name.
+There is ONE flow and **no `generation_mode`** (it was removed — it only ever had one
+value). `config.json` holds a `modes` block — one entry per structure mode, each with its
+own `description`, `text_model`, `image_model` and `boundary` path — plus a top-level
+`structure_mode` selecting the active one. Most modes run the two-pass **real2color** image
+chain above (realistic plan → colour-block); one — `direct_colorblock` — skips pass-1 and
+draws the colour-block in a single pass (see `docs/direct-colorblock-findings.md`). Do not
+reintroduce a `generation_mode` or a `pipeline` parameter name.
+
+**Two input entries, one pipeline.** Pass-1 has two forms — a program alone
+(`build_real_prompt`, free footprint) or a program **+ a boundary image**
+(`build_boundary_prompt`, outer walls follow the given outline; pass
+`generate_plan(..., boundary=<png bytes>)`, CLI `--boundary`, or the
+`/api/agent/generate-from-boundary` endpoint). Pass-1 is the ONLY divergence; the
+realflow plan and everything downstream of it are identical for both. Keep it that
+way — never fork the downstream.
+
+**Structure modes — how the program becomes a `Plan`** (each is a `config.json: modes.*`
+block with its own `text_model` / `image_model` / `boundary`; the active one is
+`config.json: structure_mode`, overridable with `--structure-mode` or
+`generate_plan(..., structure_mode=...)`):
+- `colorblock` (current config default) — `to_colorblock` image + `cv_parse`. Brittle: image
+  models won't draw a clean segmentation mask (leaked text, door arcs as corridor spikes).
+- `json` — `tools/structure_reader.read_structure` (VLM reads the realistic plan
+  into `rooms[cells]+doors` JSON: each room as the **grid cells it covers** on a fixed
+  32×18 grid) + `tools/rectify.rectify` (paint cells → trace orthogonal `Plan`). Skips
+  `to_colorblock` + `cv_parse`, reads doors in the same call. **Cells, not pixel coords** —
+  the model only picks discrete cells, so it can't skew the building's aspect (fixed by the
+  grid) and an L/T corridor keeps its shape; counts/types are schema-checked.
+- `direct_colorblock` — **one pass, no realistic plan**: the image model draws the flat
+  colour-block straight from the program (`generate_colorblock_direct` +
+  `build_direct_colorblock_prompt`), then `cv_parse`. Skips `generate_real_plan` +
+  `to_colorblock`, so the conversion step that injects door-arc blobs / count drift is
+  gone — cleaner geometry, one image call per round, ~half the cost. Doors come from
+  `program["adjacency"]`, not an image read (see Doors below). Best on `gemini-3-pro-image`
+  for plans up to ~33–40 rooms; degrades past ~80 (see `docs/direct-colorblock-findings.md`).
+
+All structure modes share the SAME downstream (`fix_room_counts` → `plan_to_walls` /
+`place_doors` → unified `Plan`). The divergence is ONLY in how the `Plan` is produced —
+do not fork the downstream.
 
 ### Correction loop (in `generate_plan`)
 
@@ -56,6 +92,11 @@ Split of responsibility, on purpose:
 Rules:
 - **Room graph, not wall graph.** No `WallGraph` / party-wall topology. Don't add one.
 - **Never ask the LLM for door coordinates.** Connectivity only; geometry decides position.
+- **`direct_colorblock` sources connectivity from `program["adjacency"]`**, not an image
+  read (it has no realistic plan): one `RoomNode` per type, one `Door` per adjacency pair
+  (`_room_graph_from_program`), then the SAME `place_doors` hangs doors by type on shared
+  walls. Same "connectivity + geometric placement" split — the connectivity is just the
+  program the LLM already produced.
 - Matching is by room **type**, not instance — instance identity is lost in the colour
   block, and "every patient_room–corridor shared wall gets a door" is the intended
   behaviour without fragile disambiguation.

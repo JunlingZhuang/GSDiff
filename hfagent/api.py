@@ -40,7 +40,23 @@ class GenerateRequest(BaseModel):
 
 
 def get_client() -> GeminiClient:
-    return GeminiClient()
+    return GeminiClient(
+        text_model=(_cfg["text_model"] or None),
+        image_model=(_cfg["image_model"] or None),
+        image_size=_cfg["image_size"],
+        image_aspect=_cfg["image_aspect"],
+    )
+
+
+def _config_boundary() -> bytes | None:
+    """Boundary bytes from the active mode's configured path, or None if unset."""
+    rel = _cfg.get("boundary", "")
+    if not rel:
+        return None
+    path = Path(rel)
+    if not path.exists():
+        path = Path(__file__).parent / rel
+    return path.read_bytes() if path.exists() else None
 
 
 @app.get("/api/agent/health")
@@ -57,7 +73,8 @@ def generate(req: GenerateRequest, client: GeminiClient = Depends(get_client)) -
         report, plan, room_graph = generate_plan(
             program, client, session,
             max_rounds=_cfg["max_correction_rounds"],
-            generation_mode=_cfg["generation_mode"],
+            boundary=_config_boundary(),
+            structure_mode=_cfg["structure_mode"],
         )
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
@@ -85,8 +102,8 @@ def generate_from_boundary(
         report, plan, room_graph = generate_plan(
             prog, client, session,
             max_rounds=_cfg["max_correction_rounds"],
-            generation_mode=_cfg["generation_mode"],
             boundary=boundary.file.read(),
+            structure_mode=_cfg["structure_mode"],
         )
     except ValueError as e:  # bad JSON, no usable rooms, etc.
         raise HTTPException(status_code=422, detail=str(e))

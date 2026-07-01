@@ -3,34 +3,72 @@
 
 This is the heart of the agent: one function that takes a structured program and
 a client, runs the VLM correction loop, repairs counts deterministically, reads the
-room adjacency (doors) from the best realistic plan, and returns
-(report, plan_dict, room_graph_dict).
+room adjacency (doors) from the best realistic plan (or, in direct_colorblock, from
+the program's own adjacency), and returns (report, plan_dict, room_graph_dict).
 """
 from __future__ import annotations
 
 import json
+import sys
+import time
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
 from hfagent.tools.image_parser import cv_parse
+from hfagent.tools.linework_parser import parse_linework
 from hfagent.tools.floor_plan_generator import FloorPlanGenerator
 from hfagent.tools.door_placer import place_doors
 from hfagent.tools.plan_fixes import fix_room_counts
+from hfagent.tools.rectify import building_aspect, rectify
 from hfagent.tools.render_plan import render_plan
+from hfagent.tools.structure_reader import read_structure
 from hfagent.schema.plan import AdjacencyGraph, AdjEdge
+from hfagent.schema.roomgraph import Door, RoomGraph, RoomNode
 
 DEFAULT_CONFIG = Path(__file__).parent / "config.json"
 
 
+def _log(name: str, message: str) -> None:
+    """Emit progress immediately; model calls can otherwise look stalled."""
+    print(f"[hfagent:{name}] {message}", flush=True)
+
+
+def _log_prompt(name: str, stage: str, prompt: str) -> None:
+    message = (
+        f"\n[hfagent:{name}] PROMPT BEGIN [{stage}]\n"
+        f"{prompt}\n"
+        f"[hfagent:{name}] PROMPT END [{stage}]\n"
+    )
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    safe_message = message.encode(encoding, errors="replace").decode(encoding)
+    print(safe_message, flush=True)
+
+
+def _elapsed(started_at: float) -> str:
+    return f"{time.perf_counter() - started_at:.1f}s"
+
+
 def load_config(path: Path = DEFAULT_CONFIG) -> dict:
     cfg = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-    mode = cfg.get("generation_mode", "real2color")
-    if mode not in ("real2color",):
-        raise SystemExit(f"config.json: unknown generation_mode '{mode}' (use real2color)")
+    modes = cfg.get("modes", {})
+    structure_mode = cfg.get("structure_mode", "colorblock")
+    if structure_mode not in modes:
+        raise SystemExit(
+            f"config.json: structure_mode '{structure_mode}' is not one of the configured "
+            f"modes {sorted(modes)}"
+        )
+    active = modes[structure_mode]
     return {
-        "generation_mode": mode,
+        "structure_mode": structure_mode,
         "max_correction_rounds": int(cfg.get("max_correction_rounds", 3)),
+        "image_size": cfg.get("image_size", "1K"),
+        "image_aspect": cfg.get("image_aspect", "16:9"),
+        # per-mode settings of the ACTIVE mode (a --structure-mode override re-resolves via "modes")
+        "text_model": active.get("text_model", ""),
+        "image_model": active.get("image_model", ""),
+        "boundary": active.get("boundary", ""),
+        "modes": modes,
     }
 
 
@@ -41,6 +79,7 @@ class _BestRound:
     plan: object
     png_path: Path
     real_png: bytes
+    room_graph: object = None  # json: doors read alongside rooms; colorblock/direct: built later
 
 
 def _count_violations(required_rooms: dict, actual_counts: Counter) -> list[str]:
@@ -56,14 +95,30 @@ def _count_violations(required_rooms: dict, actual_counts: Counter) -> list[str]
     return violations
 
 
+def _room_graph_from_program(program: dict) -> RoomGraph:
+    """Build the door graph straight from the program's declared adjacency.
+
+    direct_colorblock has no realistic plan to read doors from, so connectivity comes
+    from the program the LLM already produced: one node per distinct room type, one
+    door edge per adjacency pair. place_doors matches by TYPE, so type-level nodes are
+    enough — it hangs a door on every shared wall between two connected types. This is
+    the documented "LLM connectivity + geometric placement" split, with the connectivity
+    coming from the program rather than a second image read.
+    """
+    types = sorted({r["type"] for r in program["rooms"]})
+    rooms = [RoomNode(id=t, type=t) for t in types]
+    doors = [Door(room_a=a, room_b=b) for a, b in program.get("adjacency", [])]
+    return RoomGraph(rooms=rooms, doors=doors)
+
+
 def generate_plan(
     program: dict,
     client,
     out_dir: Path,
     name: str = "plan",
     max_rounds: int = 3,
-    generation_mode: str = "real2color",
     boundary: bytes | None = None,
+    structure_mode: str = "colorblock",
 ) -> tuple[dict, dict, dict]:
     """Generate, parse, and repair a floor plan from a structured program.
 
@@ -81,54 +136,193 @@ def generate_plan(
     work_dir = out_dir / name
     work_dir.mkdir(parents=True, exist_ok=True)
     required_rooms = {r["type"]: r.get("count", 1) for r in program["rooms"]}
+    pipeline_started = time.perf_counter()
+    _log(
+        name,
+        f"start structure={structure_mode}, rounds={max_rounds}, "
+        f"boundary={'yes' if boundary else 'no'}, output={work_dir}",
+    )
+    _log(name, f"required rooms: {required_rooms}")
 
-    generator = FloorPlanGenerator(program, client, boundary=boundary)
+    generator = FloorPlanGenerator(
+        program,
+        client,
+        boundary=boundary,
+        prompt_logger=lambda stage, prompt: _log_prompt(name, stage, prompt),
+        drawing_mode="linework" if structure_mode == "linework" else "standard",
+    )
     rounds: list[dict] = []
     best_round: _BestRound | None = None
     real_png: bytes | None = None
 
     for round_num in range(1, max_rounds + 1):
         png_path = work_dir / f"gemini_r{round_num}.png"
+        round_started = time.perf_counter()
+        _log(name, f"round {round_num}/{max_rounds}: begin")
 
-        # ── real2color: realistic plan -> colour-block ───────────────────────
-        if round_num == 1:
-            real_png = generator.generate_real_plan()
+        round_graph = None
+        parser_diagnostics = None
+
+        if structure_mode == "direct_colorblock":
+            # ── one-pass: program text -> flat colour-block PNG ──────────────
+            # No realistic plan: the model draws the colour mask directly, skipping
+            # generate_real_plan + to_colorblock. cv_parse reads it like any mask.
+            if round_num == 1:
+                _log(name, f"round {round_num}: generating colour-block directly from the program")
+                colorblock_png = generator.generate_colorblock_direct()
+            else:
+                # feed the previous colour-block back with the violations to redraw
+                _log(
+                    name,
+                    f"round {round_num}: correcting colour-block for "
+                    f"{len(rounds[-1]['violations'])} count violation(s)",
+                )
+                violation_feedback = (
+                    "The colour-block floor plan above violates its room program:\n- "
+                    + "\n- ".join(rounds[-1]["violations"])
+                    + "\nRedraw it as a flat colour-block diagram, fixing ONLY these violations "
+                    "(add the missing colour blocks, or merge/remove the extra ones). Keep the same "
+                    "colours, black walls, footprint and layout; still no text, doors, arcs or furniture."
+                )
+                _log_prompt(name, f"colour-block correction round {round_num}", violation_feedback)
+                colorblock_png = client.generate_image([colorblock_png, violation_feedback])
+            png_path.write_bytes(colorblock_png)
+            _log(name, f"round {round_num}: saved colour-block -> {png_path.name}; parsing with CV parser")
+            parsed_plan = cv_parse(str(png_path))
         else:
-            # apply violation feedback to the realistic plan, then re-convert
-            violation_feedback = (
-                "The architectural floor plan above violates its room program:\n- "
-                + "\n- ".join(rounds[-1]["violations"])
-                + "\nEdit the plan to fix ONLY these violations (add missing rooms, merge or "
-                "remove extra ones). Keep the same drawing style, footprint and circulation."
-            )
-            real_png = client.generate_image([real_png, violation_feedback])
-        png_path.with_suffix(".real.png").write_bytes(real_png)
-        png_path.write_bytes(generator.to_colorblock(real_png))
+            # ── real2color family: realistic plan first ──────────────────────
+            if round_num == 1:
+                _log(name, f"round {round_num}: generating realistic floor plan")
+                real_png = generator.generate_real_plan()
+            else:
+                # apply violation feedback to the realistic plan, then re-convert
+                _log(
+                    name,
+                    f"round {round_num}: correcting realistic plan for "
+                    f"{len(rounds[-1]['violations'])} count violation(s)",
+                )
+                violation_feedback = (
+                    "The architectural floor plan above violates its room program:\n- "
+                    + "\n- ".join(rounds[-1]["violations"])
+                    + "\nEdit the plan to fix ONLY these violations (add missing rooms, merge or "
+                    "remove extra ones). Keep the same drawing style, footprint and circulation."
+                )
+                _log_prompt(name, f"real plan correction round {round_num}", violation_feedback)
+                real_png = client.generate_image([real_png, violation_feedback])
+            real_path = png_path.with_suffix(".real.png")
+            real_path.write_bytes(real_png)
+            _log(name, f"round {round_num}: saved realistic plan -> {real_path.name}")
 
-        # ── parse + verify ───────────────────────────────────────────────────
-        parsed_plan = cv_parse(str(png_path))
+            # ── realistic plan -> parsed Plan (interchangeable structure paths) ──
+            if structure_mode == "json":
+                # VLM reads the realistic plan into rooms (rectangles) + doors; rectify makes a
+                # clean orthogonal Plan deterministically. The building's aspect ratio is measured
+                # from the realistic image, not the model. No to_colorblock, no cv_parse.
+                _log(name, f"round {round_num}: reading room geometry and doors as JSON")
+                shapes, round_graph = read_structure(
+                    real_png,
+                    client,
+                    program,
+                    prompt_logger=lambda stage, prompt: _log_prompt(name, stage, prompt),
+                )
+                _log(name, f"round {round_num}: rectifying {len(shapes)} room shape(s)")
+                parsed_plan = rectify(shapes, building_aspect(real_png))
+                structure_json = {
+                    "rooms": [{"id": rs.id, "type": rs.type, "rects": [list(r) for r in rs.rects]}
+                              for rs in shapes],
+                    "doors": [{"room_a": d.room_a, "room_b": d.room_b} for d in round_graph.doors],
+                }
+                (work_dir / f"structure_r{round_num}.json").write_text(
+                    json.dumps(structure_json, indent=2), encoding="utf-8"
+                )
+            elif structure_mode == "linework":
+                _log(name, f"round {round_num}: OCR + CV parsing realistic linework")
+                parsed_plan, round_graph, parser_diagnostics, debug_png = parse_linework(
+                    real_png, program
+                )
+                render_plan(parsed_plan, px_per_mm=1.0).save(png_path)
+                (work_dir / f"linework_r{round_num}.json").write_text(
+                    json.dumps(parser_diagnostics, indent=2), encoding="utf-8"
+                )
+                (work_dir / f"linework_r{round_num}.debug.png").write_bytes(debug_png)
+            else:
+                _log(name, f"round {round_num}: converting realistic plan to colour-block mask")
+                png_path.write_bytes(generator.to_colorblock(real_png))
+                _log(name, f"round {round_num}: parsing colour-block mask with CV parser")
+                parsed_plan = cv_parse(str(png_path))
+
+        # ── verify ───────────────────────────────────────────────────────────
         actual_counts = Counter(r.type for r in parsed_plan.rooms)
         violations = _count_violations(required_rooms, actual_counts)
-        rounds.append({"round": round_num, "actual_rooms": dict(actual_counts), "violations": violations})
+        round_report = {
+            "round": round_num,
+            "actual_rooms": dict(actual_counts),
+            "violations": violations,
+        }
+        if parser_diagnostics is not None:
+            round_report["parser"] = {
+                "room_regions": parser_diagnostics["room_regions"],
+                "labelled_rooms": parser_diagnostics["labelled_rooms"],
+                "unlabelled_rooms": parser_diagnostics["unlabelled_rooms"],
+                "door_candidates": len(parser_diagnostics["door_candidates"]),
+                "parser_confident": parser_diagnostics["parser_confident"],
+            }
+        rounds.append(round_report)
+        _log(
+            name,
+            f"round {round_num}: parsed {len(parsed_plan.rooms)} rooms, "
+            f"violations={len(violations)}, elapsed={_elapsed(round_started)}",
+        )
+        _log(name, f"round {round_num}: room counts {dict(actual_counts)}")
 
         if best_round is None or len(violations) < best_round.violation_count:
-            best_round = _BestRound(len(violations), round_num, parsed_plan, png_path, real_png)
+            best_round = _BestRound(len(violations), round_num, parsed_plan, png_path, real_png, round_graph)
+            _log(name, f"round {round_num}: selected as current best")
+
+        if structure_mode == "linework" and violations and not parser_diagnostics["parser_confident"]:
+            _log(name, "linework parser is uncertain; skipping image-model correction")
+            break
 
         if not violations:
+            _log(name, f"round {round_num}: room counts match; stopping correction loop")
             break  # all room counts match — skip remaining rounds
 
     assert best_round is not None
+    _log(name, f"using round {best_round.round_num} with {best_round.violation_count} violation(s)")
     (work_dir / "parsed.json").write_text(best_round.plan.model_dump_json(indent=2), encoding="utf-8")
 
-    fixed_plan, count_fix = fix_room_counts(best_round.plan, required_rooms)
+    _log(name, "running deterministic room-count repair")
+    if structure_mode == "linework":
+        fixed_plan = best_round.plan.model_copy(deep=True)
+        final_counts = Counter(room.type for room in fixed_plan.rooms)
+        count_fix = {
+            "ops": [],
+            "fixed": not _count_violations(required_rooms, final_counts),
+            "fixed_rooms": dict(final_counts),
+            "skipped": "linework geometry is not split or relabelled by count repair",
+        }
+    else:
+        fixed_plan, count_fix = fix_room_counts(best_round.plan, required_rooms)
     (work_dir / "fixed.json").write_text(fixed_plan.model_dump_json(indent=2), encoding="utf-8")
     render_plan(fixed_plan, px_per_mm=1.0).save(work_dir / "recon.png")
+    _log(name, f"count repair fixed={count_fix['fixed']}; rendered recon.png")
 
-    # ── room adjacency (doors) read from the best realistic plan ─────────────
-    # LLM returns connectivity only; door_placer hangs each door on the real wall the
-    # two connected rooms physically share, and reports which rooms each door links.
-    room_graph = generator.extract_room_adjacency(best_round.real_png)
+    # ── room adjacency (doors) ───────────────────────────────────────────────
+    # json/linework already read the doors alongside the rooms; direct_colorblock has no
+    # realistic plan so it takes connectivity straight from the program; colorblock reads
+    # it from the best realistic plan now. Either way door_placer hangs each door on the
+    # real wall the two connected rooms physically share.
+    if structure_mode in ("json", "linework"):
+        _log(name, f"using door graph from the best {structure_mode} structure round")
+        room_graph = best_round.room_graph
+    elif structure_mode == "direct_colorblock":
+        _log(name, "building door graph from the program's declared adjacency")
+        room_graph = _room_graph_from_program(program)
+    else:
+        _log(name, "extracting room-door adjacency from the best realistic plan")
+        room_graph = generator.extract_room_adjacency(best_round.real_png)
     (work_dir / "graph.json").write_text(room_graph.model_dump_json(indent=2), encoding="utf-8")
+    _log(name, f"door graph: rooms={len(room_graph.rooms)}, logical doors={len(room_graph.doors)}")
 
     # assemble the authoritative plan (docs/agent/02-data-model.md §3.2):
     # rooms + complete walls + doors-on-walls + adjacency_graph (edges link via door id)
@@ -140,12 +334,13 @@ def generate_plan(
     )
     (work_dir / "plan.json").write_text(plan.model_dump_json(indent=2, by_alias=True), encoding="utf-8")
     render_plan(plan, px_per_mm=1.0).save(work_dir / "recon_with_door.png")
+    _log(name, f"placed doors={len(plan.doors)}, walls={len(plan.walls)}; rendered recon_with_door.png")
 
     vlm_converged = not rounds[best_round.round_num - 1]["violations"]
     report = {
         "program": name,
         "image_model": client.image_model,
-        "generation_mode": generation_mode,
+        "structure_mode": structure_mode,
         "required_rooms": required_rooms,
         "rounds": rounds,
         "best_round": best_round.round_num,
@@ -163,5 +358,6 @@ def generate_plan(
         },
     }
     (work_dir / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    _log(name, f"complete in {_elapsed(pipeline_started)} -> {work_dir}")
 
     return report, plan.model_dump(by_alias=True), room_graph.model_dump()

@@ -76,38 +76,71 @@ Output: `{ building_type, rooms: [{type, count, approx_area_m2?}], adjacency }`
 Two Gemini image calls per round; the realistic plan is an image-space
 chain-of-thought that lifts layout quality far above asking for blocks directly.
 
-- **Pass 1 `generate_real_plan`** — text → a realistic architectural drawing. Rooms
+- **Pass 1 `generate_real_plan`** — program → a realistic architectural drawing. Rooms
   are labelled with **instance names** (`patient_room_1 … patient_room_N`) so the
   later adjacency read can name door endpoints unambiguously; doors are drawn.
+  - **Two input entries, one output.** Without a boundary (`build_real_prompt`) the
+    footprint is free. With a boundary image (`build_boundary_prompt`, passed as
+    `generate_plan(..., boundary=<png bytes>)` or the `/api/agent/generate-from-boundary`
+    endpoint), the outer walls follow that exact outline. This is the **only** point that
+    differs between the two entries — everything from pass-2 onward is identical.
 - **Pass 2 `to_colorblock`** — realistic plan → flat colour blocks: read each label,
   strip the trailing number, fill with that base type's legend colour, then **remove
   ALL text, doors, windows and fixtures**. A clean, unbroken fill is exactly what the
   parser segments — any retained text punches holes in room masks (see Findings).
 
-`real2color` is the only `generation_mode` (`config.json`). There is no "direct"
-single-pass mode.
+There is no `generation_mode` (removed — it only ever had one value). The path is chosen
+by `config.json: structure_mode` (see 2b); one mode, `direct_colorblock`, is a single-pass
+mode that skips the realistic plan entirely.
 
-### 3. Parse — `hfagent/tools/image_parser.py`
+### 2b. Structure mode — how the realistic plan becomes a `Plan` (`config.json: structure_mode`)
+
+Two interchangeable ways to turn the realistic plan into a parsed `Plan`. Pick via
+`structure_mode`; both feed the identical downstream (repair → walls → doors → adjacency).
+
+- **`colorblock`** (default) — pass-2 `to_colorblock` renders a flat colour-block image,
+  then `cv_parse` (Stage 3) reads it. Image-native, but image models won't fully obey a
+  segmentation mask (leaked text, door arcs painted as corridor spikes, gradients) which
+  pollutes the parse.
+- **`json`** (default) — `tools/structure_reader.read_structure` has the VLM *read* the
+  realistic plan into one JSON object: each room as the **grid cells it covers** on a fixed
+  `GRID_COLS×GRID_ROWS` (32×18, 16:9) grid — `rooms:[{id,type,cells:[[c1,r1,c2,r2],…]}]` +
+  `doors:[{room_a,room_b}]`. `tools/rectify.rectify` paints the cells onto one label grid
+  (later room wins overlaps) and traces each room's region into an orthogonal polygon.
+  **Skips `to_colorblock` and `cv_parse`** (the two brittle stages) and reads doors in the
+  same call (no separate `extract_room_adjacency`). Why **cells, not pixel boxes**: VLMs are
+  unreliable at precise coordinates (they skew the extents → warped aspect ratio); discrete
+  cell choice needs no precise coords, so the building's aspect is fixed by the grid, and a
+  bent corridor / L-shaped room keeps its shape (several cell-rects). JSON is schema-
+  validated and counts are exact. MVP trade-off: a room split into disconnected cell blocks
+  keeps only its largest block.
+
+### 3. Parse — `hfagent/tools/image_parser.py`  (colorblock mode only)
 
 Colour-block PNG → `Plan` (typed room polygons), fully deterministic.
 
 1. Classify every pixel to the nearest palette colour (`ROOM_RGB`, capped distance).
-2. Morphology per type now includes open, small internal-hole fill, close and
-   component filtering. The hole fill absorbs retained labels / door arcs / tiny
-   black speckles inside one colour component without bridging adjacent same-type
-   rooms across a wall. Connected components become one **instance id** per accepted
-   room.
-3. **Nearest-room gap fill** (`_fill_gaps`): dark non-room wall / text pixels within
-   `gap_fill_px` of a room are assigned to the *nearest* room, so the boundary between
-   two rooms lands on the wall's **medial axis** — gaps close to zero while each room,
-   even two of the same colour, keeps a distinct id. Large white exterior gaps stay
-   unassigned.
-4. **Grid contour** (`_grid_contour`): trace each room on a coarse grid → orthogonal by
-   construction.
-5. **Global axis snap** (`_snap_axes`, tol = `2.5·grid_px`): cluster all x/y across all
-   rooms and snap to the cluster mean so shared walls are exactly collinear. Clusters
-   are anchored on the group's first value (span ≤ tol) — never chained on the previous
-   value, which collapses the whole plan when one skewed room spreads coordinates.
+2. Per type: open (despeckle) → close (reconnect across thin text strokes) → drop
+   sub-room blobs. Each surviving connected component becomes one **instance id**.
+   Label / door-arc holes are deliberately left for step 3 — never filled here — so a
+   colour block can never paint over an enclosed room of a different colour.
+3. **Centre-line fill** (`_grow_to_centerline`): every non-room pixel **within half a
+   wall** of a seed is handed to the nearest seed. Adjacent rooms therefore meet exactly
+   on the wall mid-line and label / door holes are reclaimed by their surrounding room,
+   while the black wall band itself survives as the real divider — walls are boundaries,
+   not gaps. The half-wall cap is the whole point: it replaced an earlier *whole-footprint*
+   nearest-seed flood that ate walls, let a room balloon across a missing neighbour, and
+   sprouted long medial-axis triangles where three rooms met.
+4. **Full-resolution corners** (`_region_corners`): trace each region's outer boundary
+   (`RETR_EXTERNAL`, so a toilet bitten out of a corner keeps the room L/U-shaped) and
+   reduce it to its real corners with `approxPolyDP`. No coarse grid — small rooms
+   (≈45 px toilets) keep their true extent.
+5. **Global axis snap then right-angle** (`raster_geometry.snap_axes`, then
+   `_rectilinearize`): cluster all x/y across all rooms onto shared lines so chamfered
+   corners become truly axis-aligned and shared walls are exactly collinear; only then
+   force right angles. Snapping first is what keeps right-angling from picking a
+   wrong-side corner and self-intersecting. Clusters are anchored on the group's first
+   value (span ≤ tol), never chained on the previous value.
 
 ### 4. Correction Loop — `hfagent/floor_plan_generate.py`
 
