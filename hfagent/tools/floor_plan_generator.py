@@ -15,6 +15,7 @@ Prompt builders are module-level so tests can verify their content independently
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable
 
 from hfagent.schema.palette import BACKGROUND_RGB, ROOM_RGB, WALL_RGB, rgb_hex
 from hfagent.schema.roomgraph import RoomGraph
@@ -78,11 +79,17 @@ EXCLUDE — keep it a clean SCHEMATIC plan, NOT a construction / working drawing
 - Background outside the building is pure white and empty."""
 
 
-def _compose_prompt(intro: str, program: dict) -> str:
+def _compose_prompt(
+    intro: str,
+    program: dict,
+    extra_rules: str = "",
+    plan_rules: str = _PLAN_RULES,
+) -> str:
     rooms, adjacency = _program_blocks(program)
     return f"""{intro}
 
-{_PLAN_RULES}
+{plan_rules}
+{extra_rules}
 
 ROOM PROGRAM (exact counts and labels are hard requirements):
 {rooms}
@@ -119,23 +126,54 @@ def build_boundary_prompt(program: dict) -> str:
     return _compose_prompt(intro, program)
 
 
-_CONVERT_PROMPT_TEMPLATE = """Convert the floor plan drawing above into a flat colour-block diagram for computer-vision parsing.
+_LINEWORK_RULES = """
 
-HARD RULES:
-- Preserve every room's position, size and count EXACTLY as drawn above. Do not add, remove, merge or move rooms.
-- Use the text label inside each room to identify its base type (strip any trailing _number), then fill it with that type's legend colour below.
-  Example: "patient_room_3" → fill with the patient_room colour.
-- REMOVE all text labels, door swings, door arcs, window symbols and fixtures. Close every wall opening — walls become solid unbroken black lines.
-- Each room is ONE single continuous flat block of its legend colour. A room must never be split by any line, symbol or text — this clean fill is what the parser segments into blocks.
-- The corridor is ONE single continuous block of its colour, even where doors used to be.
-- No gradients, no textures, no text, no furniture.
-- Walls: pure black {wall}, THIN and uniform — keep the same thin wall thickness as the drawing above (about 12 px / ~1% of image width). Never thicken walls into wide black bands.
-- Background outside the building: pure white {bg}.
+CV LINEWORK PROFILE (hard requirements)
+- This drawing will be parsed by OCR and deterministic computer vision. Use only pure white room interiors and crisp black marks.
+- Room labels must use the EXACT underscore-and-number spelling from the program, for example office_1 and patient_room_2. Draw every label once, on one horizontal line, in a large plain sans-serif font, centred well away from walls and doors. Never omit, duplicate, rotate, wrap or abbreviate a label.
+- Area values are layout guidance only. Do not print square metres, dimensions or any text below the room label.
+- Do NOT draw windows, glazing lines or openings that resemble windows. Exterior walls are continuous except at a real entrance door.
+- Every door uses the same simple symbol: one clear wall gap, one thin straight door leaf and one thin quarter-circle swing arc. Use single-leaf hinged doors only. Do not draw double doors, sliding doors, pocket doors or decorative door frames.
+- A wall gap is allowed only for a door. Apart from walls, the standard door symbol and room labels, draw no other black lines.
+"""
 
-ROOM LEGEND (exact fill colours — apply by base room type, ignore instance numbers):
+
+def build_linework_prompt(program: dict, boundary: bool = False) -> str:
+    """Parser-oriented real-plan prompt used only by structure_mode=linework."""
+    if boundary:
+        intro = (
+            f"The image above is the EXACT building outline (footprint) for a {program['building_type']}. "
+            "Draw a single clean 2D architectural line plan that fills this outline. "
+            "The outer walls follow every step and notch of the supplied outline exactly."
+        )
+    else:
+        intro = (
+            f"Draw a single clean 2D architectural line plan for a {program['building_type']}. "
+            "Follow every rule below as a hard requirement."
+        )
+    linework_plan_rules = _PLAN_RULES.replace(
+        "centred, small plain black text",
+        "centred, large plain black text",
+    )
+    return _compose_prompt(
+        intro,
+        program,
+        extra_rules=_LINEWORK_RULES,
+        plan_rules=linework_plan_rules,
+    )
+
+
+_CONVERT_PROMPT_TEMPLATE = """Repaint the floor plan above as a flat colour diagram.
+
+- Fill each room with one solid colour from the legend below, chosen by the room's text label (ignore any number, e.g. "patient_room_3" uses the patient_room colour).
+- Also fill the small area inside each door's swing arc with the colour of the room that door belongs to, so every room is one continuous block of colour with no notch or gap where a door was.
+- Keep the walls as solid black {wall} lines. Keep everything outside the building white {bg}.
+- The result has only the flat legend colours, black walls and white outside — no text, no furniture, no door arcs, no window marks, no shading.
+
+Colour legend (by room type):
 {legend}
 
-Output only the converted diagram image."""
+Output only the colour image."""
 
 
 def build_convert_prompt(program: dict) -> str:
@@ -148,6 +186,79 @@ def build_convert_prompt(program: dict) -> str:
     )
 
 
+# ── single-pass direct colour-block (experimental) ───────────────────────────
+# Skips the realistic plan entirely: the model draws the flat colour-block diagram
+# straight from the program. Removes the realistic->colour-block conversion step,
+# which is where door-arc blobs and count drift creep in.
+
+_DIRECT_COLORBLOCK_RULES = """VIEW
+- Strictly TOP-DOWN orthographic plan view, looking straight down (bird's-eye).
+- NO perspective, NO 3D, NO tilt. The building is axis-aligned: every wall runs purely horizontal or vertical, parallel to the image edges.
+
+ROOMS AS FLAT COLOUR BLOCKS
+- Draw each room as ONE solid block of flat colour — a filled rectangle (or a clean L-shape) in the single legend colour for that room's type.
+- Use ONLY the exact flat legend colours. Inside a room: no shading, gradients, textures, patterns or coloured outlines — just the one flat fill.
+- Rooms of the SAME type share the SAME colour; that is expected. Two same-type rooms that touch MUST still have a black wall between them so they read as two separate blocks, never one merged block.
+
+WALLS
+- Between every two rooms, and around the whole building, draw a SOLID BLACK band of ONE uniform thickness (about 12 px on the ~1400 px-wide image). Right angles only; every room fully enclosed.
+
+LAYOUT
+- Rooms completely TILE the footprint — no gaps, no white slivers inside the outer walls, no overlaps.
+- Organise rooms along a clear corridor/circulation spine (the corridor is itself a coloured block); size each room roughly by its given area.
+- One single connected building footprint.
+
+NOTHING ELSE — this is a clean colour-block diagram, not a realistic drawing:
+- NO text, NO room labels, NO numbers anywhere.
+- NO doors, NO door gaps, NO door swing arcs.
+- NO furniture, fixtures, windows, dimension lines, grid lines, legends, north arrows or title blocks.
+- Everything outside the building is pure white."""
+
+
+def build_direct_colorblock_prompt(program: dict, boundary: bool = False) -> str:
+    """Single-pass prompt: program -> flat colour-block diagram (no realistic plan)."""
+    legend_lines = []
+    for r in program["rooms"]:
+        count = r.get("count", 1)
+        display = r["type"].replace("_", " ")
+        area = f", each about {r['approx_area_m2']} m2" if r.get("approx_area_m2") else ""
+        legend_lines.append(f"- {count} x {display} — fill colour {rgb_hex(ROOM_RGB[r['type']])}{area}")
+    rooms_block = "\n".join(legend_lines)
+    adjacency = "\n".join(
+        f"- a {a} sits next to a {b}" for a, b in program.get("adjacency", [])
+    ) or "- (none)"
+
+    if boundary:
+        intro = (
+            f"The image above is the EXACT building outline for a {program['building_type']}. "
+            "Draw, directly inside that outline, a FLAT COLOUR-BLOCK floor plan: a simplified "
+            "schematic where each room is one solid block of colour separated by black walls. "
+            "The outer walls follow the given outline exactly. Follow every rule below as a hard requirement."
+        )
+    else:
+        intro = (
+            f"Draw a 2D architectural floor plan for a {program['building_type']} directly as a "
+            "FLAT COLOUR-BLOCK diagram: a simplified schematic where each room is one solid block "
+            "of colour separated by black walls. Follow every rule below as a hard requirement."
+        )
+
+    return f"""{intro}
+
+{_DIRECT_COLORBLOCK_RULES}
+
+ROOM PROGRAM — draw exactly these rooms, each filled with the colour shown (same type = same colour, but each instance is its own block separated by walls):
+{rooms_block}
+
+Walls are {rgb_hex(WALL_RGB)}; everything outside the building is {rgb_hex(BACKGROUND_RGB)}.
+
+CIRCULATION (which rooms sit next to each other along the corridor):
+{adjacency}
+
+Before finishing, count the colour blocks of each type and verify they match the program EXACTLY.
+
+Output only the colour-block diagram."""
+
+
 # ── generator class ───────────────────────────────────────────────────────────
 
 class FloorPlanGenerator:
@@ -158,10 +269,23 @@ class FloorPlanGenerator:
     already-corrected real_png, bypassing generate_real_plan().
     """
 
-    def __init__(self, program: dict, client, boundary: bytes | None = None):
+    def __init__(
+        self,
+        program: dict,
+        client,
+        boundary: bytes | None = None,
+        prompt_logger: Callable[[str, str], None] | None = None,
+        drawing_mode: str = "standard",
+    ):
         self.program = program
         self.client = client
         self.boundary = boundary  # given building outline (PNG bytes), or None for a free footprint
+        self.prompt_logger = prompt_logger
+        self.drawing_mode = drawing_mode
+
+    def _log_prompt(self, stage: str, prompt: str) -> None:
+        if self.prompt_logger is not None:
+            self.prompt_logger(stage, prompt)
 
     def generate_real_plan(self) -> bytes:
         """Pass 1 — program -> realflow plan (PNG bytes).
@@ -170,13 +294,36 @@ class FloorPlanGenerator:
         that exact footprint; without one the footprint is free. Everything after
         this (to_colorblock, parsing, doors, walls) is identical for both.
         """
+        if self.drawing_mode == "linework":
+            prompt = build_linework_prompt(self.program, boundary=self.boundary is not None)
+            self._log_prompt("CV linework real plan", prompt)
+            contents = [self.boundary, prompt] if self.boundary is not None else prompt
+            return self.client.generate_image(contents)
         if self.boundary is not None:
-            return self.client.generate_image([self.boundary, build_boundary_prompt(self.program)])
-        return self.client.generate_image(build_real_prompt(self.program))
+            prompt = build_boundary_prompt(self.program)
+            self._log_prompt("real plan with boundary", prompt)
+            return self.client.generate_image([self.boundary, prompt])
+        prompt = build_real_prompt(self.program)
+        self._log_prompt("real plan", prompt)
+        return self.client.generate_image(prompt)
 
     def to_colorblock(self, real_png: bytes) -> bytes:
         """Pass 2 — realistic plan image -> flat colour-block diagram (PNG bytes)."""
-        return self.client.generate_image([real_png, build_convert_prompt(self.program)])
+        prompt = build_convert_prompt(self.program)
+        self._log_prompt("colour-block conversion", prompt)
+        return self.client.generate_image([real_png, prompt])
+
+    def generate_colorblock_direct(self) -> bytes:
+        """Single pass — program text -> flat colour-block diagram (PNG bytes).
+
+        Experimental alternative to generate_real_plan + to_colorblock: the model
+        draws the colour-block directly, skipping the realistic intermediate (and the
+        conversion step that introduces door-arc blobs / count drift).
+        """
+        prompt = build_direct_colorblock_prompt(self.program, boundary=self.boundary is not None)
+        self._log_prompt("direct colour-block", prompt)
+        contents = [self.boundary, prompt] if self.boundary is not None else prompt
+        return self.client.generate_image(contents)
 
     def extract_room_adjacency(self, real_png: bytes) -> RoomGraph:
         """Read the room adjacency graph (rooms + doors) from the realistic plan image.
@@ -184,7 +331,12 @@ class FloorPlanGenerator:
         Doors live only in the realistic drawing — the colour-block conversion
         erases them — so this must run on real_png, not the reconstructed plan.
         """
-        return extract_room_adjacency(real_png, self.client, self.program)
+        return extract_room_adjacency(
+            real_png,
+            self.client,
+            self.program,
+            prompt_logger=self.prompt_logger,
+        )
 
     def run(self, out_path: str | Path) -> Path:
         """Run the full single-shot flow and write outputs to disk.

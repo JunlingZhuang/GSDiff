@@ -15,6 +15,7 @@ we asked the generator to draw). Door edges come from a JSON vision call.
 from __future__ import annotations
 
 import json
+from typing import Callable
 
 from hfagent.schema.roomgraph import Door, RoomGraph, RoomNode
 
@@ -68,11 +69,19 @@ Use ONLY these room labels (read the text printed inside each room):
 Return a JSON array, one {{"room_a", "room_b"}} object per door. No extra text."""
 
 
-def extract_room_adjacency(real_png: bytes, client, program: dict) -> RoomGraph:
+def extract_room_adjacency(
+    real_png: bytes,
+    client,
+    program: dict,
+    prompt_logger: Callable[[str, str], None] | None = None,
+) -> RoomGraph:
     nodes = room_instance_ids(program)
     valid_ids = {n.id for n in nodes} | {"exterior"}
 
-    raw = client.generate_json([real_png, _build_door_prompt(nodes)], schema=_DOOR_JSON_SCHEMA)
+    prompt = _build_door_prompt(nodes)
+    if prompt_logger is not None:
+        prompt_logger("door adjacency", prompt)
+    raw = client.generate_json([real_png, prompt], schema=_DOOR_JSON_SCHEMA)
     try:
         items = json.loads(raw)
     except (json.JSONDecodeError, TypeError):

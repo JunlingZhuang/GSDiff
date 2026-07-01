@@ -49,6 +49,21 @@ def test_perfect_first_round_skips_remaining(out_dir):
     assert client.calls == 2       # 2 image calls per round (real2color)
 
 
+def test_pipeline_prints_stage_progress(out_dir, capsys):
+    client = MockVLM([GOOD])
+    generate_plan(PROGRAM, client, out_dir, name="logged", max_rounds=1)
+
+    output = capsys.readouterr().out
+    assert "[hfagent:logged] round 1/1: begin" in output
+    assert "converting realistic plan to colour-block mask" in output
+    assert "parsing colour-block mask with CV parser" in output
+    assert "extracting room-door adjacency" in output
+    assert "PROMPT BEGIN [real plan]" in output
+    assert "PROMPT BEGIN [colour-block conversion]" in output
+    assert "PROMPT BEGIN [door adjacency]" in output
+    assert "complete in" in output
+
+
 def test_converges_when_model_improves(out_dir):
     client = MockVLM([bad_missing_exam(), GOOD])
     r, _, _ = generate_plan(PROGRAM, client, out_dir, name="conv", max_rounds=3)
@@ -111,3 +126,66 @@ def test_room_adjacency_extracted_from_image(out_dir):
 
 def g_adjacency(graph_dict) -> list[tuple[str, str]]:
     return [tuple(sorted((d["room_a"], d["room_b"]))) for d in graph_dict["doors"]]
+
+
+# ── direct_colorblock structure mode ─────────────────────────────────────────
+# One image call per round (program -> colour-block directly, no realistic plan).
+# Doors come from the program's adjacency, not an image read.
+
+DIRECT_PROGRAM = {
+    "building_type": "mock clinic",
+    "rooms": [
+        {"type": "waiting", "count": 1},
+        {"type": "exam_room", "count": 2},
+        {"type": "corridor", "count": 1},
+        {"type": "toilet", "count": 1},
+    ],
+    "adjacency": [
+        ["waiting", "corridor"],
+        ["exam_room", "corridor"],
+        ["toilet", "corridor"],
+    ],
+}
+
+
+def test_direct_colorblock_single_pass(out_dir):
+    """direct_colorblock: one image call per round; doors from program adjacency."""
+    client = MockVLM([GOOD], image_calls_per_round=1)
+    r, plan, g = generate_plan(
+        DIRECT_PROGRAM, client, out_dir, name="direct",
+        max_rounds=3, structure_mode="direct_colorblock",
+    )
+
+    # one image call per round, perfect first round -> converge immediately
+    assert r["structure_mode"] == "direct_colorblock"
+    assert r["converged_in"] == 1
+    assert len(r["rounds"]) == 1
+    assert client.calls == 1                 # exactly one image call (vs 2 in real2color)
+
+    # no realistic plan is produced in this mode
+    assert not (out_dir / "direct" / "gemini_r1.real.png").exists()
+    assert (out_dir / "direct" / "gemini_r1.png").exists()
+
+    # a valid Plan with rooms + walls + doors
+    assert plan["rooms"] and plan["walls"] and plan["doors"]
+    assert (out_dir / "direct" / "recon_with_door.png").exists()
+
+    # room graph is built from the program: one node per distinct type
+    assert {n["type"] for n in g["rooms"]} == {"waiting", "exam_room", "corridor", "toilet"}
+    assert {tuple(sorted(p)) for p in DIRECT_PROGRAM["adjacency"]} == set(g_adjacency(g))
+
+    # every placed door hangs on a real wall
+    wall_ids = {w["id"] for w in plan["walls"]}
+    assert all(d["wall_id"] in wall_ids for d in plan["doors"])
+
+
+def test_direct_colorblock_correction_feeds_back_colourblock(out_dir):
+    """When round 1 has violations, round 2 re-generates with colour-block feedback."""
+    client = MockVLM([bad_missing_exam(), GOOD], image_calls_per_round=1)
+    r, _, _ = generate_plan(
+        DIRECT_PROGRAM, client, out_dir, name="direct_fix",
+        max_rounds=3, structure_mode="direct_colorblock",
+    )
+    assert r["converged_in"] == 2
+    assert client.calls == 2                  # one image call per round, two rounds
+    assert any("colour-block" in f and "exam_room" in f for f in client.feedbacks)

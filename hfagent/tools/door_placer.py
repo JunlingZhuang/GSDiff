@@ -104,12 +104,20 @@ def _hang_on_wall(seg, walls):
 
 def place_doors(plan: Plan, room_graph: RoomGraph) -> tuple[Plan, list[tuple[str, str, str]]]:
     type_of = _type_lookup(room_graph)
+    plan_room_ids = {room.id for room in plan.rooms}
+    exact_connected: set[frozenset] = set()
     connected: set[frozenset] = set()   # {typeA, typeB} interior pairs
+    exterior_room_ids: set[str] = set()
     exterior_types: set[str] = set()
     for e in room_graph.doors:
         if e.room_a == "exterior" or e.room_b == "exterior":
             other = e.room_b if e.room_a == "exterior" else e.room_a
-            exterior_types.add(type_of(other))
+            if other in plan_room_ids:
+                exterior_room_ids.add(other)
+            else:
+                exterior_types.add(type_of(other))
+        elif e.room_a in plan_room_ids and e.room_b in plan_room_ids:
+            exact_connected.add(frozenset((e.room_a, e.room_b)))
         else:
             connected.add(frozenset((type_of(e.room_a), type_of(e.room_b))))
 
@@ -139,17 +147,19 @@ def place_doors(plan: Plan, room_graph: RoomGraph) -> tuple[Plan, list[tuple[str
     for i in range(len(polys)):
         for j in range(i + 1, len(polys)):
             (ri, pi), (rj, pj) = polys[i], polys[j]
-            if frozenset((ri.type, rj.type)) not in connected:
+            exact_match = frozenset((ri.id, rj.id)) in exact_connected
+            type_match = frozenset((ri.type, rj.type)) in connected
+            if not exact_match and not type_match:
                 continue
             seg = _shared_segment(pi, pj, adj_tol)
             if seg and seg[2] >= min_share:
                 hang(seg, ri.id, rj.id)
 
     # exterior doors: centred on the longest outside wall of each exterior-typed room
-    if exterior_types:
+    if exterior_types or exterior_room_ids:
         eps = max(min_share * 0.1, 1e-6)
         for idx, (room, poly) in enumerate(polys):
-            if room.type not in exterior_types:
+            if room.id not in exterior_room_ids and room.type not in exterior_types:
                 continue
             best = None
             pts = list(poly.exterior.coords)
