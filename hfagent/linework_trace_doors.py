@@ -589,6 +589,45 @@ def _absorb_jamb_posts(segs: list[WallSegment], wall_width: int) -> tuple[list[W
     return keep, dropped
 
 
+def _merge_parallel_faces(segs: list[WallSegment], wall_width: int) -> tuple[list[WallSegment], int]:
+    """Merge a wall's re-traced FACE line into the wall proper.
+
+    The trace sometimes emits ONE physical wall as two nearly-parallel segments —
+    the centre line plus a face line offset by up to ~1 wall thickness (e.g. axes
+    6–12px apart at ww=11). ``_cluster_axes`` (tol 0.5*ww) cannot merge them and
+    the covered-span whisker rule misses the part dangling past the host's end.
+    Any two same-orientation segments within ``1.3*ww`` in axis whose spans
+    overlap by at least ``0.5*ww`` are two tracings of one wall — real parallel
+    partitions are at least a room apart, never 1 wall thickness. Keep the longer
+    segment's axis and take the union span (the dangling extension was traced
+    from real ink on the same wall). Iterates longest-first so triples collapse.
+    """
+    off_max = wall_width * 1.3
+    min_overlap = wall_width * 0.5
+    ordered = sorted(segs, key=lambda s: s.end - s.start, reverse=True)
+    out: list[WallSegment] = []
+    merged = 0
+    for s in ordered:
+        host = None
+        for o in out:
+            if o.orientation != s.orientation:
+                continue
+            d = abs(o.axis - s.axis)
+            if d < 1e-6 or d > off_max:
+                continue
+            if min(s.end, o.end) - max(s.start, o.start) >= min_overlap:
+                host = o
+                break
+        if host is not None:
+            host.start = min(host.start, s.start)
+            host.end = max(host.end, s.end)
+            host.thickness = max(host.thickness, s.thickness)
+            merged += 1
+        else:
+            out.append(WallSegment(s.orientation, s.axis, s.start, s.end, s.thickness))
+    return out, merged
+
+
 def postprocess_walls(segments: list[WallSegment], wall_width: int,
                       dark: np.ndarray | None = None) -> tuple[list[WallSegment], dict]:
     """Clean the bridged wall graph so polygonize sees closed rooms and no whiskers.
@@ -618,6 +657,7 @@ def postprocess_walls(segments: list[WallSegment], wall_width: int,
     overhang = wall_width * 2.0
     segs = [WallSegment(s.orientation, s.axis, s.start, s.end, s.thickness) for s in segments]
     segs, posts_absorbed = _absorb_jamb_posts(segs, wall_width)
+    segs, faces_merged = _merge_parallel_faces(segs, wall_width)
     segs = _snap_junctions(segs, tolerance=tol)
 
     corner_snapped = 0
@@ -712,7 +752,8 @@ def postprocess_walls(segments: list[WallSegment], wall_width: int,
                 face_lines += 1
                 continue
         keep.append(s)
-    stats = dict(snapped_tol=tol, posts_absorbed=posts_absorbed, corners_snapped=corner_snapped,
+    stats = dict(snapped_tol=tol, posts_absorbed=posts_absorbed, faces_merged=faces_merged,
+                 corners_snapped=corner_snapped,
                  endpoints_trimmed=trimmed, whiskers_dropped=dropped, face_lines_dropped=face_lines,
                  segments_in=len(segments), segments_out=len(keep))
     return keep, stats
