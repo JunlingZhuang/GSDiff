@@ -24,7 +24,9 @@
       "description": "text -> realistic LINE drawing -> tools/linework_tracer: faithful wall trace, doors confirmed only by their swing arcs, rooms polygonized UNTYPED (geometry-only, no OCR). Single round; fixed artifacts walls_overlay/doors_overlay/recon/recon_post/rooms_colorful.",
       "text_model": "",
       "image_model": "",
-      "boundary": ""
+      "boundary": "",
+      "doors_in_plan": false,
+      "_doors_in_plan_doc": "false = the generated plan has NO doors: every room drawn fully sealed (no gaps/leaves/arcs), so room closure is pure wall tracing and the whole door-detection problem disappears. The final Plan then has rooms+walls but zero doors. true = doors drawn as gap+swing-arc and detected from their arcs."
     },
     "direct_colorblock": {
       "description": "One-pass: text -> flat colour-block directly (no realistic plan) -> cv_parse; doors from program adjacency. Cleaner geometry, ~half the cost; best <= ~33 rooms.",

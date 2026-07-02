@@ -29,5 +29,6 @@ def run_pipeline(text: str, client, out_dir: str | Path) -> dict:
         max_rounds=cfg["max_correction_rounds"],
         boundary=boundary,
         structure_mode=cfg["structure_mode"],
+        doors_in_plan=cfg["doors_in_plan"],
     )
     return {"program": program, "report": report, "plan": plan, "room_graph": room_graph}

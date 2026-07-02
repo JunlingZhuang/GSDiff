@@ -68,6 +68,7 @@ def load_config(path: Path = DEFAULT_CONFIG) -> dict:
         "text_model": active.get("text_model", ""),
         "image_model": active.get("image_model", ""),
         "boundary": active.get("boundary", ""),
+        "doors_in_plan": bool(active.get("doors_in_plan", True)),
         "modes": modes,
     }
 
@@ -119,6 +120,7 @@ def generate_plan(
     max_rounds: int = 3,
     boundary: bytes | None = None,
     structure_mode: str = "colorblock",
+    doors_in_plan: bool = True,
 ) -> tuple[dict, dict, dict]:
     """Generate, parse, and repair a floor plan from a structured program.
 
@@ -154,6 +156,7 @@ def generate_plan(
         boundary=boundary,
         prompt_logger=lambda stage, prompt: _log_prompt(name, stage, prompt),
         drawing_mode="linework" if structure_mode == "linework" else "standard",
+        doors_in_plan=doors_in_plan,
     )
     rounds: list[dict] = []
     best_round: _BestRound | None = None

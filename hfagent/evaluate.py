@@ -79,6 +79,7 @@ def main() -> None:
     # the chosen mode (config default or --structure-mode) supplies its own models + boundary
     mode_cfg = cfg["modes"][structure_mode]
     mode_boundary = mode_cfg.get("boundary", "")
+    doors_in_plan = bool(mode_cfg.get("doors_in_plan", True))
     programs = load_programs(Path(args.programs))
 
     if args.only:
@@ -99,6 +100,7 @@ def main() -> None:
     print(f"image size:       {client.image_size} @ {client.image_aspect}")
     print(f"structure mode:   {structure_mode} (max {cfg['max_correction_rounds']} correction rounds)")
     print(f"mode boundary:    {mode_boundary or '(none)'}")
+    print(f"doors in plan:    {doors_in_plan}")
 
     # timestamped run dir so repeated evaluations never clobber each other
     out_dir = Path(args.out) if args.out else (
@@ -125,6 +127,7 @@ def main() -> None:
                     max_rounds=cfg["max_correction_rounds"],
                     boundary=boundary,
                     structure_mode=structure_mode,
+                    doors_in_plan=doors_in_plan,
                 )
             except Exception as e:
                 report = {"program": run_name, "error": str(e)}
