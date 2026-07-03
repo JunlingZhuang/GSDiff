@@ -41,18 +41,6 @@ def _program_blocks(program: dict) -> tuple[str, str]:
     return "\n".join(lines), (adjacency or "- (none)")
 
 
-# Doors section of the shared rules — swapped for _NO_DOORS_RULES when a mode is
-# configured with doors_in_plan=false (sealed rooms; no door symbols to mis-parse).
-_DOORS_RULES = """DOORS (required — they are read back from this drawing)
-- Draw a door at every connection as a SIMPLE gap in the wall with ONE plain quarter-circle swing arc — nothing more. No door frame, no panelled leaf, no threshold, no hinge marks, no door tag or number.
-- Every enclosed room must have at least one door to a corridor / circulation space so it is reachable.
-- Put doors only where two spaces should connect (see CIRCULATION)."""
-
-_NO_DOORS_RULES = """DOORS — NONE. This plan has NO doors at all:
-- Every room is COMPLETELY sealed by unbroken walls: no gaps, no openings, no door leaves, no quarter-circle swing arcs anywhere in the drawing.
-- Walls run continuous straight through where a door would normally be — do not leave any passage between rooms or to the corridor.
-- The CIRCULATION list below is adjacency guidance for the layout only, NOT openings."""
-
 # Shared drawing rules — identical whether the footprint is free (build_real_prompt)
 # or given (build_boundary_prompt), so both produce the same kind of realflow plan.
 _PLAN_RULES = """VIEW
@@ -72,7 +60,10 @@ LAYOUT
 - Organise rooms along a clear corridor/circulation spine; size rooms roughly by the areas given (the corridor is a long thin band).
 - One single connected building footprint, not scattered blocks.
 
-{doors_rules}
+DOORS (required — they are read back from this drawing)
+- Draw a door at every connection as a SIMPLE gap in the wall with ONE plain quarter-circle swing arc — nothing more. No door frame, no panelled leaf, no threshold, no hinge marks, no door tag or number.
+- Every enclosed room must have at least one door to a corridor / circulation space so it is reachable.
+- Put doors only where two spaces should connect (see CIRCULATION).
 
 LABELS
 - One label per room, centred, small plain black text, the EXACT instance name from the program below.
@@ -93,13 +84,8 @@ def _compose_prompt(
     program: dict,
     extra_rules: str = "",
     plan_rules: str = _PLAN_RULES,
-    doors: bool = True,
 ) -> str:
     rooms, adjacency = _program_blocks(program)
-    plan_rules = plan_rules.replace("{doors_rules}", _DOORS_RULES if doors else _NO_DOORS_RULES)
-    if not doors:
-        # adjacency stays layout guidance, but "opens onto" implies an opening
-        adjacency = adjacency.replace("opens onto", "sits next to")
     return f"""{intro}
 
 {plan_rules}
@@ -151,25 +137,9 @@ CV LINEWORK PROFILE (hard requirements)
 - A wall gap is allowed only for a door. Apart from walls, the standard door symbol and room labels, draw no other black lines.
 """
 
-_LINEWORK_RULES_NO_DOORS = """
 
-CV LINEWORK PROFILE (hard requirements)
-- This drawing will be parsed by deterministic computer vision. Use only pure white room interiors and crisp black marks.
-- Room labels must use the EXACT underscore-and-number spelling from the program, for example office_1 and patient_room_2. Draw every label once, on one horizontal line, in a large plain sans-serif font, centred well away from walls. Never omit, duplicate, rotate, wrap or abbreviate a label.
-- Area values are layout guidance only. Do not print square metres, dimensions or any text below the room label.
-- Do NOT draw windows, glazing lines or openings that resemble windows. ALL walls — exterior and interior — are fully continuous unbroken bands.
-- Do NOT draw any door: no wall gaps, no door leaves, no swing arcs. There is no opening anywhere in any wall.
-- Apart from walls and room labels, draw no other black lines.
-"""
-
-
-def build_linework_prompt(program: dict, boundary: bool = False, doors: bool = True) -> str:
-    """Parser-oriented real-plan prompt used only by structure_mode=linework.
-
-    ``doors=False`` (config: modes.linework.doors_in_plan) draws every room fully
-    sealed — no door symbols at all. Door detection/bridging then has nothing to do
-    and room closure is pure wall tracing.
-    """
+def build_linework_prompt(program: dict, boundary: bool = False) -> str:
+    """Parser-oriented real-plan prompt used only by structure_mode=linework."""
     if boundary:
         intro = (
             f"The image above is the EXACT building outline (footprint) for a {program['building_type']}. "
@@ -188,9 +158,8 @@ def build_linework_prompt(program: dict, boundary: bool = False, doors: bool = T
     return _compose_prompt(
         intro,
         program,
-        extra_rules=_LINEWORK_RULES if doors else _LINEWORK_RULES_NO_DOORS,
+        extra_rules=_LINEWORK_RULES,
         plan_rules=linework_plan_rules,
-        doors=doors,
     )
 
 
@@ -307,14 +276,12 @@ class FloorPlanGenerator:
         boundary: bytes | None = None,
         prompt_logger: Callable[[str, str], None] | None = None,
         drawing_mode: str = "standard",
-        doors_in_plan: bool = True,
     ):
         self.program = program
         self.client = client
         self.boundary = boundary  # given building outline (PNG bytes), or None for a free footprint
         self.prompt_logger = prompt_logger
         self.drawing_mode = drawing_mode
-        self.doors_in_plan = doors_in_plan  # False: sealed rooms, no door symbols (linework)
 
     def _log_prompt(self, stage: str, prompt: str) -> None:
         if self.prompt_logger is not None:
@@ -328,9 +295,7 @@ class FloorPlanGenerator:
         this (to_colorblock, parsing, doors, walls) is identical for both.
         """
         if self.drawing_mode == "linework":
-            prompt = build_linework_prompt(
-                self.program, boundary=self.boundary is not None, doors=self.doors_in_plan
-            )
+            prompt = build_linework_prompt(self.program, boundary=self.boundary is not None)
             self._log_prompt("CV linework real plan", prompt)
             contents = [self.boundary, prompt] if self.boundary is not None else prompt
             return self.client.generate_image(contents)

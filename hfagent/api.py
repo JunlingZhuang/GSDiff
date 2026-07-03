@@ -75,7 +75,6 @@ def generate(req: GenerateRequest, client: GeminiClient = Depends(get_client)) -
             max_rounds=_cfg["max_correction_rounds"],
             boundary=_config_boundary(),
             structure_mode=_cfg["structure_mode"],
-            doors_in_plan=_cfg["doors_in_plan"],
         )
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
@@ -105,7 +104,6 @@ def generate_from_boundary(
             max_rounds=_cfg["max_correction_rounds"],
             boundary=boundary.file.read(),
             structure_mode=_cfg["structure_mode"],
-            doors_in_plan=_cfg["doors_in_plan"],
         )
     except ValueError as e:  # bad JSON, no usable rooms, etc.
         raise HTTPException(status_code=422, detail=str(e))
