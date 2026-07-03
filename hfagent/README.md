@@ -46,6 +46,16 @@ Vertex via `GOOGLE_GENAI_USE_VERTEXAI=true` + `GOOGLE_CLOUD_PROJECT`. Model ids
 auto-resolve to the newest available (override: `HFAGENT_TEXT_MODEL`,
 `HFAGENT_IMAGE_MODEL`).
 
+## Real floor-plan dataset (offline trace benchmark)
+
+`data/real-floorplan-dataset/<program>/*.png` — every Gemini-generated realistic
+plan drawing harvested from past `out/eval/` runs (door-drawn only; the sealed
+no-door sweep images are excluded), deduped by content hash, one folder per
+program, filenames prefixed with the source run id; `index.json` maps each file
+back to its original path. Local-only (gitignored, ~100 MB): it is the fixed
+benchmark corpus for iterating the linework tracer (wall trace + door trace)
+without any further Gemini calls.
+
 ## Testing
 
 Run all commands from the **repo root** (`D:\Github\GSDiff`).
