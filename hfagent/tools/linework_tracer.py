@@ -95,6 +95,10 @@ PARAMS = dict(
     # short-stub trace: keep wall runs down to this length (in wall_width)
     stub_min_len_factor=1.0,      # min length of a kept short stub, * wall_width
     stub_min_density=0.45,        # min fill density of the component bbox (== _raw_segments)
+    # text-bar drop: a run whose PRE-solidify ink breaks repeatedly is a label word,
+    # not a wall (a drawn wall is one continuous stroke; letters break at every gap)
+    text_bar_min_breaks=3,        # min empty runs across the span to read as text
+    text_bar_max_coverage=0.90,   # ... and raw ink must cover no more than this
     # gap -> door search  (door-scale: a swing arc fits a single-leaf opening)
     door_gap_lo_factor=1.6,       # opening must be wider than this * wall_width
     door_gap_hi_factor=10.0,      # ... and narrower than this * wall_width (else passage)
@@ -277,6 +281,75 @@ def _drop_leaf_bars(segments: list[WallSegment], wall_width: int) -> list[WallSe
             if (s.end - s.start) > max_len or has_collinear_sibling(s) or both_ends_on_walls(s)]
 
 
+def _drop_text_bars(segments: list[WallSegment], raw_ink: np.ndarray,
+                    siblings: list[WallSegment] | None = None) -> list[WallSegment]:
+    """Drop runs that are LABEL TEXT welded into bars.
+
+    A drawn wall is one continuous stroke; a label word is letters separated by
+    white, which ``_solidify``'s closing welds into a bar long enough to trace as
+    wall. Worst on thin-wall drawings, where the text stroke matches the wall
+    thickness (defeating the cross floor) and a label squeezed into a small room
+    touches the wall network (defeating anchoring). On the PRE-solidify ink a wall
+    covers its span continuously while a text bar breaks at every inter-letter gap:
+    repeated breaks + low raw coverage is text. A text-like fragment that HUGS a
+    solid run on the same axis is NOT dropped: a label whose glyphs overlap a wall
+    contaminates the wall's edge re-trace into a broken signature, but that
+    fragment is still wall (it carries real jamb geometry — dropping it loses real
+    doors); a label floating on its own axis has no solid sibling and dies. (A
+    per-column ink-thickness uniformity test for words WELDED into one solid blob
+    was tried on top and regresses: on raw pre-cluster runs the metric is too
+    noisy — door leaves and junction ink fluctuate a real wall's columns just like
+    letters do.) Image-scale runs are exempt — a hollow double-line exterior band
+    with window slots legitimately breaks many times, and no label is a quarter of
+    the image long.
+    """
+    height, width = raw_ink.shape
+
+    def band_stats(s: WallSegment) -> tuple[float, int]:
+        half = max(1, round(s.thickness / 2))
+        axis = int(round(s.axis))
+        lo, hi = int(round(s.start)), int(round(s.end)) + 1
+        if s.orientation == "horizontal":
+            band = raw_ink[max(0, axis - half):axis + half + 1, max(0, lo):min(width, hi)]
+            presence = band.any(axis=0) if band.size else np.zeros(0, bool)
+        else:
+            band = raw_ink[max(0, lo):min(height, hi), max(0, axis - half):axis + half + 1]
+            presence = band.any(axis=1) if band.size else np.zeros(0, bool)
+        if presence.size == 0:
+            return 0.0, 0
+        breaks = int(np.count_nonzero(np.diff(presence.astype(np.int8)) == -1)
+                     + (not presence[0]))
+        return float(presence.mean()), breaks
+
+    pool = list(segments) + [s for s in (siblings or []) if s not in segments]
+    stats = {id(s): band_stats(s) for s in pool}
+
+    def has_solid_sibling(s: WallSegment) -> bool:
+        tol = max(2.0, s.thickness)
+        for o in pool:
+            if o is s or o.orientation != s.orientation or abs(o.axis - s.axis) > tol:
+                continue
+            if min(o.end, s.end) - max(o.start, s.start) <= 0:
+                continue
+            if stats[id(o)][0] >= 0.95:
+                return True
+        return False
+
+    kept = []
+    for s in segments:
+        span = width if s.orientation == "horizontal" else height
+        if (s.end - s.start) >= 0.25 * span:
+            kept.append(s)
+            continue
+        coverage, breaks = stats[id(s)]
+        if (coverage > 0.0 and breaks >= PARAMS["text_bar_min_breaks"]
+                and coverage <= PARAMS["text_bar_max_coverage"]
+                and not has_solid_sibling(s)):
+            continue
+        kept.append(s)
+    return kept
+
+
 def trace_walls(gray: np.ndarray):
     """Faithful directional-morphology wall trace with a short-stub recovery pass.
 
@@ -290,8 +363,8 @@ def trace_walls(gray: np.ndarray):
     Returns ``(walls, wall_width, dark, wall_pixels, raw_count, stub_count, anchor)``
     — ``anchor`` is the ink component labels/reach pair the anchoring gates share.
     """
-    _, dark = cv2.threshold(gray, 0, 1, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    dark = _solidify(dark)
+    _, raw_ink = cv2.threshold(gray, 0, 1, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    dark = _solidify(raw_ink)
     # the directional opening kernels must exceed the THICKEST band (else perpendicular
     # bands leak into both masks), so they follow the measured heaviest stroke.
     stroke = _estimate_stroke_thickness(dark)
@@ -303,6 +376,7 @@ def trace_walls(gray: np.ndarray):
                          PARAMS["max_symbol_density"])
     raw = _raw_segments(hm, "horizontal", min_cross) + _raw_segments(vm, "vertical", min_cross)
     raw = [s for s in raw if _is_anchored(s, anchor)]
+    raw = _drop_text_bars(raw, raw_ink)
     ww = _median_wall_width(raw, gray.shape)
     raw = _drop_leaf_bars(raw, ww)
 
@@ -310,7 +384,9 @@ def trace_walls(gray: np.ndarray):
         "horizontal": [(s.axis, max(1.0, s.thickness)) for s in raw if s.orientation == "horizontal"],
         "vertical": [(s.axis, max(1.0, s.thickness)) for s in raw if s.orientation == "vertical"],
     }
-    stubs = _short_stub_segments(dark, hm, vm, wall_axes, ww, min_cross, anchor)
+    stubs = _drop_text_bars(
+        _short_stub_segments(dark, hm, vm, wall_axes, ww, min_cross, anchor),
+        raw_ink, siblings=raw)
 
     clustered = _cluster_axes(raw + stubs, tolerance=max(1.0, ww * 0.5))
     walls = _merge_overlaps(clustered, tolerance=max(1.0, ww * 0.5))
