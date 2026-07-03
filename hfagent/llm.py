@@ -229,13 +229,17 @@ class GeminiClient:
         )
         return resp.text or ""
 
-    def generate_image(self, contents, model: str | None = None, attempts: int = 3) -> bytes:
+    def generate_image(self, contents, model: str | None = None, attempts: int = 3,
+                       thinking_level: str | None = None) -> bytes:
         """Returns PNG/JPEG bytes of the first image part in the response.
 
         `contents` may be a prompt string or a list mixing str and raw image
         bytes — the multi-turn editing path of the correction loop sends
         [previous_image_bytes, feedback_text]. Handles models that return the
         image as base64 text (see decode_image_bytes).
+
+        `thinking_level` (docs: gemini-3.1-flash-image supports "minimal" (default)
+        and "high") raises the model's reasoning budget for complex compositions.
 
         Image models intermittently return only a text part (no image), especially
         on multi-turn edits; the same request usually succeeds on retry, so we retry
@@ -247,10 +251,13 @@ class GeminiClient:
         # the output aspect must follow that image — forcing a conflicting aspect makes
         # the model ignore or reshuffle the reference. Pure text-to-image uses the default.
         aspect = _first_image_aspect(contents) or self.image_aspect
-        cfg = types.GenerateContentConfig(
+        cfg_kwargs = dict(
             response_modalities=["TEXT", "IMAGE"],
             image_config=types.ImageConfig(aspect_ratio=aspect, image_size=self.image_size),
         )
+        if thinking_level:
+            cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=thinking_level)
+        cfg = types.GenerateContentConfig(**cfg_kwargs)
         parts = self._to_parts(contents)
         target = model or self.image_model
         last_text = ""
