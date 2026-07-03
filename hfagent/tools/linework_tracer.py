@@ -14,19 +14,28 @@ plan rooms flanking each detected door. No OCR, no room typing, no model calls:
    image models draw thickness inconsistently — fat perimeter bands over thin
    partitions in the same drawing. Each run keeps its own measured thickness.
 2. DOORS  — a wall gap becomes a door ONLY if a real quarter-circle swing arc (radius
-   ~= the opening width for a single leaf, ~= half of it for a double door, centred on
-   one jamb) straddles it. Candidate gaps come from three sources: collinear gaps +
-   terminal gaps (wall end -> crossing perpendicular wall), both split at crossing
-   perpendicular walls (real piers) into door-scale sub-gaps, and SLOT gaps (white
-   slots cut into a band whose wall line never breaks — the door-as-window-symbol
-   style). A sub-gap with no traced jamb at either end is rejected outright (kills
-   phantom doors on axis-rounding coincidences). Each gap is ink-trimmed and ink-split
-   first so hidden jamb/corner stubs and untraced ornament piers become traced wall
-   and the arc test sees the true opening(s). The arc test demands angular
-   quarter-turn coverage, radial inlier concentration and continuity, and arc ink is
-   exclusive to one door, so stray ink, label text and neighbouring arcs fail.
-3. BRIDGE — walls are made continuous ONLY across confirmed doors; every other gap
-   stays open (real passage / corridor connection).
+   ~= the opening width for a single leaf, ~= half of it for a double door, ~a third
+   for a small leaf in an oversized mouth, centred on one jamb) straddles it.
+   Candidate gaps come from four sources: collinear gaps + terminal gaps (wall end ->
+   crossing perpendicular wall), both split at crossing perpendicular walls (real
+   piers) into door-scale sub-gaps, SLOT gaps (white slots cut into a band whose wall
+   line never breaks — the door-as-window-symbol style), and JOGGED gaps (the two
+   jambs sit on slightly offset axes because the wall thickness changes across the
+   opening; their thickness bands still overlap). A sub-gap with no traced jamb at
+   either end is rejected outright (kills phantom doors on axis-rounding
+   coincidences), and a wide gap flanked only by tiny wall fragments is a face-line
+   artifact, never a door. Past the single-leaf width cap only the regimes a drawn
+   door can physically produce confirm (undersized leaf slightly past it, true
+   half-gap double door further out). Each gap is ink-trimmed
+   and ink-split first so hidden jamb/corner stubs and untraced ornament piers become
+   traced wall and the arc test sees the true opening(s). The arc test demands
+   angular quarter-turn coverage, radial inlier concentration and continuity, and arc
+   ink is exclusive to one door, so stray ink, label text and neighbouring arcs fail.
+3. BRIDGE — walls are made continuous ONLY across confirmed doors (a jogged door also
+   gets its tiny perpendicular connectors) and across WINDOW breaks — band breaks
+   whose cross band keeps continuous wall-anchored ink (hollow window faces/sills):
+   drawn glazing is wall for room topology. Every other gap stays open (real passage
+   / corridor connection); nothing is bridged without ink or arc evidence.
 4. POST   — ``postprocess_walls``: absorb parallel door-frame posts, merge re-traced
    wall faces, junction snap, ink-gated L-corner snap (never seals a real opening),
    overhang trim, whisker drop. Then shapely polygonizes the closed rooms.
@@ -89,9 +98,24 @@ PARAMS = dict(
     # gap -> door search  (door-scale: a swing arc fits a single-leaf opening)
     door_gap_lo_factor=1.6,       # opening must be wider than this * wall_width
     door_gap_hi_factor=10.0,      # ... and narrower than this * wall_width (else passage)
+    # past the single-leaf cap a door can still confirm, but only on regimes a
+    # drawn door can physically produce out there: an undersized leaf slightly
+    # past the cap, or a true double door (two mirrored half-gap leaves) further
+    undersized_gap_hi_factor=11.0,
+    double_gap_hi_factor=14.0,
     # swing radius as a fraction of the opening: ~1.0 = single leaf fills the opening,
-    # ~0.5 = double door (two mirrored leaves), 0.7-0.8 = undersized leaf in a wide mouth
-    radius_scales=(0.45, 0.5, 0.55, 0.7, 0.8, 0.9, 1.0, 1.1),
+    # ~0.5 = double door (two mirrored leaves), 0.7-0.8 = undersized leaf in a wide
+    # mouth; 0.3-0.35 = a small drawn door in an OVERSIZED mouth - allowed only just
+    # past the single-leaf cap, where no in-cap door competes for the same arc ink
+    # (at door scale a small-radius regime hijacks neighbouring doors' arcs)
+    radius_scales=(0.3, 0.35, 0.45, 0.5, 0.55, 0.7, 0.8, 0.9, 1.0, 1.1),
+    # jogged collinear gaps: both walls end short of each other with a small axis
+    # jog (their thickness bands still overlap - one drawn wall line)
+    jog_axis_frac=1.2,            # max axis offset, * wall_width
+    # window-band break fill: a gap whose cross band keeps CONTINUOUS ink presence
+    # (hollow window faces/sills) is drawn wall, not an opening
+    window_presence=0.85,         # min fraction of gap columns with any band ink
+    window_fill_hi_factor=20.0,   # max filled break, * wall_width
     band_factor=0.16,             # annulus half-width = max(0.4*ww, band_factor * r)
     ang_tol_deg=14.0,             # angular slack outside the [0,90] quarter
     ang_bins=18,                  # bins across the 90 deg quarter (5 deg each)
@@ -130,6 +154,10 @@ class TracedDoor:
     coverage: float
     pixels: int
     inlier_ratio: float = 0.0
+    # true wall axes at the gap ends when they JOG off the door axis (see
+    # ``add_jogged_gaps``); the bridge adds perpendicular connectors for them
+    start_axis: float | None = None
+    end_axis: float | None = None
 
     @property
     def center(self) -> tuple[float, float]:
@@ -350,6 +378,51 @@ def add_terminal_gaps(segments: list[WallSegment], wall_width: int):
             out.append(dict(orientation=orientation, axis=float(axis),
                             start=float(g0), end=float(g1), width=float(g1 - g0),
                             real_start=(sign > 0), real_end=(sign < 0)))
+    return out
+
+
+def add_jogged_gaps(segments: list[WallSegment], wall_width: int):
+    """Gaps between two collinear-INTENT walls whose axes jog slightly apart.
+
+    A door drawn where the wall thickness changes (a fat exterior band meeting a
+    thinner return, a wall fused with a window strip) leaves the two jambs on
+    axes ~0.5-1 wall thickness apart: ``_cluster_axes`` keeps them in separate
+    axis groups, so ``find_gaps`` never pairs them and the opening has NO
+    candidate at all. Two same-orientation walls facing each other end-to-start
+    across a door-scale span are one interrupted wall line when their thickness
+    BANDS still overlap (genuinely parallel walls have clear space between
+    bands); the gap is emitted on the longer wall's axis with both jambs real,
+    and ``start_axis``/``end_axis`` carry each side's true axis so a confirmed
+    door's bridge can add the tiny perpendicular connectors at the jog.
+    """
+    off_max = wall_width * PARAMS["jog_axis_frac"]
+    lo = wall_width * 0.75
+    hi = wall_width * PARAMS["double_gap_hi_factor"]
+    out = []
+    for a in segments:
+        for b in segments:
+            if a is b or a.orientation != b.orientation or a.end >= b.start:
+                continue
+            gap = b.start - a.end
+            if not (lo <= gap <= hi):
+                continue
+            off = abs(a.axis - b.axis)
+            if off < 1e-6 or off > off_max:
+                continue
+            if off >= (a.thickness + b.thickness) / 2.0:   # bands must overlap
+                continue
+            # a third wall already spanning the gap near either axis means this
+            # is not an interrupted line (e.g. a parallel face re-trace)
+            if any(o is not a and o is not b and o.orientation == a.orientation
+                   and (abs(o.axis - a.axis) <= off_max or abs(o.axis - b.axis) <= off_max)
+                   and o.start < b.start and o.end > a.end
+                   for o in segments):
+                continue
+            axis = a.axis if (a.end - a.start) >= (b.end - b.start) else b.axis
+            out.append(dict(orientation=a.orientation, axis=float(axis),
+                            start=float(a.end), end=float(b.start), width=float(gap),
+                            real_start=True, real_end=True,
+                            start_axis=float(a.axis), end_axis=float(b.axis)))
     return out
 
 
@@ -585,8 +658,12 @@ def detect_door_at_gap(resid_pts, gap, wall_width):
     arc.
     """
     w = gap["width"]
-    if not (wall_width * PARAMS["door_gap_lo_factor"] <= w <= wall_width * PARAMS["door_gap_hi_factor"]):
+    if not (wall_width * PARAMS["door_gap_lo_factor"] <= w <= wall_width * PARAMS["double_gap_hi_factor"]):
         return None
+    # past the single-leaf cap only the regimes a drawn door can physically
+    # produce confirm: an undersized leaf slightly past it, a true double door
+    # (two mirrored half-gap leaves) further out
+    wide = w > wall_width * PARAMS["door_gap_hi_factor"]
     min_pixels = max(6, round(wall_width * PARAMS["min_pixels_factor"]))
     band_floor = 0.4 * wall_width
     orientation, axis = gap["orientation"], gap["axis"]
@@ -621,6 +698,13 @@ def detect_door_at_gap(resid_pts, gap, wall_width):
         for perp_unit in perp_dirs:
             p_all = rel @ perp_unit
             for scale in radius_scales:
+                if wide:
+                    if not (0.45 <= scale <= 0.55    # true double door
+                            or (scale < 0.45
+                                and w <= wall_width * PARAMS["undersized_gap_hi_factor"])):
+                        continue
+                elif scale < 0.45:
+                    continue    # small-radius regimes hijack in-cap doors' arcs
                 r = w * scale
                 band = max(band_floor, PARAMS["band_factor"] * r)
                 cov, npix, ratio, empty = _arc_score(a_all, p_all, r, band,
@@ -647,12 +731,62 @@ def detect_door_at_gap(resid_pts, gap, wall_width):
                & (d >= 0.45 * r) & (d <= 1.55 * r) & (np.abs(d - r) <= band))
     door = TracedDoor(orientation, axis, e0, e1, (float(hinge[0]), float(hinge[1])),
                       (float(perp_unit[0]), float(perp_unit[1])), float(r), float(cov), int(npix),
-                      float(ratio))
+                      float(ratio),
+                      start_axis=gap.get("start_axis"), end_axis=gap.get("end_axis"))
     return door, win_idx[in_band]
 
 
+def window_break_fills(gaps, doors, dark, anchor, wall_width):
+    """Fill wall breaks that are drawn WINDOWS, not openings (local, ink-gated).
+
+    Hollow window symbols interrupt the solid band: the trace splits the wall
+    there and the room behind bleeds out through a "gap" that is actually
+    glazing. A drawn opening (door/passage) is WHITE across the band; a window
+    keeps continuous ink presence along the whole break (its thin face/sill
+    lines, wall-network anchored - label text floating near the line is not).
+    Such a break is drawn wall for room topology: emit a fill segment (plus jog
+    connectors when the gap carries offset end axes). A gap already confirmed
+    as a door is never filled.
+    """
+    labels, anchored, _symbol = anchor
+    wall_ink = ((dark > 0) & anchored[labels]).astype(np.uint8)
+    h, w = dark.shape
+    half = wall_width // 2 + 1
+    hi = wall_width * PARAMS["window_fill_hi_factor"]
+    fills: list[WallSegment] = []
+    for gap in gaps:
+        if not (wall_width * 0.75 <= gap["width"] <= hi):
+            continue
+        if any(d.orientation == gap["orientation"] and abs(d.axis - gap["axis"]) <= wall_width
+               and min(d.gap_end, gap["end"]) - max(d.gap_start, gap["start"]) > 0
+               for d in doors):
+            continue
+        axis = int(round(gap["axis"]))
+        lo_i, hi_i = int(math.floor(gap["start"])), int(math.ceil(gap["end"]))
+        if gap["orientation"] == "horizontal":
+            band = wall_ink[max(0, axis - half):min(h, axis + half + 1),
+                            max(0, lo_i):min(w, hi_i)]
+            presence = (band > 0).any(axis=0) if band.size else np.zeros(0, bool)
+        else:
+            band = wall_ink[max(0, lo_i):min(h, hi_i),
+                            max(0, axis - half):min(w, axis + half + 1)]
+            presence = (band > 0).any(axis=1) if band.size else np.zeros(0, bool)
+        if presence.size == 0 or float(presence.mean()) < PARAMS["window_presence"]:
+            continue
+        fills.append(WallSegment(gap["orientation"], gap["axis"],
+                                 gap["start"], gap["end"], float(wall_width)))
+        perp = "vertical" if gap["orientation"] == "horizontal" else "horizontal"
+        for pos_key, axis_key in (("start", "start_axis"), ("end", "end_axis")):
+            other = gap.get(axis_key)
+            if other is not None and abs(other - gap["axis"]) > 0.5:
+                fills.append(WallSegment(perp, gap[pos_key],
+                                         min(other, gap["axis"]), max(other, gap["axis"]),
+                                         float(wall_width)))
+    return fills
+
+
 def detect_doors(segments, dark, wall_pixels, wall_width, anchor):
-    """Return ``(raw_gaps, sub_gaps, doors, jamb_stubs)``.
+    """Return ``(raw_gaps, sub_gaps, doors, jamb_stubs, window_fills)``.
 
     Doors are confirmed on pier-split sub-gaps of collinear + terminal gaps. A sub-gap
     whose BOTH ends are pier cuts has no traced wall jamb at all - it is a rounding
@@ -670,9 +804,33 @@ def detect_doors(segments, dark, wall_pixels, wall_width, anchor):
     resid = _residual_mask(dark, wall_pixels, anchor)
     ys, xs = np.where(resid > 0)
     resid_pts = np.column_stack([xs.astype(np.float64), ys.astype(np.float64)])
-    raw_gaps = find_gaps(segments, wall_width) + add_terminal_gaps(segments, wall_width)
+    collinear = find_gaps(segments, wall_width)
+    jogged = add_jogged_gaps(segments, wall_width)
+    raw_gaps = collinear + add_terminal_gaps(segments, wall_width)
     sub_gaps = (split_gaps_at_piers(raw_gaps, segments, wall_width)
-                + find_slot_gaps(segments, dark, wall_width))
+                + find_slot_gaps(segments, dark, wall_width) + jogged)
+
+    def lacks_jamb_support(piece) -> bool:
+        """A WIDE 'gap' flanked only by tiny wall fragments is a FACE-LINE
+        artifact (a thick wall's re-traced face broken into stubs on a nearby
+        axis), not a doorway - a real wide opening has a substantial wall on at
+        least one side. Applies only past the single-leaf cap (the regimes this
+        change opened up), so every door-scale gap keeps the plain real-jamb
+        rule (an in-band slot gap counts as supported by its own host segment)."""
+        if piece["width"] <= wall_width * PARAMS["door_gap_hi_factor"]:
+            return False
+        tol = wall_width * 1.5
+        support = wall_width * 2.0
+        for s in segments:
+            if s.orientation != piece["orientation"] or abs(s.axis - piece["axis"]) > 1.0:
+                continue
+            if s.start <= piece["start"] + 1.0 and s.end >= piece["end"] - 1.0:
+                return False                       # slot inside one host segment
+            if (abs(s.end - piece["start"]) <= tol or abs(s.start - piece["end"]) <= tol) \
+                    and (s.end - s.start) >= support:
+                return False                       # a real flanking wall
+        return True
+
     candidates, jamb_stubs = [], []
     for gap in sub_gaps:
         if not (gap.get("real_start", True) or gap.get("real_end", True)):
@@ -680,6 +838,8 @@ def detect_doors(segments, dark, wall_pixels, wall_width, anchor):
         pieces, stubs = trim_gap_ink(gap, dark, wall_width, anchor)
         jamb_stubs.extend(stubs)
         for piece in pieces:
+            if lacks_jamb_support(piece):
+                continue
             detected = detect_door_at_gap(resid_pts, piece, wall_width)
             if detected is not None:
                 candidates.append(detected)
@@ -692,7 +852,9 @@ def detect_doors(segments, dark, wall_pixels, wall_width, anchor):
             continue
         claimed[support] = True
         doors.append(door)
-    return raw_gaps, sub_gaps, _dedupe_doors(doors, wall_width), jamb_stubs
+    doors = _dedupe_doors(doors, wall_width)
+    fills = window_break_fills(collinear + jogged, doors, dark, anchor, wall_width)
+    return raw_gaps, sub_gaps, doors, jamb_stubs, fills
 
 
 def _dedupe_doors(doors: list[TracedDoor], wall_width: int) -> list[TracedDoor]:
@@ -726,10 +888,20 @@ def bridge_at_doors(segments, doors, wall_width, extra=()):
 
     Non-door gaps get no fill, so they stay open. Adding the bridge as its own segment and
     re-merging keeps the faithful walls untouched while closing exactly the door openings.
-    ``extra`` carries ink-recovered jamb stubs from ``trim_gap_ink`` (traced, not invented).
+    ``extra`` carries ink-recovered jamb stubs from ``trim_gap_ink`` and window-break
+    fills (traced/ink-gated, not invented). A door whose jambs sit on jogged axes
+    (``start_axis``/``end_axis``) also gets the tiny perpendicular connectors, so the
+    bridge meets both walls instead of ending a jog away from one.
     """
-    bridges = [WallSegment(d.orientation, d.axis, d.gap_start, d.gap_end, float(wall_width))
-               for d in doors]
+    bridges = []
+    for d in doors:
+        bridges.append(WallSegment(d.orientation, d.axis, d.gap_start, d.gap_end,
+                                   float(wall_width)))
+        perp = "vertical" if d.orientation == "horizontal" else "horizontal"
+        for pos, other in ((d.gap_start, d.start_axis), (d.gap_end, d.end_axis)):
+            if other is not None and abs(other - d.axis) > 0.5:
+                bridges.append(WallSegment(perp, pos, min(other, d.axis),
+                                           max(other, d.axis), float(wall_width)))
     clustered = _cluster_axes(list(segments) + list(extra) + bridges,
                               tolerance=max(1.0, wall_width * 0.5))
     merged = _merge_overlaps(clustered, tolerance=max(1.0, wall_width * 0.5))
@@ -1154,9 +1326,10 @@ def trace_linework(png: bytes) -> LineworkTrace:
     gray = cv2.cvtColor(src_bgr, cv2.COLOR_BGR2GRAY)
 
     walls, wall_width, dark, wall_pixels, raw_count, stub_count, anchor = trace_walls(gray)
-    raw_gaps, sub_gaps, doors, jamb_stubs = detect_doors(walls, dark, wall_pixels, wall_width,
-                                                         anchor)
-    bridged, bridge_count = bridge_at_doors(walls, doors, wall_width, extra=jamb_stubs)
+    raw_gaps, sub_gaps, doors, jamb_stubs, window_fills = detect_doors(
+        walls, dark, wall_pixels, wall_width, anchor)
+    bridged, bridge_count = bridge_at_doors(walls, doors, wall_width,
+                                            extra=jamb_stubs + window_fills)
     post, post_stats = postprocess_walls(bridged, wall_width, dark)
     polygons = polygonize_rooms(post, gray.shape)
 
@@ -1178,6 +1351,7 @@ def trace_linework(png: bytes) -> LineworkTrace:
         gaps=len(raw_gaps),
         sub_gaps=len(sub_gaps),
         jamb_stubs=len(jamb_stubs),
+        window_fills=len(window_fills),
         doors_detected=len(doors),
         bridges_made=bridge_count,
         postprocess=post_stats,

@@ -130,13 +130,17 @@ def _ink_anchor(dark: np.ndarray, min_reach: float, min_area_frac: float,
                 max_symbol_density: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Ink component labels + two per-label verdicts: wall-network? door-symbol-like?
 
-    The wall network of a drawing is one image-spanning component holding almost
-    all the ink (walls touch walls); label text and stray symbols float in room
-    interiors as small isolated marks. A component is wall-network ink when its
-    bbox reach spans ``min_reach`` AND it holds ``min_area_frac`` of the largest
-    component's ink — the area test catches long-but-light marks (a whole label
-    word chained together by its underscores). Components are taken on a
-    1px-dilated copy so door symbols whose hinge kisses the wall across an
+    The wall network of a drawing is usually one image-spanning component holding
+    almost all the ink (walls touch walls); label text and stray symbols float in
+    room interiors as small isolated marks. A component is wall-network ink when
+    its bbox reach spans ``min_reach`` AND it holds ``min_area_frac`` of the
+    largest component's ink — the area test catches long-but-light marks (a whole
+    label word chained together by its underscores). Some drawings detach a whole
+    BLOCK of rooms from the rest (a central core ringed by corridor): its ink can
+    be well under the area fraction, but unlike a text line it spans ``min_reach``
+    in BOTH bbox dimensions (text lines are glyph-high), so a 2D-spanning
+    component is wall network regardless of its area share. Components are taken
+    on a 1px-dilated copy so door symbols whose hinge kisses the wall across an
     anti-aliasing seam still count as wall-connected.
 
     Some styles draw door symbols fully DETACHED from the walls, so arc evidence
@@ -147,10 +151,12 @@ def _ink_anchor(dark: np.ndarray, min_reach: float, min_area_frac: float,
     joined = cv2.dilate(dark, np.ones((3, 3), np.uint8))
     count, labels, stats, _ = cv2.connectedComponentsWithStats(joined, 8)
     reach = np.maximum(stats[:, cv2.CC_STAT_WIDTH], stats[:, cv2.CC_STAT_HEIGHT])
+    spread = np.minimum(stats[:, cv2.CC_STAT_WIDTH], stats[:, cv2.CC_STAT_HEIGHT])
     area = stats[:, cv2.CC_STAT_AREA]
     bbox_area = np.maximum(1, stats[:, cv2.CC_STAT_WIDTH] * stats[:, cv2.CC_STAT_HEIGHT])
     largest = area[1:].max() if count > 1 else 0
-    anchored = (reach >= min_reach) & (area >= min_area_frac * largest)
+    anchored = (reach >= min_reach) & ((area >= min_area_frac * largest)
+                                       | (spread >= min_reach))
     anchored[0] = False
     # density from the UNDILATED ink: dilation triples a hairline stroke's area and
     # would make a thin arc read as dense as a glyph
@@ -234,21 +240,41 @@ def _merge_overlaps(segments: list[WallSegment], tolerance: float) -> list[WallS
 
 
 def _snap_junctions(segments: list[WallSegment], tolerance: float) -> list[WallSegment]:
+    """Snap segment endpoints onto crossing perpendicular axes (within tolerance).
+
+    Each endpoint snaps to its NEAREST crossing axis, and a snap that would
+    collapse the segment (both endpoints onto one axis) is refused: a short jog
+    connector between two nearly-coaxial walls is itself shorter than the
+    tolerance, and the naive per-pair snap zeroed it out, reopening the jog.
+    """
     horizontal = [segment for segment in segments if segment.orientation == "horizontal"]
     vertical = [segment for segment in segments if segment.orientation == "vertical"]
+
+    def snap(segment: WallSegment, crossers: list[WallSegment]) -> None:
+        axes = [
+            crosser.axis for crosser in crossers
+            if segment.start - tolerance <= crosser.axis <= segment.end + tolerance
+            and crosser.start - tolerance <= segment.axis <= crosser.end + tolerance
+        ]
+        if not axes:
+            return
+        new_start = min(axes, key=lambda a: abs(segment.start - a))
+        new_end = min(axes, key=lambda a: abs(segment.end - a))
+        start_ok = abs(segment.start - new_start) <= tolerance
+        end_ok = abs(segment.end - new_end) <= tolerance
+        if start_ok and end_ok and new_end - new_start < 1.0:
+            # keep only the tighter snap - never collapse the segment
+            if abs(segment.start - new_start) <= abs(segment.end - new_end):
+                end_ok = False
+            else:
+                start_ok = False
+        if start_ok and new_start < segment.end:
+            segment.start = new_start
+        if end_ok and new_end > segment.start:
+            segment.end = new_end
+
     for h_segment in horizontal:
-        for v_segment in vertical:
-            x, y = v_segment.axis, h_segment.axis
-            if not (h_segment.start - tolerance <= x <= h_segment.end + tolerance):
-                continue
-            if not (v_segment.start - tolerance <= y <= v_segment.end + tolerance):
-                continue
-            if abs(h_segment.start - x) <= tolerance:
-                h_segment.start = x
-            if abs(h_segment.end - x) <= tolerance:
-                h_segment.end = x
-            if abs(v_segment.start - y) <= tolerance:
-                v_segment.start = y
-            if abs(v_segment.end - y) <= tolerance:
-                v_segment.end = y
+        snap(h_segment, vertical)
+    for v_segment in vertical:
+        snap(v_segment, horizontal)
     return segments

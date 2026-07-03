@@ -10,7 +10,8 @@ import cv2
 import numpy as np
 
 from hfagent.floor_plan_generate import generate_plan
-from hfagent.tools.linework_tracer import trace_linework
+from hfagent.tools.linework_tracer import find_gaps, trace_linework, window_break_fills
+from hfagent.tools.wall_graph import WallSegment
 
 TRACE_ARTIFACTS = [
     "walls_overlay.png",
@@ -148,6 +149,108 @@ def test_double_leaf_door_confirms_on_half_gap_arc():
     trace = trace_linework(_png(image))
     assert len(trace.plan.rooms) == 2
     assert trace.diagnostics["doors_detected"] == 1
+
+
+def test_detached_room_block_is_traced_as_walls():
+    """A block of rooms drawn DETACHED from the outer wall network (central core
+    ringed by corridor) holds well under 10% of the drawing's ink, but spans
+    room scale in BOTH bbox dimensions - it must anchor as wall network, not be
+    dropped like label text (which is glyph-high)."""
+    image = np.full((540, 820, 3), 255, np.uint8)
+    black = (0, 0, 0)
+    cv2.rectangle(image, (30, 30), (790, 510), black, 14)         # heavy outer ring
+    cv2.rectangle(image, (330, 200), (490, 340), black, 5)        # floating thin block
+    cv2.line(image, (410, 200), (410, 340), black, 5)             # block partition
+
+    trace = trace_linework(_png(image))
+    # the block's two cells close; without block anchoring they vanish entirely
+    assert len(trace.plan.rooms) >= 3
+
+
+def test_jogged_wall_door_confirms_and_bridge_connects():
+    """A door whose two jambs sit on slightly OFFSET axes (wall thickness changes
+    across the opening) has no collinear gap candidate at all; the jogged-gap
+    source must pair the walls (their bands overlap) and the bridge must close
+    the room via the jog connectors."""
+    image = np.full((540, 820, 3), 255, np.uint8)
+    black = (0, 0, 0)
+    cv2.rectangle(image, (30, 30), (790, 510), black, 10)
+    cv2.line(image, (410, 30), (410, 240), black, 10)             # upper partition
+    cv2.line(image, (399, 300), (399, 510), black, 22)            # fatter, jogged lower
+    cv2.ellipse(image, (407, 240), (60, 60), 0, 90, 180, black, 2)  # arc at upper jamb
+    cv2.line(image, (407, 240), (407, 300), black, 2)             # leaf
+
+    trace = trace_linework(_png(image))
+    assert trace.diagnostics["doors_detected"] == 1
+    assert len(trace.plan.rooms) == 2
+
+
+def test_wide_double_door_confirms_beyond_single_leaf_cap():
+    """A waiting-room double door can be far wider than the single-leaf cap
+    (10 * wall_width); only the mirrored half-gap arcs confirm it out there."""
+    image = np.full((540, 820, 3), 255, np.uint8)
+    black = (0, 0, 0)
+    cv2.rectangle(image, (30, 30), (790, 510), black, 10)
+    cv2.line(image, (410, 30), (410, 205), black, 10)             # 130px opening (13 ww)
+    cv2.line(image, (410, 335), (410, 510), black, 10)
+    cv2.line(image, (410, 205), (345, 205), black, 2)             # two mirrored leaves
+    cv2.ellipse(image, (410, 205), (65, 65), 0, 90, 180, black, 2)
+    cv2.line(image, (410, 335), (345, 335), black, 2)
+    cv2.ellipse(image, (410, 335), (65, 65), 0, 180, 270, black, 2)
+
+    trace = trace_linework(_png(image))
+    assert trace.diagnostics["doors_detected"] == 1
+    assert len(trace.plan.rooms) == 2
+
+
+def test_undersized_leaf_in_oversized_mouth_confirms():
+    """Models sometimes draw a small door in an OVERSIZED mouth (opening just
+    past the single-leaf cap, arc radius only ~a third of it); the undersized
+    regimes confirm it there - and only there, so tiny arcs cannot hijack
+    normal doors' arc ink at door scale."""
+    image = np.full((540, 820, 3), 255, np.uint8)
+    black = (0, 0, 0)
+    cv2.rectangle(image, (30, 30), (790, 510), black, 20)
+    cv2.line(image, (410, 30), (410, 232), black, 20)             # ~172px opening, just
+    cv2.line(image, (410, 425), (410, 510), black, 20)            # past the 10*ww cap
+    cv2.ellipse(image, (410, 415), (57, 57), 0, 180, 270, black, 2)  # r = 0.33 * gap
+    cv2.line(image, (410, 415), (353, 415), black, 2)             # open leaf, into the room
+
+    trace = trace_linework(_png(image))
+    assert trace.diagnostics["doors_detected"] == 1
+    assert len(trace.plan.rooms) == 2
+
+
+def test_window_break_fill_requires_continuous_face_ink():
+    """A traced-band break whose cross band keeps CONTINUOUS (wall-anchored) ink
+    - hollow window faces - is drawn wall and gets filled; the same break with a
+    plain white opening must stay open (it may only close as an arc-confirmed
+    door)."""
+    ww = 10
+    walls = [
+        WallSegment("vertical", 410.0, 30.0, 200.0, 10.0),
+        WallSegment("vertical", 410.0, 280.0, 510.0, 10.0),
+    ]
+    dark = np.zeros((540, 820), np.uint8)
+    dark[30:200, 405:416] = 1                                     # band above the break
+    dark[280:510, 405:416] = 1                                    # band below the break
+    with_faces = dark.copy()
+    with_faces[200:280, 406:408] = 1                              # window face lines
+    with_faces[200:280, 413:415] = 1
+
+    def anchor_for(ink):
+        labels = (ink > 0).astype(np.int32)
+        anchored = np.array([False, True])
+        symbol_like = np.array([False, False])
+        return labels, anchored, symbol_like
+
+    gaps = find_gaps(walls, ww)
+    assert len(gaps) == 1
+    filled = window_break_fills(gaps, [], with_faces, anchor_for(with_faces), ww)
+    assert len(filled) == 1
+    assert filled[0].start == 200.0 and filled[0].end == 280.0
+    open_break = window_break_fills(gaps, [], dark, anchor_for(dark), ww)
+    assert open_break == []
 
 
 class LineworkImageStub:
