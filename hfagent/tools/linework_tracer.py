@@ -436,14 +436,17 @@ def find_slot_gaps(segments, dark: np.ndarray, wall_width: int):
     real jambs (the band continues on both sides). Only a swing arc confirms them, so
     window slots stay walls. Only segments of real BAND thickness are scanned: a
     door-leaf line traced as a wall must not fabricate slot gaps under the door's own
-    arc (which would out-claim the true opening's candidate).
+    arc (which would out-claim the true opening's candidate). The band floor scales
+    with ``wall_width``, not the image — thin-wall drawings (ww ~5 px) draw their
+    whole wall net below any resolution-based floor, and their half-depth door slots
+    (a lintel line keeps the band's top edge continuous) live in exactly those
+    segments.
     """
     height, width = dark.shape
     half = wall_width // 2 + 1
     lo_w = wall_width * PARAMS["door_gap_lo_factor"]
     hi_w = wall_width * PARAMS["door_gap_hi_factor"]
-    min_band = max(2 * max(3, round(min(dark.shape) * PARAMS["min_cross_frac"])),
-                   0.5 * wall_width)
+    min_band = max(4.0, PARAMS["stub_thickness_match"][0] * wall_width)
     gaps = []
     for s in segments:
         if s.thickness < min_band:
@@ -470,7 +473,7 @@ def find_slot_gaps(segments, dark: np.ndarray, wall_width: int):
                     gaps.append(dict(orientation=s.orientation, axis=float(s.axis),
                                      start=float(lo + begin), end=float(lo + position),
                                      width=float(position - begin),
-                                     real_start=True, real_end=True))
+                                     real_start=True, real_end=True, slot=True))
             else:
                 position += 1
     return gaps
@@ -796,11 +799,24 @@ def detect_doors(segments, dark, wall_pixels, wall_width, anchor):
     corner/jamb stubs and untraced ornament piers become walls and the arc test sees
     the true opening(s).
 
-    Arc ink is EXCLUSIVE to one door: candidates are ranked by arc quality and each
-    residual point supports only the first door that claims it, so an axis-rounding
-    gap whose annulus merely grazes a NEIGHBOUR's swing arc (its own opening has no
-    arc) finds its ink already claimed and dies. Real doors own disjoint arcs.
+    Arc ink is EXCLUSIVE to one door: each residual point supports only the first
+    door that claims it, so an axis-rounding gap whose annulus merely grazes a
+    NEIGHBOUR's swing arc (its own opening has no arc) finds its ink already claimed
+    and dies. Real doors own disjoint arcs. ONE physical arc can read as a door in
+    two different walls (an L-corner break in one wall vs a slot in the perpendicular
+    band), so the claim order decides which reading bridges: BREAK/terminal/jogged
+    candidates outrank ALL slot candidates, because only a break's bridge closes
+    topology — a slot's band is already continuous, so letting the slot win leaves
+    the real opening unbridged and the room leaks around the corner. (Ranking by arc
+    fit instead was tried and regresses: a corner slot reading is biased canonical —
+    its white run is the arc's own footprint, so it out-fits a real wide-mouth door
+    drawn with an undersized leaf.) Within a class, arc quality ranks.
     """
+
+    def _claim_rank(candidate):
+        door, _support, is_slot = candidate
+        return (is_slot, -door.coverage * door.inlier_ratio)
+
     resid = _residual_mask(dark, wall_pixels, anchor)
     ys, xs = np.where(resid > 0)
     resid_pts = np.column_stack([xs.astype(np.float64), ys.astype(np.float64)])
@@ -842,12 +858,11 @@ def detect_doors(segments, dark, wall_pixels, wall_width, anchor):
                 continue
             detected = detect_door_at_gap(resid_pts, piece, wall_width)
             if detected is not None:
-                candidates.append(detected)
+                candidates.append((*detected, bool(piece.get("slot"))))
 
     claimed = np.zeros(resid_pts.shape[0], dtype=bool)
     doors = []
-    for door, support in sorted(candidates, key=lambda c: c[0].coverage * c[0].inlier_ratio,
-                                reverse=True):
+    for door, support, _is_slot in sorted(candidates, key=_claim_rank):
         if support.size and float(claimed[support].mean()) > PARAMS["arc_claim_max_overlap"]:
             continue
         claimed[support] = True
