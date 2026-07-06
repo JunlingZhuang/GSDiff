@@ -247,13 +247,18 @@ def _drop_leaf_bars(segments: list[WallSegment], wall_width: int) -> list[WallSe
     """Drop door LEAVES traced as walls (styles that draw the open leaf as a solid bar).
 
     A leaf bar is door-length, hangs off its hinge wall into open room space, and is
-    leaf-thin. Geometrically: a run no longer than a door opening whose line has no
-    collinear sibling of similar thickness (a jamb piece is part of an interrupted
-    wall LINE; a leaf sits on its own axis) and whose far end touches no perpendicular
-    run (a real pier terminates on walls at both ends; a leaf tip floats). Only runs
-    failing BOTH tests are dropped, so door-pierced walls and short piers survive.
+    leaf-THIN — a drawn leaf is a stroke line, never a full wall band, so a run at
+    band thickness (>= 0.8 wall_width) is a wall no matter how it hangs (a short
+    partition whose far end stops at a door opening and whose continuation is
+    jogged off-axis otherwise reads exactly like a leaf and vanishes). For thin
+    runs, geometry decides: no collinear sibling of similar thickness (a jamb piece
+    is part of an interrupted wall LINE; a leaf sits on its own axis) and no
+    perpendicular run at the far end (a real pier terminates on walls at both ends;
+    a leaf tip floats). Only runs failing BOTH tests are dropped, so door-pierced
+    walls and short piers survive.
     """
     max_len = wall_width * PARAMS["door_gap_hi_factor"]
+    band_min = 0.8 * wall_width
     sibling_tol = max(1.0, wall_width * 0.5)
     touch_tol = wall_width * 1.2
     match_lo, match_hi = PARAMS["stub_thickness_match"]
@@ -279,7 +284,8 @@ def _drop_leaf_bars(segments: list[WallSegment], wall_width: int) -> list[WallSe
         return True
 
     return [s for s in segments
-            if (s.end - s.start) > max_len or has_collinear_sibling(s) or both_ends_on_walls(s)]
+            if (s.end - s.start) > max_len or s.thickness >= band_min
+            or has_collinear_sibling(s) or both_ends_on_walls(s)]
 
 
 def _drop_text_bars(segments: list[WallSegment], raw_ink: np.ndarray,
@@ -1138,10 +1144,16 @@ def postprocess_walls(segments: list[WallSegment], wall_width: int,
                 Closes the corner holes _snap_junctions cannot see because neither
                 wall's span reaches the other's axis (both stop short at an
                 L-corner, e.g. where a door bridge ends at a jamb-post pier).
-    3. TRIM   - an endpoint overhanging its outermost perpendicular junction by
+    3. PIER   - a gap between two COLLINEAR wall ends within the same reach whose
+                span is continuously covered by wall ink is filled: a double-door
+                pier drawn FATTER than the wall band escapes both the long trace
+                (too short) and the stub pass (thickness mismatch), leaving a
+                solid-ink hole between the two bridged door openings. A drawn
+                opening is white there and is never filled.
+    4. TRIM   - an endpoint overhanging its outermost perpendicular junction by
                 less than ``2 * wall_width`` is cut back to that junction (the small
                 perpendicular ticks poking out of a main wall).
-    4. DROP   - segments shorter than ``2.5 * wall_width`` that still have a free
+    5. DROP   - segments shorter than ``2.5 * wall_width`` that still have a free
                 end after snapping (dangling whiskers) are removed; they can never
                 close a ring, they are pure visual noise.
     """
@@ -1186,6 +1198,27 @@ def postprocess_walls(segments: list[WallSegment], wall_width: int,
                         moved = True
             if not moved:
                 break
+
+    piers_filled = 0
+    if dark is not None:
+        reach = wall_width * PARAMS["corner_snap_reach"]
+        by_axis: dict[tuple[str, float], list[WallSegment]] = {}
+        for s in segs:
+            key = (s.orientation, round(s.axis / max(1.0, wall_width * 0.5)))
+            by_axis.setdefault(key, []).append(s)
+        for items in by_axis.values():
+            items.sort(key=lambda s: s.start)
+            for a, b in zip(items, items[1:]):
+                gap = b.start - a.end
+                if not (0.0 < gap <= reach):
+                    continue
+                # gap-trim tolerance leaves a white sliver at the wall ends; the
+                # ink test judges the gap's CORE (a drawn opening stays all white)
+                pad = min(gap * 0.25, wall_width * 0.5)
+                if _ink_covered(dark, a.orientation, a.axis, a.end + pad,
+                                b.start - pad, wall_width):
+                    a.end = b.start
+                    piers_filled += 1
 
     trimmed = 0
     for s in segs:
@@ -1245,7 +1278,7 @@ def postprocess_walls(segments: list[WallSegment], wall_width: int,
                 continue
         keep.append(s)
     stats = dict(snapped_tol=tol, posts_absorbed=posts_absorbed, faces_merged=faces_merged,
-                 corners_snapped=corner_snapped,
+                 corners_snapped=corner_snapped, piers_filled=piers_filled,
                  endpoints_trimmed=trimmed, whiskers_dropped=dropped, face_lines_dropped=face_lines,
                  segments_in=len(segments), segments_out=len(keep))
     return keep, stats
