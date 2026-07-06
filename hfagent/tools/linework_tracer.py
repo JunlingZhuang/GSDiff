@@ -65,11 +65,12 @@ from dataclasses import dataclass
 
 import cv2
 import numpy as np
-from shapely.geometry import Point
+from shapely.geometry import Point, Polygon as ShapelyPolygon
 from shapely.ops import polygonize, unary_union
 
 from hfagent.schema.plan import Plan, Room
 from hfagent.schema.roomgraph import Door as DoorEdge, RoomGraph, RoomNode
+from hfagent.tools.text_mask import detect_label_quads
 from hfagent.tools.wall_graph import (
     WallSegment,
     _cluster_axes,
@@ -1260,20 +1261,28 @@ def polygonize_rooms(segments: list[WallSegment], image_shape) -> list:
     return rooms
 
 
-def drop_room_interior_fragments(segments: list[WallSegment], polygons,
-                                 wall_width: int) -> list[WallSegment]:
+def hide_label_residue(segments: list[WallSegment], polygons, wall_width: int,
+                       text_quads=()) -> list[WallSegment]:
     """Hide label-text residue from the RENDERED walls (topology already fixed).
 
     Welded label words that survive every ink-level gate render as short black
     dashes inside rooms. They are recognisable exactly here — AFTER
-    ``polygonize_rooms`` — because "inside a room" now has a meaning: a short
-    segment lying fully within one room polygon, clear of its boundary by a
-    wall width, closes nothing and carries no door; it is decoration. Fragments
-    come in CLUSTERS (a label line breaks into several chunks), so a segment
-    with a fellow fragment nearby is text, and so is a tiny lone one — while a
-    single longer solid bar (a drawn counter/fixture) stays. Ink-level text
-    removal was refuted three ways (text ink is load-bearing for the trace);
-    this runs after the trace is done and can change nothing but the drawing.
+    ``polygonize_rooms`` — because "inside a room" and "on a room boundary" now
+    have meanings. Three convictions, all render-only (ink-level text removal
+    was refuted three ways: text ink is load-bearing for the trace; this runs
+    after the trace is done and can change nothing but the drawing):
+
+    1. a short segment fully inside one room polygon, clear of its boundary by
+       a wall width, closes nothing and carries no door — decoration. Fragments
+       come in CLUSTERS (a label line breaks into chunks), so a fragment with a
+       fellow nearby is text, and so is a tiny lone one — while a single longer
+       solid bar (a drawn counter/fixture) stays;
+    2. with OCR text quads available (``text_mask.detect_label_quads``), a
+       segment lying mostly inside a text region but NOT along any room
+       boundary ring is text welded to a wall — every real wall carries a ring
+       edge, a label stub never does;
+    3. a boundary-welded stub on the same text line as fragments already
+       hidden (a real door-jamb stub never shares its axis with label residue).
     """
     max_len = wall_width * PARAMS["door_gap_hi_factor"]
     margin = float(wall_width)
@@ -1313,10 +1322,27 @@ def drop_room_interior_fragments(segments: list[WallSegment], polygons,
         if clustered or (s.end - s.start) <= lone_max:
             hidden.add(i)
 
-    # a label's leading word often welds onto the partition beside it and traces
-    # as a short T-stub — boundary-touching, so the interior test spares it. It
-    # convicts itself by lying ON THE SAME TEXT LINE as fragments already hidden:
-    # a real door-jamb stub never shares its axis with mid-room label residue.
+    # conviction 2: mostly inside an OCR text region AND not along any ring
+    if len(text_quads) and rooms:
+        text_zone = unary_union([ShapelyPolygon(q.tolist()).buffer(0)
+                                 for q in text_quads])
+        ring_zone = unary_union([room.boundary for room in rooms
+                                 if not room.is_empty]).buffer(max(1.5, 0.3 * wall_width))
+        for i, s in enumerate(segments):
+            if i in hidden or not (0 < (s.end - s.start) <= 3.0 * max_len):
+                continue
+            line = s.line()
+            if line.intersection(text_zone).length < 0.7 * line.length:
+                continue
+            if line.intersection(ring_zone).length >= 0.5 * line.length:
+                continue    # carries a room-boundary edge: real wall
+            hidden.add(i)
+
+    # conviction 3: a label's leading word often welds onto the partition beside
+    # it and traces as a short T-stub — boundary-touching, so the interior test
+    # spares it. It convicts itself by lying ON THE SAME TEXT LINE as fragments
+    # already hidden: a real door-jamb stub never shares its axis with mid-room
+    # label residue.
     if hidden:
         for i, s in enumerate(segments):
             if i in hidden or (s.end - s.start) > max_len:
@@ -1496,7 +1522,8 @@ def trace_linework(png: bytes) -> LineworkTrace:
                                             extra=jamb_stubs + window_fills)
     post, post_stats = postprocess_walls(bridged, wall_width, dark)
     polygons = polygonize_rooms(post, gray.shape)
-    shown = drop_room_interior_fragments(post, polygons, wall_width)
+    shown = hide_label_residue(post, polygons, wall_width,
+                               text_quads=detect_label_quads(gray))
 
     rooms = _rooms_from_polygons(polygons)
     edges = _door_edges(doors, polygons, rooms, wall_width)
