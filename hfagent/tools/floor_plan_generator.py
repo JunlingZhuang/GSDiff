@@ -61,8 +61,10 @@ LAYOUT
 - One single connected building footprint, not scattered blocks.
 
 DOORS (required — they are read back from this drawing)
-- Draw a door at every connection as a SIMPLE gap in the wall with ONE plain quarter-circle swing arc — nothing more. No door frame, no panelled leaf, no threshold, no hinge marks, no door tag or number.
-- Every enclosed room must have at least one door to a corridor / circulation space so it is reachable.
+- Every door is the standard architect's door symbol: a thin BLACK quarter-circle swing arc sweeping across the wall opening, together with its straight door-leaf line from the hinge. The quarter-circle arc is what makes an opening a door — an opening in a wall without its quarter-circle arc must not appear anywhere in the drawing.
+- The door-leaf line is a thin plain GREY line — never a black-filled bar; the swing ARC itself stays a thin black line.
+- Draw the full arc at every door, including the smallest toilet and storage rooms.
+- Every enclosed room has at least one door to a corridor / circulation space so it is reachable.
 - Put doors only where two spaces should connect (see CIRCULATION).
 
 LABELS
@@ -72,11 +74,24 @@ LABELS
 EXCLUDE — keep it a clean SCHEMATIC plan, NOT a construction / working drawing. Do NOT draw any of:
 - furniture, fixtures, equipment, sanitary ware, beds, sinks, desks;
 - windows of any kind;
-- door construction detail (frames, leaves, thresholds, swing-radius dimensions);
+- decorative door hardware or annotations (door frames, thresholds, hinge marks, door tags or numbers);
 - dimension lines or strings, grid / column lines, section / elevation / detail markers;
 - hatching, fill patterns, textures, gradients or shadows (walls stay flat solid black);
 - schedules, legends, keynotes, callouts, scale bars, north arrows, title blocks.
 - Background outside the building is pure white and empty."""
+
+# Previous DOORS + EXCLUDE wording (kept for the record — it produced arc-less
+# openings): the door sentence led with "a SIMPLE gap in the wall ... nothing
+# more", making the gap the head noun and the arc grammatically optional, and
+# EXCLUDE banned "door construction detail (frames, leaves, thresholds,
+# swing-radius dimensions)" — "leaves"/"swing-radius" collide with the leaf +
+# swing-arc symbol the DOORS section requires, over-suppressing the arc:
+#   DOORS (required — they are read back from this drawing)
+#   - Draw a door at every connection as a SIMPLE gap in the wall with ONE plain
+#     quarter-circle swing arc — nothing more. No door frame, no panelled leaf,
+#     no threshold, no hinge marks, no door tag or number.
+#   EXCLUDE ...
+#   - door construction detail (frames, leaves, thresholds, swing-radius dimensions);
 
 
 def _compose_prompt(
