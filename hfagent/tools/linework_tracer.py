@@ -891,14 +891,22 @@ def detect_doors(segments, dark, wall_pixels, wall_width, anchor):
     candidates outrank ALL slot candidates, because only a break's bridge closes
     topology — a slot's band is already continuous, so letting the slot win leaves
     the real opening unbridged and the room leaks around the corner. (Ranking by arc
-    fit instead was tried and regresses: a corner slot reading is biased canonical —
-    its white run is the arc's own footprint, so it out-fits a real wide-mouth door
-    drawn with an undersized leaf.) Within a class, arc quality ranks.
+    fit BEFORE class was tried and regresses: a corner slot reading is biased
+    canonical — its white run is the arc's own footprint, so it out-fits a real
+    wide-mouth door drawn with an undersized leaf.) WITHIN a class, swing-regime
+    fit ranks before arc quality: a real door's radius fills its own opening
+    (r ~= gap), while a cross-orientation corner misreading fits the same arc into
+    a perpendicular terminal gap only as a fractional leaf (r ~= 0.5 gap) — with a
+    perfect quality score, since it is a real drawn arc. Score alone let such a
+    misreading claim the arc first and bridge the WRONG wall, leaving the true
+    opening unbridged (twin doors flanking an untraced fat pier died this way).
     """
 
     def _claim_rank(candidate):
         door, _support, is_slot = candidate
-        return (is_slot, -door.coverage * door.inlier_ratio)
+        scale = door.radius / max(1.0, door.gap_end - door.gap_start)
+        regime_tier = 0 if scale >= 0.85 else (1 if scale >= 0.6 else 2)
+        return (is_slot, regime_tier, -door.coverage * door.inlier_ratio)
 
     resid = _residual_mask(dark, wall_pixels, anchor)
     ys, xs = np.where(resid > 0)
