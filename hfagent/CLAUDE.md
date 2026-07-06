@@ -57,13 +57,17 @@ block with its own `text_model` / `image_model` / `boundary`; the active one is
   gone — cleaner geometry, one image call per round, ~half the cost. Doors come from
   `program["adjacency"]`, not an image read (see Doors below). Best on `gemini-3-pro-image`
   for plans up to ~33–40 rooms; degrades past ~80 (see `docs/direct-colorblock-findings.md`).
-- `linework` — **geometry-only, no OCR, no room typing**: pass-1 draws a clean line plan
+- `linework` — **geometry-first**: pass-1 draws a clean line plan
   (`build_linework_prompt`), then `tools/linework_tracer.trace_linework` deterministically
   traces exactly the drawn walls (faithful trace + short-stub pass, nothing invented),
   confirms a door ONLY where a quarter-circle swing arc straddles a wall gap, bridges the
   walls at confirmed doors, post-processes (posts absorbed, faces merged, ink-gated corner
-  snap, whiskers dropped) and polygonizes the closed rooms into an untyped px-unit `Plan`
-  (`type="unknown"`, ids `r1..rN`). Wall ACCEPTANCE is thickness-agnostic — image models
+  snap, ink-cored pier fill, whiskers dropped) and polygonizes the closed rooms into a
+  px-unit `Plan` (ids `r1..rN`). The TRACE itself reads no text; a separate step
+  (`tools/room_typing.type_rooms`) then reads the label drawn inside each room — local
+  OCR (PP-OCRv3 det + CRNN rec, optional models in `data/models/`, graceful no-op when
+  absent) matched against the PROGRAM's closed room-type vocabulary — and fills
+  `Room.type`/`Room.name` (best-effort; unreadable rooms stay `"unknown"`). Wall ACCEPTANCE is thickness-agnostic — image models
   draw fat perimeter bands over thin partitions in one drawing, so runs are accepted from
   a small absolute floor upward (wall-network anchoring drops label text) and `wall_width`
   (the scale anchor for door/postprocess factors) is the MEDIAN of the accepted runs' own
@@ -162,6 +166,8 @@ recon.png             bridged walls (pre-postprocess) + door arc markers
 recon_post.png        post-processed wall graph + door arc markers
 rooms_colorful.png    closed room polygons, distinct deterministic colours,
                       walls black on top, doors as white gaps
+typing_overlay.png    source drawing + each room's assigned type at its centroid
+typing.json           room id -> {type, instance, score, text} label readings
 ```
 
 `generate_plan` returns `(report, plan_dict, room_graph_dict)` — the third element

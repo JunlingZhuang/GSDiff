@@ -17,6 +17,7 @@ from pathlib import Path
 
 from hfagent.tools.image_parser import cv_parse
 from hfagent.tools.linework_tracer import trace_linework
+from hfagent.tools.room_typing import type_rooms, typing_overlay
 from hfagent.tools.floor_plan_generator import FloorPlanGenerator
 from hfagent.tools.door_placer import place_doors
 from hfagent.tools.plan_fixes import fix_room_counts
@@ -243,8 +244,11 @@ def generate_plan(
             elif structure_mode == "linework":
                 # Faithful-trace backend (tools/linework_tracer): walls are traced
                 # exactly as drawn, a gap becomes a door only when a swing arc
-                # confirms it, and the closed wall graph is polygonized into UNTYPED
-                # rooms (type "unknown", ids r1..rN, px units). The trace's RoomGraph
+                # confirms it, and the closed wall graph is polygonized into rooms
+                # (ids r1..rN, px units). The trace itself is geometry-only; the
+                # separate room-typing step then reads the label drawn inside each
+                # room (local OCR + program-vocabulary match, tools/room_typing)
+                # so the plan comes back with program types. The trace's RoomGraph
                 # names the two plan room ids flanking each confirmed door
                 # ("exterior" when a side is open ground), so the shared downstream
                 # applies unchanged: place_doors hangs each edge on the wall that
@@ -262,6 +266,25 @@ def generate_plan(
                     f"round {round_num}: traced {trace_diag['rooms_closed']} room(s), "
                     f"{trace_diag['doors_detected']} door(s); wrote {', '.join(trace.artifacts)}",
                 )
+                _log(name, f"round {round_num}: reading room labels for program types")
+                guesses = type_rooms(real_png, parsed_plan, program)
+                for room in parsed_plan.rooms:
+                    guess = guesses.get(room.id)
+                    if guess is not None:
+                        room.type, room.name = guess.type, guess.name
+                typed_by_id = {room.id: room.type for room in parsed_plan.rooms}
+                for node in round_graph.rooms:
+                    node.type = typed_by_id.get(node.id, node.type)
+                (work_dir / "typing_overlay.png").write_bytes(
+                    typing_overlay(real_png, parsed_plan, guesses))
+                (work_dir / "typing.json").write_text(json.dumps(
+                    {rid: dict(type=g.type, instance=g.instance,
+                               score=round(g.score, 3), text=g.text)
+                     for rid, g in sorted(guesses.items())}, indent=1), encoding="utf-8")
+                trace_diag["room_typing"] = dict(rooms=len(parsed_plan.rooms),
+                                                 typed=len(guesses))
+                _log(name, f"round {round_num}: typed {len(guesses)}/"
+                           f"{len(parsed_plan.rooms)} room(s) from drawn labels")
             else:
                 _log(name, f"round {round_num}: converting realistic plan to colour-block mask")
                 png_path.write_bytes(generator.to_colorblock(real_png))
@@ -269,8 +292,9 @@ def generate_plan(
                 parsed_plan = cv_parse(str(png_path))
 
         # ── verify ───────────────────────────────────────────────────────────
-        # linework rooms are untyped, so per-type counting is meaningless there;
-        # the check is total rooms traced vs the program's total instead.
+        # linework rooms are typed from drawn labels AFTER the trace, but label
+        # coverage is best-effort (tiny/rotated text) — the single-round check
+        # stays total rooms traced vs the program's total.
         actual_counts = Counter(r.type for r in parsed_plan.rooms)
         if structure_mode == "linework":
             required_total = sum(required_rooms.values())
@@ -311,14 +335,14 @@ def generate_plan(
 
     _log(name, "running deterministic room-count repair")
     if structure_mode == "linework":
-        # untyped rooms cannot be split/relabelled by type; the traced geometry IS
-        # the result and the check is the total room count.
+        # the traced geometry IS the result: label-read types are best-effort, so
+        # splitting/relabelling rooms to force per-type counts would fake geometry.
         fixed_plan = best_round.plan.model_copy(deep=True)
         count_fix = {
             "ops": [],
             "fixed": len(fixed_plan.rooms) == sum(required_rooms.values()),
             "fixed_rooms": dict(Counter(room.type for room in fixed_plan.rooms)),
-            "skipped": "linework rooms are untyped; per-type count repair does not apply",
+            "skipped": "linework geometry is authoritative; per-type count repair does not apply",
         }
     else:
         fixed_plan, count_fix = fix_room_counts(best_round.plan, required_rooms)
