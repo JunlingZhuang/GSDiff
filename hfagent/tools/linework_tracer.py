@@ -1260,6 +1260,79 @@ def polygonize_rooms(segments: list[WallSegment], image_shape) -> list:
     return rooms
 
 
+def drop_room_interior_fragments(segments: list[WallSegment], polygons,
+                                 wall_width: int) -> list[WallSegment]:
+    """Hide label-text residue from the RENDERED walls (topology already fixed).
+
+    Welded label words that survive every ink-level gate render as short black
+    dashes inside rooms. They are recognisable exactly here — AFTER
+    ``polygonize_rooms`` — because "inside a room" now has a meaning: a short
+    segment lying fully within one room polygon, clear of its boundary by a
+    wall width, closes nothing and carries no door; it is decoration. Fragments
+    come in CLUSTERS (a label line breaks into several chunks), so a segment
+    with a fellow fragment nearby is text, and so is a tiny lone one — while a
+    single longer solid bar (a drawn counter/fixture) stays. Ink-level text
+    removal was refuted three ways (text ink is load-bearing for the trace);
+    this runs after the trace is done and can change nothing but the drawing.
+    """
+    max_len = wall_width * PARAMS["door_gap_hi_factor"]
+    margin = float(wall_width)
+    lone_max = 4.0 * wall_width
+    neighbour_gap = 2.5 * wall_width
+
+    rooms = [room if room.is_valid else room.buffer(0) for room in polygons]
+    interior = []
+    for i, s in enumerate(segments):
+        if (s.end - s.start) > max_len or (s.end - s.start) <= 0:
+            continue
+        line = s.line()
+        for room in rooms:
+            if not room.is_empty and room.contains(line):
+                clearance = room.boundary.distance(line)
+                if clearance == clearance and clearance >= margin:   # NaN-safe
+                    interior.append(i)
+                break
+
+    def bounds(s: WallSegment):
+        half = max(1.0, s.thickness / 2.0)
+        if s.orientation == "horizontal":
+            return s.start, s.axis - half, s.end, s.axis + half
+        return s.axis - half, s.start, s.axis + half, s.end
+
+    def near(a: WallSegment, b: WallSegment) -> bool:
+        ax0, ay0, ax1, ay1 = bounds(a)
+        bx0, by0, bx1, by1 = bounds(b)
+        dx = max(0.0, max(ax0, bx0) - min(ax1, bx1))
+        dy = max(0.0, max(ay0, by0) - min(ay1, by1))
+        return max(dx, dy) <= neighbour_gap
+
+    hidden = set()
+    for i in interior:
+        s = segments[i]
+        clustered = any(j != i and near(s, segments[j]) for j in interior)
+        if clustered or (s.end - s.start) <= lone_max:
+            hidden.add(i)
+
+    # a label's leading word often welds onto the partition beside it and traces
+    # as a short T-stub — boundary-touching, so the interior test spares it. It
+    # convicts itself by lying ON THE SAME TEXT LINE as fragments already hidden:
+    # a real door-jamb stub never shares its axis with mid-room label residue.
+    if hidden:
+        for i, s in enumerate(segments):
+            if i in hidden or (s.end - s.start) > max_len:
+                continue
+            on_text_line = any(
+                segments[j].orientation == s.orientation
+                and abs(segments[j].axis - s.axis) <= wall_width
+                and (max(s.start, segments[j].start)
+                     - min(s.end, segments[j].end)) <= 6.0 * wall_width
+                for j in hidden
+            )
+            if on_text_line:
+                hidden.add(i)
+    return [s for i, s in enumerate(segments) if i not in hidden]
+
+
 # ---- plan + room-graph assembly ----------------------------------------------------
 
 def _rooms_from_polygons(polygons) -> list[Room]:
@@ -1423,6 +1496,7 @@ def trace_linework(png: bytes) -> LineworkTrace:
                                             extra=jamb_stubs + window_fills)
     post, post_stats = postprocess_walls(bridged, wall_width, dark)
     polygons = polygonize_rooms(post, gray.shape)
+    shown = drop_room_interior_fragments(post, polygons, wall_width)
 
     rooms = _rooms_from_polygons(polygons)
     edges = _door_edges(doors, polygons, rooms, wall_width)
@@ -1448,12 +1522,13 @@ def trace_linework(png: bytes) -> LineworkTrace:
         postprocess=post_stats,
         rooms_closed=len(rooms),
         room_scale_rooms=sum(1 for p in polygons if p.area <= room_max_area),
+        label_fragments_hidden=len(post) - len(shown),
         door_edges=dict(
             interior=sum(1 for e in edges if "exterior" not in (e.room_a, e.room_b)),
             exterior=sum(1 for e in edges if "exterior" in (e.room_a, e.room_b)),
         ),
     )
-    artifacts = _render_artifacts(src_bgr, gray.shape, walls, bridged, post, doors,
+    artifacts = _render_artifacts(src_bgr, gray.shape, walls, bridged, shown, doors,
                                   polygons, wall_width)
     return LineworkTrace(plan=plan, room_graph=room_graph,
                          diagnostics=diagnostics, artifacts=artifacts)
