@@ -153,18 +153,29 @@ def type_rooms(png: bytes, plan, program: dict) -> dict[str, RoomTypeGuess]:
         if not poly.is_valid:
             poly = poly.buffer(0)
         rooms.append((room.id, poly))
+    # Room.polygon stores exterior rings only — a corridor that WRAPS other rooms
+    # "contains" their labels too. Smallest containing room wins, so scan small→large.
+    rooms.sort(key=lambda item: item[1].area if not item[1].is_empty else float("inf"))
 
     per_room: dict[str, list[tuple[float, np.ndarray, str]]] = {}
     for quad in [piece for q in quads for piece in _split_wide_quad(q)]:
-        cx, cy = float(quad[:, 0].mean()), float(quad[:, 1].mean())
-        center = Point(cx, cy)
+        vertices = quad.reshape((4, 2)).astype(np.float64)   # [bl, tl, tr, br]
+        bl, tl, tr, br = vertices
+        # a label drawn near a small room's ceiling pokes out of the traced
+        # polygon into the wall band — its BOTTOM edge is still the room's;
+        # anchor there first, then the centre, then the nearest room within
+        # two label heights
+        bottom_center = Point(*((bl + br) / 2.0 - (0.0, 1.0)))
+        center = Point(float(quad[:, 0].mean()), float(quad[:, 1].mean()))
         owner = next((rid for rid, poly in rooms
-                      if not poly.is_empty and poly.contains(center)), None)
+                      if not poly.is_empty and poly.contains(bottom_center)), None)
         if owner is None:
-            # tiny rooms: the label overflows its room polygon — take the nearest
-            # room within one label height
-            reach = max(8.0, float(quad[:, 1].max() - quad[:, 1].min()))
-            near = [(poly.distance(center), rid) for rid, poly in rooms if not poly.is_empty]
+            owner = next((rid for rid, poly in rooms
+                          if not poly.is_empty and poly.contains(center)), None)
+        if owner is None:
+            reach = 2.0 * max(8.0, float(quad[:, 1].max() - quad[:, 1].min()))
+            near = [(poly.distance(bottom_center), rid)
+                    for rid, poly in rooms if not poly.is_empty]
             distance, rid = min(near, default=(None, None))
             if distance is None or distance > reach:
                 continue
@@ -177,7 +188,7 @@ def type_rooms(png: bytes, plan, program: dict) -> dict[str, RoomTypeGuess]:
             alt = _recognize(net, image, rotated)
             if len(alt) > len(text):
                 text = alt
-        per_room.setdefault(owner, []).append((cy, quad, text))
+        per_room.setdefault(owner, []).append((float(center.y), quad, text))
 
     guesses: dict[str, RoomTypeGuess] = {}
     for rid, entries in per_room.items():

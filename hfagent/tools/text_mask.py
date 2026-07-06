@@ -33,23 +33,16 @@ _INPUT_SCALE = 1.0 / 255.0 / 0.226
 _UPSCALE_BELOW = 1024
 
 
-def detect_label_quads(gray: np.ndarray) -> list[np.ndarray]:
-    """Text-region quads (int32, image coordinates); [] when no model is present."""
-    if not MODEL_PATH.exists():
-        return []
-    height, width = gray.shape[:2]
-    scale = 2.0 if min(height, width) < _UPSCALE_BELOW else 1.0
+def _detect_at_scale(bgr: np.ndarray, scale: float) -> list[np.ndarray]:
+    height, width = bgr.shape[:2]
     net_w = max(32, int(round(width * scale / 32)) * 32)
     net_h = max(32, int(round(height * scale / 32)) * 32)
-
     detector = cv2.dnn_TextDetectionModel_DB(cv2.dnn.readNet(str(MODEL_PATH)))
     detector.setBinaryThreshold(_BINARY_THRESHOLD)
     detector.setPolygonThreshold(_POLYGON_THRESHOLD)
     detector.setUnclipRatio(_UNCLIP_RATIO)
     detector.setMaxCandidates(_MAX_CANDIDATES)
     detector.setInputParams(_INPUT_SCALE, (net_w, net_h), _INPUT_MEAN, False)
-
-    bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR) if gray.ndim == 2 else gray
     quads, _confidences = detector.detect(cv2.resize(bgr, (net_w, net_h)))
     sx, sy = width / net_w, height / net_h
     out = []
@@ -59,3 +52,35 @@ def detect_label_quads(gray: np.ndarray) -> list[np.ndarray]:
         pts[:, 1] *= sy
         out.append(pts.astype(np.int32))
     return out
+
+
+def detect_label_quads(gray: np.ndarray) -> list[np.ndarray]:
+    """Text-region quads (int32, image coordinates); [] when no model is present.
+
+    Detection runs at TWO scales: the base scale tuned for normal label sizes
+    (2x for 1K-era drawings whose ~7 px text is below the detector's comfort
+    zone) and additionally at half of it — some drawings letter their rooms in
+    GIANT fonts that the detector overlooks at full resolution but reads fine
+    once shrunk. Near-duplicate quads across scales are merged (larger wins).
+    """
+    if not MODEL_PATH.exists():
+        return []
+    height, width = gray.shape[:2]
+    bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR) if gray.ndim == 2 else gray
+    base = 2.0 if min(height, width) < _UPSCALE_BELOW else 1.0
+    precise = _detect_at_scale(bgr, base)
+    kept: list[np.ndarray] = list(precise)
+    # half-scale quads only fill true blind spots: keep one when it overlaps NO
+    # precise quad at all (giant fonts detect only when shrunk; everything the
+    # base scale saw stays authoritative)
+    for quad in _detect_at_scale(bgr, base * 0.5):
+        qx0, qy0 = float(quad[:, 0].min()), float(quad[:, 1].min())
+        qx1, qy1 = float(quad[:, 0].max()), float(quad[:, 1].max())
+        overlaps = any(
+            qx0 < float(k[:, 0].max()) and qx1 > float(k[:, 0].min())
+            and qy0 < float(k[:, 1].max()) and qy1 > float(k[:, 1].min())
+            for k in precise
+        )
+        if not overlaps:
+            kept.append(quad)
+    return kept
