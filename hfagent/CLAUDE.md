@@ -65,9 +65,10 @@ block with its own `text_model` / `image_model` / `boundary`; the active one is
   snap, ink-cored pier fill, whiskers dropped) and polygonizes the closed rooms into a
   px-unit `Plan` (ids `r1..rN`). The TRACE itself reads no text; a separate step
   (`tools/room_typing.type_rooms`) then reads the label drawn inside each room — local
-  OCR (PP-OCRv3 det + CRNN rec, optional models in `data/models/`, graceful no-op when
-  absent) matched against the PROGRAM's closed room-type vocabulary — and fills
-  `Room.type`/`Room.name` (best-effort; unreadable rooms stay `"unknown"`). Wall ACCEPTANCE is thickness-agnostic — image models
+  OCR (PP-OCRv3 det; rec = PP-OCRv4 mobile via onnxruntime with CRNN/cv2.dnn fallback;
+  optional models in `data/models/`, graceful no-op when absent) matched against the
+  PROGRAM's closed room-type vocabulary — and fills `Room.type`/`Room.name`
+  (best-effort; unreadable rooms stay `"unknown"`). Wall ACCEPTANCE is thickness-agnostic — image models
   draw fat perimeter bands over thin partitions in one drawing, so runs are accepted from
   a small absolute floor upward (wall-network anchoring drops label text) and `wall_width`
   (the scale anchor for door/postprocess factors) is the MEDIAN of the accepted runs' own

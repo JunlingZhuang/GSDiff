@@ -27,7 +27,9 @@ from shapely.geometry import Point, Polygon as ShapelyPolygon
 
 from hfagent.tools.text_mask import detect_label_quads
 
-RECOGNITION_MODEL_PATH = Path(__file__).resolve().parents[1] / "data" / "models" / "text_recognition_CRNN_EN.onnx"
+_MODELS_DIR = Path(__file__).resolve().parents[1] / "data" / "models"
+PPOCR_REC_MODEL_PATH = _MODELS_DIR / "en_PP-OCRv4_rec_mobile.onnx"
+RECOGNITION_MODEL_PATH = _MODELS_DIR / "text_recognition_CRNN_EN.onnx"
 
 _CHARSET = "0123456789abcdefghijklmnopqrstuvwxyz"
 _INPUT_SIZE = (100, 32)
@@ -47,31 +49,91 @@ class RoomTypeGuess:
         return f"{self.type}_{self.instance}" if self.instance is not None else self.type
 
 
-def _recognize_window(net, gray: np.ndarray, vertices: np.ndarray) -> str:
-    """CRNN read of one rectified window (official opencv_zoo pre/postprocess)."""
-    target = np.array([[0, _INPUT_SIZE[1] - 1], [0, 0],
-                       [_INPUT_SIZE[0] - 1, 0],
-                       [_INPUT_SIZE[0] - 1, _INPUT_SIZE[1] - 1]], dtype=np.float32)
-    matrix = cv2.getPerspectiveTransform(vertices.astype(np.float32), target)
-    crop = cv2.warpPerspective(gray, matrix, _INPUT_SIZE)
-    blob = cv2.dnn.blobFromImage(crop, size=_INPUT_SIZE, mean=127.5, scalefactor=1 / 127.5)
-    net.setInput(blob)
-    out = net.forward()
-    raw = ""
-    for i in range(out.shape[0]):
-        c = int(np.argmax(out[i][0]))
-        raw += _CHARSET[c - 1] if c != 0 else "-"
-    chars = []
-    for i, ch in enumerate(raw):
-        if ch != "-" and not (i > 0 and ch == raw[i - 1]):
-            chars.append(ch)
-    return "".join(chars)
+class _PpocrRecognizer:
+    """PP-OCRv4 mobile EN recogniser (onnxruntime CPU) — the primary engine.
+
+    SVTR-based, dynamic input width, 95-char charset (upper/lower/digits/
+    punctuation) embedded in the ONNX metadata; markedly better on digits and
+    small glyphs than the CRNN fallback, which matters for instance numbers.
+    """
+
+    natural_aspect = 320.0 / 48.0
+
+    def __init__(self):
+        import onnxruntime as ort
+        self._session = ort.InferenceSession(
+            str(PPOCR_REC_MODEL_PATH), providers=["CPUExecutionProvider"])
+        meta = self._session.get_modelmeta().custom_metadata_map
+        self._charset = meta["character"].splitlines()
+        self._input = self._session.get_inputs()[0].name
+
+    def read(self, gray: np.ndarray, vertices: np.ndarray) -> str:
+        bl, tl, tr, br = vertices
+        w = max(float(np.linalg.norm(tr - tl)), 1.0)
+        h = max(float(np.linalg.norm(tl - bl)), 1.0)
+        out_w = int(np.clip(round(48.0 * w / h), 16, 320))
+        target = np.array([[0, 47], [0, 0], [out_w - 1, 0], [out_w - 1, 47]],
+                          dtype=np.float32)
+        matrix = cv2.getPerspectiveTransform(vertices.astype(np.float32), target)
+        crop = cv2.warpPerspective(gray, matrix, (out_w, 48))
+        blob = (crop.astype(np.float32) / 255.0 - 0.5) / 0.5
+        blob = np.repeat(blob[None, None, :, :], 3, axis=1)
+        out = self._session.run(None, {self._input: blob})[0][0]   # T x classes
+        indices = out.argmax(axis=1)
+        chars, prev = [], 0
+        for idx in indices:
+            if idx != 0 and idx != prev:
+                pos = int(idx) - 1
+                chars.append(self._charset[pos] if pos < len(self._charset) else " ")
+            prev = idx
+        return "".join(chars).strip()
 
 
-def _split_wide_quad(quad: np.ndarray) -> list[np.ndarray]:
+class _CrnnRecognizer:
+    """CRNN_EN fallback (cv2.dnn, official opencv_zoo pre/postprocess)."""
+
+    natural_aspect = _INPUT_SIZE[0] / _INPUT_SIZE[1]
+
+    def __init__(self):
+        self._net = cv2.dnn.readNet(str(RECOGNITION_MODEL_PATH))
+
+    def read(self, gray: np.ndarray, vertices: np.ndarray) -> str:
+        target = np.array([[0, _INPUT_SIZE[1] - 1], [0, 0],
+                           [_INPUT_SIZE[0] - 1, 0],
+                           [_INPUT_SIZE[0] - 1, _INPUT_SIZE[1] - 1]], dtype=np.float32)
+        matrix = cv2.getPerspectiveTransform(vertices.astype(np.float32), target)
+        crop = cv2.warpPerspective(gray, matrix, _INPUT_SIZE)
+        blob = cv2.dnn.blobFromImage(crop, size=_INPUT_SIZE, mean=127.5,
+                                     scalefactor=1 / 127.5)
+        self._net.setInput(blob)
+        out = self._net.forward()
+        raw = ""
+        for i in range(out.shape[0]):
+            c = int(np.argmax(out[i][0]))
+            raw += _CHARSET[c - 1] if c != 0 else "-"
+        chars = []
+        for i, ch in enumerate(raw):
+            if ch != "-" and not (i > 0 and ch == raw[i - 1]):
+                chars.append(ch)
+        return "".join(chars)
+
+
+def _make_recognizer():
+    """Best available engine: PP-OCRv4 (onnxruntime), else CRNN, else None."""
+    if PPOCR_REC_MODEL_PATH.exists():
+        try:
+            return _PpocrRecognizer()
+        except ImportError:
+            pass
+    if RECOGNITION_MODEL_PATH.exists():
+        return _CrnnRecognizer()
+    return None
+
+
+def _split_wide_quad(quad: np.ndarray, natural_aspect: float) -> list[np.ndarray]:
     """Split a wide text quad into overlapping ~window-aspect chunks.
 
-    Two reasons: the CRNN window is a fixed 100x32 (~3:1) and squashes a whole
+    Two reasons: the recogniser's window has a fixed aspect and squashes a whole
     "patient_room_12" quad (aspect ~18:1) into mush; and with thin partitions
     the detector sometimes merges ADJACENT rooms' labels into one quad — chunk
     sub-quads carry their own positions, so each chunk lands in its own room
@@ -82,11 +144,10 @@ def _split_wide_quad(quad: np.ndarray) -> list[np.ndarray]:
     bl, tl, tr, br = vertices
     width = max(float(np.linalg.norm(tr - tl)), 1.0)
     height = max(float(np.linalg.norm(tl - bl)), 1.0)
-    natural = _INPUT_SIZE[0] / _INPUT_SIZE[1]
     aspect = width / height
-    if aspect <= natural * 1.6:
+    if aspect <= natural_aspect * 1.6:
         return [quad]
-    chunks = int(np.ceil(aspect / natural))
+    chunks = int(np.ceil(aspect / natural_aspect))
     step = 1.0 / chunks
     overlap = step * 0.18
     out = []
@@ -96,11 +157,6 @@ def _split_wide_quad(quad: np.ndarray) -> list[np.ndarray]:
         out.append(np.array([bl + (br - bl) * f0, tl + (tr - tl) * f0,
                              tl + (tr - tl) * f1, bl + (br - bl) * f1], dtype=np.int32))
     return out
-
-
-def _recognize(net, gray: np.ndarray, quad: np.ndarray) -> str:
-    """CRNN read of one (window-sized) quad."""
-    return _recognize_window(net, gray, quad.reshape((4, 2)).astype(np.float64))
 
 
 def match_program_type(text: str, vocabulary: list[str]) -> tuple[str | None, int | None, float]:
@@ -136,7 +192,8 @@ def type_rooms(png: bytes, plan, program: dict) -> dict[str, RoomTypeGuess]:
     is tried upright and rotated (corridor labels run vertically), and the
     highest vocabulary score wins the room.
     """
-    if not RECOGNITION_MODEL_PATH.exists():
+    recognizer = _make_recognizer()
+    if recognizer is None:
         return {}
     image = cv2.imdecode(np.frombuffer(png, np.uint8), cv2.IMREAD_GRAYSCALE)
     if image is None:
@@ -144,7 +201,6 @@ def type_rooms(png: bytes, plan, program: dict) -> dict[str, RoomTypeGuess]:
     quads = detect_label_quads(image)
     if not quads:
         return {}
-    net = cv2.dnn.readNet(str(RECOGNITION_MODEL_PATH))
 
     vocabulary = [r["type"] for r in program.get("rooms", [])]
     rooms = []
@@ -157,8 +213,12 @@ def type_rooms(png: bytes, plan, program: dict) -> dict[str, RoomTypeGuess]:
     # "contains" their labels too. Smallest containing room wins, so scan small→large.
     rooms.sort(key=lambda item: item[1].area if not item[1].is_empty else float("inf"))
 
+    # chunk granularity is SPATIAL (each chunk must land inside one room), not
+    # an engine property — keep it fine even for wide-window recognisers
+    chunk_aspect = min(recognizer.natural_aspect, _INPUT_SIZE[0] / _INPUT_SIZE[1])
     per_room: dict[str, list[tuple[float, np.ndarray, str]]] = {}
-    for quad in [piece for q in quads for piece in _split_wide_quad(q)]:
+    for quad in [piece for q in quads
+                 for piece in _split_wide_quad(q, chunk_aspect)]:
         vertices = quad.reshape((4, 2)).astype(np.float64)   # [bl, tl, tr, br]
         bl, tl, tr, br = vertices
         # a label drawn near a small room's ceiling pokes out of the traced
@@ -182,14 +242,13 @@ def type_rooms(png: bytes, plan, program: dict) -> dict[str, RoomTypeGuess]:
             owner = rid
         w = float(quad[:, 0].max() - quad[:, 0].min())
         h = float(quad[:, 1].max() - quad[:, 1].min())
-        readings = [_recognize(net, image, quad)]
+        readings = [recognizer.read(image, vertices)]
         if h > 1.4 * w:
             # vertical label (rotated corridor text): read at every vertex
             # rotation and keep whatever the vocabulary recognises best
             for roll in (1, 2, 3):
-                rotated = np.array(np.roll(quad.reshape(4, 2), roll, axis=0),
-                                   dtype=np.int32)
-                readings.append(_recognize(net, image, rotated))
+                rotated = np.roll(vertices, roll, axis=0)
+                readings.append(recognizer.read(image, rotated))
         text = max(readings,
                    key=lambda s: (match_program_type(s, vocabulary)[2], len(s)))
         per_room.setdefault(owner, []).append((float(center.y), quad, text))
