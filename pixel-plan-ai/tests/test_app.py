@@ -661,5 +661,95 @@ class AgentGenerationTests(unittest.TestCase):
         self.assertEqual(len(result["iterations"]), 5)
 
 
+class ImageModeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.samples = json.loads((ROOT / "data" / "samples.json").read_text(encoding="utf-8"))
+
+    def test_reference_image_normalization_accepts_and_rejects(self) -> None:
+        self.assertIsNone(service.normalize_reference_image(None))
+        self.assertIsNone(service.normalize_reference_image(""))
+        normalized = service.normalize_reference_image({"mime": "image/png", "data": "aGVsbG8="})
+        self.assertEqual(normalized, {"mime": "image/png", "data": "aGVsbG8="})
+        with self.assertRaises(ValueError):
+            service.normalize_reference_image("not-an-object")
+        with self.assertRaises(ValueError):
+            service.normalize_reference_image({"mime": "text/plain", "data": "aGVsbG8="})
+        with self.assertRaises(ValueError):
+            service.normalize_reference_image({"mime": "image/png", "data": ""})
+
+    def test_prompt_swaps_family_guidance_for_transcription_when_image_attached(self) -> None:
+        program = normalize_program(self.samples["clinic-small"])
+        options = {"width": 64, "height": 40, "meters_per_cell": 0.25}
+        plain = build_prompt(program, "", options, None)
+        with_image = build_prompt(program, "", options, None, with_reference_image=True)
+        self.assertNotIn("TRANSCRIBE", plain)
+        self.assertIn("TRANSCRIBE that drawing onto the cell grid", with_image)
+        self.assertIn("Do not mirror or rotate the layout", with_image)
+
+    def test_generate_passes_reference_image_to_every_gemini_attempt(self) -> None:
+        model_output = {"code": "ok", "strategy": "s", "assumptions": [], "model": "quality-model"}
+        execution_output = {
+            "code": "ok",
+            "plan": {},
+            "validation": {"score": 95, "checks": [], "issues": []},
+        }
+        reference = {"mime": "image/png", "data": "aGVsbG8="}
+        with (
+            patch.dict(os.environ, {"GEMINI_API_KEY": "test-key", "GEMINI_MODEL": "quality-model"}),
+            patch.object(service, "generate_gemini_code", return_value=model_output) as generate_mock,
+            patch.object(service, "execute_and_validate", return_value=execution_output),
+        ):
+            service.generate_plan(
+                {
+                    "program": self.samples["clinic-small"],
+                    "mode": "auto",
+                    "options": {"width": 64, "height": 40},
+                    "reference_image": reference,
+                }
+            )
+        self.assertEqual(generate_mock.call_args.kwargs["reference_image"], reference)
+
+    def test_generate_without_reference_image_stays_backward_compatible(self) -> None:
+        model_output = {"code": "ok", "strategy": "s", "assumptions": [], "model": "quality-model"}
+        execution_output = {
+            "code": "ok",
+            "plan": {},
+            "validation": {"score": 95, "checks": [], "issues": []},
+        }
+        with (
+            patch.dict(os.environ, {"GEMINI_API_KEY": "test-key", "GEMINI_MODEL": "quality-model"}),
+            patch.object(service, "generate_gemini_code", return_value=model_output) as generate_mock,
+            patch.object(service, "execute_and_validate", return_value=execution_output),
+        ):
+            result = service.generate_plan(
+                {
+                    "program": self.samples["clinic-small"],
+                    "mode": "auto",
+                    "options": {"width": 64, "height": 40},
+                }
+            )
+        self.assertIsNone(generate_mock.call_args.kwargs["reference_image"])
+        self.assertTrue(result["accepted"])
+
+    def test_images_action_returns_candidates_and_clamps_count(self) -> None:
+        drawings = [{"mime": "image/png", "data": "aW1n"}] * 4
+        with (
+            patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}),
+            patch.object(service, "generate_plan_images", return_value=drawings) as images_mock,
+        ):
+            result = service.generate_images_action(
+                {"program": self.samples["clinic-small"], "count": 99}
+            )
+        self.assertEqual(images_mock.call_args.args[2], 4)
+        self.assertEqual(result["count"], 4)
+        self.assertEqual(result["images"], drawings)
+
+    def test_dispatch_routes_images_job_kind(self) -> None:
+        with patch.object(service, "generate_images_action", return_value={"images": []}) as action_mock:
+            service.dispatch_job({"job_kind": "images", "program": {}})
+        action_mock.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

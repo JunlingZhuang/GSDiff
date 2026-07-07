@@ -48,6 +48,10 @@ const ui = {
     reviseCode: element("reviseCode"),
     revision: element("revisionInput"),
     inspection: element("inspectionSummary"),
+    imagePanel: element("imagePanel"),
+    drawCandidates: element("drawCandidates"),
+    candidateStatus: element("candidateStatus"),
+    candidateStrip: element("candidateStrip"),
 };
 const state = {
     samples: {},
@@ -57,6 +61,10 @@ const state = {
     generationTimer: null,
     generationStartedAt: 0,
     previewPlan: null,
+    mode: "program",
+    candidates: [],
+    selectedCandidate: -1,
+    candidatesBusy: false,
 };
 function prettyType(value) {
     return value.replaceAll("_", " ").replace(/\b\w/g, (character) => character.toUpperCase());
@@ -251,6 +259,9 @@ async function requestAgentAction(action) {
                 current_code: action === "fix" || action === "revise" ? ui.code.value : undefined,
                 mode: "auto",
                 options: { width: Number(ui.width.value), height: Number(ui.height.value) },
+                reference_image: action === "generate" && state.mode === "image" && state.selectedCandidate >= 0
+                    ? state.candidates[state.selectedCandidate]
+                    : undefined,
             }),
         });
         const payload = (await response.json());
@@ -296,7 +307,79 @@ async function requestAgentAction(action) {
     }
 }
 async function generate() {
+    if (state.mode === "image" && state.selectedCandidate < 0) {
+        ui.status.className = "request-status error";
+        ui.status.textContent = "Image mode: draw candidates and pick one drawing first.";
+        return;
+    }
     await requestAgentAction("generate");
+}
+function setMode(mode) {
+    state.mode = mode;
+    document.querySelectorAll(".mode-tab").forEach((tab) => {
+        tab.classList.toggle("active", tab.dataset.mode === mode);
+    });
+    ui.imagePanel.hidden = mode !== "image";
+    if (mode === "image") {
+        ui.generateHint.textContent = state.selectedCandidate >= 0
+            ? "transcribe the selected drawing"
+            : "draw candidates, then pick one";
+    }
+    else {
+        ui.generateHint.textContent = state.result ? "create another candidate" : "write code · run · inspect · repair";
+    }
+}
+function renderCandidates() {
+    ui.candidateStrip.innerHTML = "";
+    state.candidates.forEach((candidate, index) => {
+        const img = document.createElement("img");
+        img.src = `data:${candidate.mime};base64,${candidate.data}`;
+        img.alt = `Candidate plan ${index + 1}`;
+        img.classList.toggle("selected", index === state.selectedCandidate);
+        img.addEventListener("click", () => {
+            state.selectedCandidate = index;
+            renderCandidates();
+            ui.candidateStatus.textContent = `Candidate ${index + 1} selected · Generate Plan transcribes it.`;
+            ui.generateHint.textContent = "transcribe the selected drawing";
+        });
+        ui.candidateStrip.appendChild(img);
+    });
+}
+async function drawCandidates() {
+    if (state.candidatesBusy || state.activeRequestId)
+        return;
+    const program = validateEditor();
+    if (!program)
+        return;
+    state.candidatesBusy = true;
+    state.candidates = [];
+    state.selectedCandidate = -1;
+    renderCandidates();
+    ui.drawCandidates.disabled = true;
+    ui.drawCandidates.textContent = "DRAWING CANDIDATES…";
+    ui.candidateStatus.textContent = "Gemini is drawing three schematic plans (about half a minute)…";
+    try {
+        const response = await fetch("/api/images", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ request_id: crypto.randomUUID(), program, count: 3 }),
+        });
+        const payload = (await response.json());
+        if (!response.ok || payload.error || !payload.images?.length) {
+            throw new Error(payload.error ?? "The image model returned no drawings.");
+        }
+        state.candidates = payload.images;
+        renderCandidates();
+        ui.candidateStatus.textContent = `${payload.images.length} drawings ready · click one to select it.`;
+    }
+    catch (error) {
+        ui.candidateStatus.textContent = error instanceof Error ? error.message : String(error);
+    }
+    finally {
+        state.candidatesBusy = false;
+        ui.drawCandidates.disabled = false;
+        ui.drawCandidates.textContent = "DRAW 3 CANDIDATE PLANS";
+    }
 }
 async function stopGeneration() {
     const requestId = state.activeRequestId;
@@ -577,6 +660,16 @@ element("formatJson").addEventListener("click", () => {
         ui.editor.value = JSON.stringify(value, null, 2);
 });
 ui.generate.addEventListener("click", () => { void generate(); });
+document.querySelectorAll(".mode-tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+        if (tab.disabled)
+            return;
+        const mode = tab.dataset.mode;
+        if (mode === "program" || mode === "image")
+            setMode(mode);
+    });
+});
+ui.drawCandidates.addEventListener("click", () => { void drawCandidates(); });
 ui.stopGeneration.addEventListener("click", () => { void stopGeneration(); });
 ui.runCode.addEventListener("click", () => { void requestAgentAction("run"); });
 ui.inspectCode.addEventListener("click", () => { void requestAgentAction("inspect"); });

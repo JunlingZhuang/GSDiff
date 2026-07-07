@@ -202,7 +202,16 @@ const ui = {
   reviseCode: element<HTMLButtonElement>("reviseCode"),
   revision: element<HTMLTextAreaElement>("revisionInput"),
   inspection: element<HTMLDivElement>("inspectionSummary"),
+  imagePanel: element<HTMLDivElement>("imagePanel"),
+  drawCandidates: element<HTMLButtonElement>("drawCandidates"),
+  candidateStatus: element<HTMLDivElement>("candidateStatus"),
+  candidateStrip: element<HTMLDivElement>("candidateStrip"),
 };
+
+interface CandidateImage {
+  mime: string;
+  data: string;
+}
 
 const state: {
   samples: Samples;
@@ -212,6 +221,10 @@ const state: {
   generationTimer: number | null;
   generationStartedAt: number;
   previewPlan: Plan | null;
+  mode: "program" | "image";
+  candidates: CandidateImage[];
+  selectedCandidate: number;
+  candidatesBusy: boolean;
 } = {
   samples: {},
   result: null,
@@ -220,6 +233,10 @@ const state: {
   generationTimer: null,
   generationStartedAt: 0,
   previewPlan: null,
+  mode: "program",
+  candidates: [],
+  selectedCandidate: -1,
+  candidatesBusy: false,
 };
 
 function prettyType(value: string): string {
@@ -420,6 +437,9 @@ async function requestAgentAction(action: AgentAction): Promise<void> {
         current_code: action === "fix" || action === "revise" ? ui.code.value : undefined,
         mode: "auto",
         options: { width: Number(ui.width.value), height: Number(ui.height.value) },
+        reference_image: action === "generate" && state.mode === "image" && state.selectedCandidate >= 0
+          ? state.candidates[state.selectedCandidate]
+          : undefined,
       }),
     });
     const payload = (await response.json()) as GenerationResult | { error: string };
@@ -459,7 +479,77 @@ async function requestAgentAction(action: AgentAction): Promise<void> {
 }
 
 async function generate(): Promise<void> {
+  if (state.mode === "image" && state.selectedCandidate < 0) {
+    ui.status.className = "request-status error";
+    ui.status.textContent = "Image mode: draw candidates and pick one drawing first.";
+    return;
+  }
   await requestAgentAction("generate");
+}
+
+function setMode(mode: "program" | "image"): void {
+  state.mode = mode;
+  document.querySelectorAll<HTMLButtonElement>(".mode-tab").forEach((tab) => {
+    tab.classList.toggle("active", tab.dataset.mode === mode);
+  });
+  ui.imagePanel.hidden = mode !== "image";
+  if (mode === "image") {
+    ui.generateHint.textContent = state.selectedCandidate >= 0
+      ? "transcribe the selected drawing"
+      : "draw candidates, then pick one";
+  } else {
+    ui.generateHint.textContent = state.result ? "create another candidate" : "write code · run · inspect · repair";
+  }
+}
+
+function renderCandidates(): void {
+  ui.candidateStrip.innerHTML = "";
+  state.candidates.forEach((candidate, index) => {
+    const img = document.createElement("img");
+    img.src = `data:${candidate.mime};base64,${candidate.data}`;
+    img.alt = `Candidate plan ${index + 1}`;
+    img.classList.toggle("selected", index === state.selectedCandidate);
+    img.addEventListener("click", () => {
+      state.selectedCandidate = index;
+      renderCandidates();
+      ui.candidateStatus.textContent = `Candidate ${index + 1} selected · Generate Plan transcribes it.`;
+      ui.generateHint.textContent = "transcribe the selected drawing";
+    });
+    ui.candidateStrip.appendChild(img);
+  });
+}
+
+async function drawCandidates(): Promise<void> {
+  if (state.candidatesBusy || state.activeRequestId) return;
+  const program = validateEditor();
+  if (!program) return;
+  state.candidatesBusy = true;
+  state.candidates = [];
+  state.selectedCandidate = -1;
+  renderCandidates();
+  ui.drawCandidates.disabled = true;
+  ui.drawCandidates.textContent = "DRAWING CANDIDATES…";
+  ui.candidateStatus.textContent = "Gemini is drawing three schematic plans (about half a minute)…";
+  try {
+    const response = await fetch("/api/images", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ request_id: crypto.randomUUID(), program, count: 3 }),
+    });
+    const payload = (await response.json()) as { images?: CandidateImage[]; error?: string };
+    if (!response.ok || payload.error || !payload.images?.length) {
+      throw new Error(payload.error ?? "The image model returned no drawings.");
+    }
+    state.candidates = payload.images;
+    renderCandidates();
+    ui.candidateStatus.textContent = `${payload.images.length} drawings ready · click one to select it.`;
+  } catch (error) {
+    ui.candidateStatus.textContent = error instanceof Error ? error.message : String(error);
+  } finally {
+    state.candidatesBusy = false;
+    ui.drawCandidates.disabled = false;
+    ui.drawCandidates.textContent = "DRAW 3 CANDIDATE PLANS";
+  }
 }
 
 async function stopGeneration(): Promise<void> {
@@ -742,6 +832,14 @@ element<HTMLButtonElement>("formatJson").addEventListener("click", () => {
   if (value) ui.editor.value = JSON.stringify(value, null, 2);
 });
 ui.generate.addEventListener("click", () => { void generate(); });
+document.querySelectorAll<HTMLButtonElement>(".mode-tab").forEach((tab) => {
+  tab.addEventListener("click", () => {
+    if (tab.disabled) return;
+    const mode = tab.dataset.mode;
+    if (mode === "program" || mode === "image") setMode(mode);
+  });
+});
+ui.drawCandidates.addEventListener("click", () => { void drawCandidates(); });
 ui.stopGeneration.addEventListener("click", () => { void stopGeneration(); });
 ui.runCode.addEventListener("click", () => { void requestAgentAction("run"); });
 ui.inspectCode.addEventListener("click", () => { void requestAgentAction("inspect"); });

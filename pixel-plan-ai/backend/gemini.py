@@ -131,15 +131,27 @@ def output_schema() -> dict[str, Any]:
     }
 
 
+REFERENCE_IMAGE_GUIDANCE = """A reference floor-plan DRAWING of this exact program is attached.
+Your program must TRANSCRIBE that drawing onto the cell grid, not invent a new design:
+- Orientation: grid row y=0 is the TOP edge of the drawing and y grows DOWNWARD; column x=0 is the LEFT edge. Do not mirror or rotate the layout.
+- Reproduce its building massing, wing arrangement, corridor topology and room placement; the grid is a rasterization of THIS drawing at the requested canvas size.
+- The text label inside each drawn room names its program instance; the quarter-circle swing arcs are the doors; place your doors on the same shared boundaries.
+- Keep every room's position and relative proportion close to the drawing. Deviate only where the drawing physically cannot satisfy a validation rule (for example an undersized room), and keep such deviations local.
+- Encode the layout you SEE as data (room rectangles read off the drawing) plus painting loops; do not substitute a generic packing algorithm."""
+
+
 def build_prompt(
     program: dict[str, Any],
     design_request: str,
     options: dict[str, Any],
     repair_context: str | None,
+    with_reference_image: bool = False,
 ) -> str:
     healthcare_rules = rules_for_prompt(program) if uses_healthcare_rules(program) else {}
     pixel_targets = pixel_planning_targets(program, options)
     family_guidance = layout_family_guidance(program)
+    if with_reference_image:
+        family_guidance = REFERENCE_IMAGE_GUIDANCE
     return f"""You are a specialized floor-plan coding agent.
 Read the architectural program, design a spatial strategy, and write a complete executable Python layout algorithm. Work like a coding agent: inspect the previous code and exact executor or validator feedback, revise the implementation, and return the entire corrected program on every attempt.
 Return JSON matching the required response schema.
@@ -244,6 +256,7 @@ def generate_gemini_code(
     options: dict[str, Any],
     repair_context: str | None = None,
     thinking_level: str | None = None,
+    reference_image: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     if not api_key:
         raise ValueError("GEMINI_API_KEY is not configured.")
@@ -269,6 +282,19 @@ def generate_gemini_code(
             raise ValueError("Gemini thinking level must be minimal, low, medium, or high.")
         generation_config["thinkingConfig"] = {"thinkingLevel": normalized_level}
 
+    parts: list[dict[str, Any]] = [{
+        "text": build_prompt(program, design_request, options, repair_context,
+                             with_reference_image=reference_image is not None),
+    }]
+    if reference_image is not None:
+        # the drawing rides along on EVERY attempt, so repairs stay anchored to
+        # the reference design instead of drifting toward a generic layout
+        parts.append({
+            "inlineData": {
+                "mimeType": reference_image["mime"],
+                "data": reference_image["data"],
+            },
+        })
     payload = {
         "systemInstruction": {
             "parts": [{"text": SYSTEM_INSTRUCTION}],
@@ -276,7 +302,7 @@ def generate_gemini_code(
         "contents": [
             {
                 "role": "user",
-                "parts": [{"text": build_prompt(program, design_request, options, repair_context)}],
+                "parts": parts,
             }
         ],
         "generationConfig": generation_config,

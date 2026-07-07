@@ -45,12 +45,26 @@
         </section>
 
         <section class="control-section">
-          <label class="field-label" for="promptInput"><span>03</span> Design brief</label>
+          <span class="field-label"><span>03</span> Generation mode</span>
+          <div id="modeSwitch" class="mode-switch" role="tablist">
+            <button type="button" class="mode-tab active" data-mode="program">PROGRAM</button>
+            <button type="button" class="mode-tab" data-mode="image">FROM IMAGE</button>
+            <button type="button" class="mode-tab" data-mode="trace" disabled title="Coming soon: refine a traced plan">FROM TRACE</button>
+          </div>
+          <div id="imagePanel" class="image-panel" hidden>
+            <button id="drawCandidates" class="text-button" type="button">DRAW 3 CANDIDATE PLANS</button>
+            <div id="candidateStatus" class="field-note">Gemini draws three schematic plans; pick the one to transcribe.</div>
+            <div id="candidateStrip" class="candidate-strip"></div>
+          </div>
+        </section>
+
+        <section class="control-section">
+          <label class="field-label" for="promptInput"><span>04</span> Design brief</label>
           <textarea id="promptInput" class="prompt-input" placeholder="Example: entrance on the west, waiting near entry, patient rooms along the perimeter."></textarea>
         </section>
 
         <section class="control-section">
-          <span class="field-label"><span>04</span> Canvas + engine</span>
+          <span class="field-label"><span>05</span> Canvas + engine</span>
           <div class="compact-grid">
             <label>W<input id="gridWidth" type="number" min="32" max="160" value="96" /></label>
             <label>H<input id="gridHeight" type="number" min="24" max="120" value="64" /></label>
@@ -191,6 +205,6 @@
       <span>PIXEL PLAN AI · CODE-GENERATED SPATIAL STUDIES</span>
       <span>Concept design only — not construction documentation.</span>
     </footer>
-    <script type="module" src="/app.js?v=6"></script>
+    <script type="module" src="/app.js?v=7"></script>
   </body>
 </html>

@@ -7,9 +7,30 @@ from typing import Any
 from code_policy import validate_program_contract
 from gemini import generate_gemini_code
 from job_progress import publish_job_progress
+from plan_image import generate_plan_images
 from program import calculate_scale, normalize_program
 from runtime import execute_pixel_code
 from validator import validate_plan
+
+
+MAX_REFERENCE_IMAGE_BASE64_LENGTH = 8_000_000
+
+
+def normalize_reference_image(value: Any) -> dict[str, str] | None:
+    """Validated ``{mime, data}`` reference drawing, or None when absent."""
+    if value in (None, "", {}):
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("reference_image must be an object with mime and data.")
+    mime = str(value.get("mime", "image/png"))
+    data = str(value.get("data", ""))
+    if not mime.startswith("image/"):
+        raise ValueError("reference_image.mime must be an image mime type.")
+    if not data:
+        raise ValueError("reference_image.data must be base64 image bytes.")
+    if len(data) > MAX_REFERENCE_IMAGE_BASE64_LENGTH:
+        raise ValueError("reference_image exceeds the 8 MB base64 limit.")
+    return {"mime": mime, "data": data}
 
 
 def room_type_from_issue(issue: str) -> str:
@@ -219,6 +240,7 @@ def generate_plan(payload: dict[str, Any]) -> dict[str, Any]:
 
     options = normalize_options(payload.get("options"))
     options["meters_per_cell"] = round(calculate_scale(program, options["width"], options["height"]), 4)
+    reference_image = normalize_reference_image(payload.get("reference_image"))
     mode = str(payload.get("mode", "auto"))
     api_key = os.environ.get("GEMINI_API_KEY", "")
     quality_model = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
@@ -334,6 +356,7 @@ def generate_plan(payload: dict[str, Any]) -> dict[str, Any]:
                 options,
                 agent_context,
                 thinking_level=thinking_level,
+                reference_image=reference_image,
             )
             previous_code = candidate["code"]
             result = execute_and_validate(previous_code, program, enforce_ai_contract=True)
@@ -449,10 +472,28 @@ def generate_plan(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def generate_images_action(payload: dict[str, Any]) -> dict[str, Any]:
+    """Candidate plan drawings for image mode; the user picks one in the UI."""
+    program = normalize_program(payload.get("program"))
+    count = max(1, min(4, int(payload.get("count", 3) or 3)))
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    publish_job_progress(
+        [],
+        phase="images",
+        source="gemini-image",
+        model=os.environ.get("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
+        message=f"Drawing {count} candidate floor plans.",
+    )
+    images = generate_plan_images(api_key, program, count)
+    return {"images": images, "program": program, "count": len(images)}
+
+
 def dispatch_job(payload: dict[str, Any]) -> dict[str, Any]:
     job_kind = str(payload.get("job_kind", "agent"))
     if job_kind == "execute":
         return execute_code_action(payload)
     if job_kind == "agent":
         return generate_plan(payload)
+    if job_kind == "images":
+        return generate_images_action(payload)
     raise ValueError("Unknown job kind.")

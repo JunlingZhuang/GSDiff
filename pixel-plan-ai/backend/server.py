@@ -189,8 +189,9 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
-        if length > 1_000_000:
-            raise ValueError("Request body exceeds 1 MB.")
+        # image mode carries a base64 reference drawing in the generate payload
+        if length > 10_000_000:
+            raise ValueError("Request body exceeds 10 MB.")
         try:
             value = json.loads(self.rfile.read(length) or b"{}")
         except json.JSONDecodeError as error:
@@ -229,12 +230,13 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
-        if path not in {"/api/generate", "/api/execute"}:
+        job_kinds = {"/api/generate": "agent", "/api/execute": "execute", "/api/images": "images"}
+        if path not in job_kinds:
             self.send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
             return
         try:
             payload = self.read_json()
-            payload["job_kind"] = "execute" if path == "/api/execute" else "agent"
+            payload["job_kind"] = job_kinds[path]
             request_id = str(payload.get("request_id") or uuid.uuid4())
             result = run_generation_job(payload, request_id)
             result["generated_at"] = datetime.now(timezone.utc).isoformat()
