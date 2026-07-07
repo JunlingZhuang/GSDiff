@@ -17,7 +17,7 @@ from pathlib import Path
 
 from hfagent.tools.image_parser import cv_parse
 from hfagent.tools.linework_tracer import trace_linework
-from hfagent.tools.room_typing import type_rooms, typing_overlay
+from hfagent.tools.room_typing import program_overview, type_rooms, typing_overlay
 from hfagent.tools.floor_plan_generator import FloorPlanGenerator
 from hfagent.tools.door_placer import place_doors
 from hfagent.tools.plan_fixes import fix_room_counts
@@ -277,6 +277,8 @@ def generate_plan(
                     node.type = typed_by_id.get(node.id, node.type)
                 (work_dir / "typing_overlay.png").write_bytes(
                     typing_overlay(real_png, parsed_plan, guesses))
+                (work_dir / "rooms_program.png").write_bytes(program_overview(
+                    trace.artifacts["rooms_colorful.png"], parsed_plan, program))
                 (work_dir / "typing.json").write_text(json.dumps(
                     {rid: dict(type=g.type, instance=g.instance,
                                score=round(g.score, 3), text=g.text)

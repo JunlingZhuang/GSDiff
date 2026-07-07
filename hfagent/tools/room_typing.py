@@ -209,6 +209,78 @@ def type_rooms(png: bytes, plan, program: dict) -> dict[str, RoomTypeGuess]:
     return guesses
 
 
+def program_overview(rooms_colorful_png: bytes, plan, program: dict | None) -> bytes:
+    """``rooms_colorful`` recoloured by PROGRAM TYPE + room names + colour legend.
+
+    Built on the tracer's rooms_colorful rendering so walls and door gaps stay
+    pixel-identical: each room's own fill colour is repainted with the shared
+    ``ROOM_RGB`` palette colour of its assigned type (untyped rooms go grey),
+    the room's name is written inside it, and a legend strip on the right maps
+    every colour to its type with typed count vs the program's required count.
+    """
+    from hfagent.schema.palette import ROOM_RGB
+
+    unknown_rgb = (205, 205, 205)
+    image = cv2.imdecode(np.frombuffer(rooms_colorful_png, np.uint8), cv2.IMREAD_COLOR)
+    height, width = image.shape[:2]
+
+    for room in plan.rooms:
+        mask = np.zeros((height, width), np.uint8)
+        cv2.fillPoly(mask, [np.array(room.polygon, np.int32).reshape(-1, 1, 2)], 1)
+        inside = image[mask == 1]
+        if inside.size == 0:
+            continue
+        # the room's current fill = dominant non-wall, non-door colour inside it
+        colours, counts = np.unique(inside.reshape(-1, 3), axis=0, return_counts=True)
+        keep = [i for i, c in enumerate(colours)
+                if not (c.max() < 60 or c.min() > 240)]     # skip wall black / door white
+        if not keep:
+            continue
+        fill = colours[keep[int(np.argmax(counts[keep]))]]
+        rgb = ROOM_RGB.get(room.type, unknown_rgb)
+        target = (rgb[2], rgb[1], rgb[0])                    # palette is RGB, cv2 is BGR
+        repaint = (mask == 1) & (np.abs(image.astype(int) - fill).sum(axis=2) <= 30)
+        image[repaint] = target
+
+    for room in plan.rooms:
+        pts = np.array(room.polygon)
+        cx, cy = int(pts[:, 0].mean()), int(pts[:, 1].mean())
+        label = room.name or (room.type if room.type != "unknown" else "?")
+        scale = 0.55 if width > 2000 else 0.45
+        size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, scale, 1)
+        origin = (max(2, cx - size[0] // 2), cy + size[1] // 2)
+        cv2.putText(image, label, origin, cv2.FONT_HERSHEY_SIMPLEX, scale,
+                    (255, 255, 255), 3, cv2.LINE_AA)
+        cv2.putText(image, label, origin, cv2.FONT_HERSHEY_SIMPLEX, scale,
+                    (0, 0, 0), 1, cv2.LINE_AA)
+
+    typed_counts: dict[str, int] = {}
+    for room in plan.rooms:
+        typed_counts[room.type] = typed_counts.get(room.type, 0) + 1
+    required = {r["type"]: r.get("count", 1) for r in (program or {}).get("rooms", [])}
+    order = list(required) + [t for t in typed_counts if t not in required]
+    entries = [(t, typed_counts.get(t, 0), required.get(t)) for t in dict.fromkeys(order)]
+
+    panel_w = 360
+    panel = np.full((height, panel_w, 3), 255, np.uint8)
+    cv2.putText(panel, "PROGRAM", (24, 46), cv2.FONT_HERSHEY_SIMPLEX, 0.9,
+                (0, 0, 0), 2, cv2.LINE_AA)
+    y = 92
+    for room_type, have, want in entries:
+        rgb = ROOM_RGB.get(room_type, unknown_rgb)
+        cv2.rectangle(panel, (24, y - 20), (52, y + 8), (rgb[2], rgb[1], rgb[0]), -1)
+        cv2.rectangle(panel, (24, y - 20), (52, y + 8), (0, 0, 0), 1)
+        text = f"{room_type}  {have}" + (f" / {want}" if want is not None else "")
+        cv2.putText(panel, text, (64, y), cv2.FONT_HERSHEY_SIMPLEX, 0.62,
+                    (0, 0, 0), 1, cv2.LINE_AA)
+        y += 46
+        if y > height - 20:
+            break
+    out = np.hstack([image, panel])
+    ok, buf = cv2.imencode(".png", out)
+    return buf.tobytes() if ok else b""
+
+
 def typing_overlay(png: bytes, plan, guesses: dict[str, RoomTypeGuess]) -> bytes:
     """The source drawing with each room's assigned type written at its centroid."""
     image = cv2.imdecode(np.frombuffer(png, np.uint8), cv2.IMREAD_COLOR)

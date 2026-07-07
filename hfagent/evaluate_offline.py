@@ -22,7 +22,7 @@ from collections import Counter
 from pathlib import Path
 
 from hfagent.tools.linework_tracer import trace_linework
-from hfagent.tools.room_typing import type_rooms, typing_overlay
+from hfagent.tools.room_typing import program_overview, type_rooms, typing_overlay
 
 _HFAGENT_DIR = Path(__file__).resolve().parent
 DEFAULT_PROGRAMS = _HFAGENT_DIR / "programs.json"
@@ -79,7 +79,7 @@ def main() -> None:
         trace = trace_linework(png)
         plan = trace.plan
         guesses: dict = {}
-        program_name = None
+        program_name, program = None, None
         if resolved is not None:
             program_name, program = resolved
             guesses = type_rooms(png, plan, program)
@@ -94,6 +94,8 @@ def main() -> None:
         for filename, payload in trace.artifacts.items():
             (work_dir / filename).write_bytes(payload)
         (work_dir / "typing_overlay.png").write_bytes(typing_overlay(png, plan, guesses))
+        (work_dir / "rooms_program.png").write_bytes(program_overview(
+            trace.artifacts["rooms_colorful.png"], plan, program))
         (work_dir / "typing.json").write_text(json.dumps(
             {rid: dict(type=g.type, instance=g.instance,
                        score=round(g.score, 3), text=g.text)

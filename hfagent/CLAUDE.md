@@ -168,6 +168,8 @@ rooms_colorful.png    closed room polygons, distinct deterministic colours,
                       walls black on top, doors as white gaps
 typing_overlay.png    source drawing + each room's assigned type at its centroid
 typing.json           room id -> {type, instance, score, text} label readings
+rooms_program.png     rooms_colorful recoloured by PROGRAM type (shared palette),
+                      room names inside, legend with typed vs required counts
 ```
 
 `generate_plan` returns `(report, plan_dict, room_graph_dict)` — the third element
