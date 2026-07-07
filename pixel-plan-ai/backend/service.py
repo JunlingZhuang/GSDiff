@@ -1,0 +1,458 @@
+from __future__ import annotations
+
+import os
+import time
+from typing import Any
+
+from code_policy import validate_program_contract
+from gemini import generate_gemini_code
+from job_progress import publish_job_progress
+from program import calculate_scale, normalize_program
+from runtime import execute_pixel_code
+from validator import validate_plan
+
+
+def room_type_from_issue(issue: str) -> str:
+    room_id = issue.split(" ", 1)[0]
+    head, separator, tail = room_id.rpartition("_")
+    return head if separator and tail.isdigit() else room_id
+
+
+def compact_validation_feedback(validation: dict[str, Any]) -> str:
+    failed_checks = [check for check in validation.get("checks", []) if not check.get("pass")]
+    sections = [f"Validation score: {validation.get('score', 0)}."]
+    if failed_checks:
+        check_lines = [f"{check.get('category', 'general')}: {check.get('label', 'failed')}" for check in failed_checks]
+        sections.append("Failed checks:\n- " + "\n- ".join(check_lines[:20]))
+
+    failed_areas = [row for row in validation.get("areas", []) if not row.get("pass")]
+    area_groups: dict[str, list[dict[str, Any]]] = {}
+    for row in failed_areas:
+        area_groups.setdefault(str(row.get("type", "unknown")), []).append(row)
+    if area_groups:
+        area_lines: list[str] = []
+        for room_type, rows in sorted(area_groups.items()):
+            actual_values = [float(row.get("actual_ft2", 0)) for row in rows]
+            actual_cell_values = [int(row.get("actual_cells", 0)) for row in rows]
+            target = round(float(rows[0].get("target_ft2", 0)))
+            target_cells = float(rows[0].get("target_cells", 0))
+            tolerance = round(float(rows[0].get("tolerance_percent", 0)))
+            actual_range = (
+                f"{round(min(actual_values))} sf"
+                if min(actual_values) == max(actual_values)
+                else f"{round(min(actual_values))}-{round(max(actual_values))} sf"
+            )
+            area_lines.append(
+                f"{room_type}: {len(rows)} failing rooms, actual {actual_range} / "
+                f"{min(actual_cell_values)}-{max(actual_cell_values)} cells, target {target} sf / "
+                f"about {target_cells:.1f} cells, tolerance {tolerance}%."
+            )
+        sections.append("Area failures by type:\n- " + "\n- ".join(area_lines))
+
+    issues = [str(issue) for issue in validation.get("issues", [])]
+    representative_groups: list[tuple[str, tuple[str, ...]]] = [
+        ("Door/access examples", (" has no door.", " requires direct corridor access", " requires access from")),
+        ("Proportion examples", (" proportion fails ",)),
+        ("Zoning examples", (" is embedded in ",)),
+        ("Other geometry examples", ("Tower ", "Too few patient rooms", "circulation does not")),
+    ]
+    consumed: set[str] = set()
+    for heading, markers in representative_groups:
+        by_type: dict[str, str] = {}
+        for issue in issues:
+            if issue in consumed or not any(marker in issue for marker in markers):
+                continue
+            room_type = room_type_from_issue(issue)
+            by_type.setdefault(room_type, issue)
+            consumed.add(issue)
+        if by_type:
+            sections.append(f"{heading}:\n- " + "\n- ".join(list(by_type.values())[:8]))
+
+    return "\n".join(sections)
+
+
+def normalize_options(value: Any) -> dict[str, Any]:
+    source = value if isinstance(value, dict) else {}
+    width = max(32, min(160, round(float(source.get("width", 96)))))
+    height = max(24, min(120, round(float(source.get("height", 64)))))
+    return {"width": width, "height": height}
+
+
+def execute_and_validate(
+    code: str,
+    program: dict[str, Any],
+    enforce_ai_contract: bool = False,
+) -> dict[str, Any]:
+    if enforce_ai_contract:
+        validate_program_contract(code, program)
+    sanitized, plan = execute_pixel_code(code)
+    return {"code": sanitized, "plan": plan, "validation": validate_plan(plan, program)}
+
+
+def candidate_rejection_reason(result: dict[str, Any]) -> str:
+    validation = result["validation"]
+    area_rows = validation.get("areas", [])
+    area_compliance_ratio = (
+        sum(bool(row.get("pass")) for row in area_rows) / len(area_rows)
+        if area_rows
+        else 0.0
+    )
+    minimum_area_compliance = max(
+        0.0,
+        min(1.0, float(os.environ.get("AREA_MIN_ACCEPTANCE_RATIO", "0.80"))),
+    )
+    occupiable_room_count = sum(
+        room["type"] not in {"corridor", "circulation"}
+        for room in result.get("plan", {}).get("rooms", [])
+    )
+    proportion_compliance_ratio = (
+        float(validation.get("summary", {}).get("proportion_compliant_rooms", 0)) / occupiable_room_count
+        if occupiable_room_count
+        else 1.0
+    )
+    minimum_proportion_compliance = max(
+        0.0,
+        min(1.0, float(os.environ.get("PROPORTION_MIN_ACCEPTANCE_RATIO", "0.90"))),
+    )
+    hard_categories = {
+        "access",
+        "adjacency",
+        "count",
+        "doors",
+        "massing",
+        "circulation",
+        "perimeter",
+        "zoning",
+    }
+    failed_blockers = [
+        check["label"]
+        for check in validation["checks"]
+        if (
+            check["category"] in hard_categories
+            or (check["category"] == "area" and area_compliance_ratio < minimum_area_compliance)
+            or (
+                check["category"] == "proportion"
+                and proportion_compliance_ratio < minimum_proportion_compliance
+            )
+        )
+        and not check["pass"]
+    ]
+    if validation["score"] >= 72 and not failed_blockers:
+        return ""
+
+    return compact_validation_feedback(validation)
+
+
+def make_iteration(
+    attempt: int,
+    phase: str,
+    source: str,
+    model: str | None,
+    status: str,
+    started: float,
+    message: str,
+    result: dict[str, Any] | None,
+    code: str | None,
+    usage: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "attempt": attempt,
+        "phase": phase,
+        "source": source,
+        "model": model,
+        "status": status,
+        "duration_ms": round((time.perf_counter() - started) * 1000),
+        "score": result["validation"]["score"] if result else None,
+        "message": message,
+        "issues": result["validation"]["issues"][:8] if result else [],
+        "code": code,
+        "usage": usage,
+    }
+
+
+def execute_code_action(payload: dict[str, Any]) -> dict[str, Any]:
+    program = normalize_program(payload.get("program"))
+    code = str(payload.get("code", ""))
+    if not code.strip():
+        raise ValueError("No Python code was provided.")
+    action = str(payload.get("action", "run"))
+    if action not in {"run", "inspect"}:
+        raise ValueError("Execution action must be run or inspect.")
+    started = time.perf_counter()
+    result = execute_and_validate(code, program, enforce_ai_contract=True)
+    rejection = candidate_rejection_reason(result)
+    status = "accepted" if not rejection else "rejected"
+    message = (
+        "Code executed and passed the acceptance threshold."
+        if not rejection
+        else rejection
+    )
+    iteration = make_iteration(1, action, "user-code", None, status, started, message, result, result["code"])
+    return {
+        **result,
+        "accepted": not rejection,
+        "source": "manual-run" if action == "run" else "deterministic-inspection",
+        "provider": None,
+        "model": None,
+        "strategy": "User-edited Python executed in the isolated floor-plan runtime.",
+        "assumptions": [],
+        "program": program,
+        "prompt": str(payload.get("prompt", "")),
+        "iterations": [iteration],
+        "inspection": {
+            "accepted": not rejection,
+            "summary": message,
+            "issues": result["validation"]["issues"],
+        },
+    }
+
+
+def generate_plan(payload: dict[str, Any]) -> dict[str, Any]:
+    program = normalize_program(payload.get("program"))
+    action = str(payload.get("action", "generate"))
+    if action not in {"generate", "fix", "revise"}:
+        raise ValueError("Agent action must be generate, fix, or revise.")
+    design_request = str(payload.get("prompt", ""))
+    current_code = str(payload.get("current_code", ""))
+    if action in {"fix", "revise"} and not current_code.strip():
+        raise ValueError(f"The {action} action requires the current complete Python program.")
+
+    options = normalize_options(payload.get("options"))
+    options["meters_per_cell"] = round(calculate_scale(program, options["width"], options["height"]), 4)
+    mode = str(payload.get("mode", "auto"))
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    quality_model = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
+    fast_model = os.environ.get("GEMINI_FAST_MODEL", "gemini-3.1-flash-lite")
+    fast_thinking = os.environ.get("GEMINI_FAST_THINKING_LEVEL", "minimal")
+    quality_thinking = os.environ.get("GEMINI_THINKING_LEVEL", "low")
+    repair_thinking = os.environ.get("GEMINI_REPAIR_THINKING_LEVEL", quality_thinking)
+    complex_model = os.environ.get("GEMINI_COMPLEX_MODEL", quality_model)
+    complex_thinking = os.environ.get("GEMINI_COMPLEX_THINKING_LEVEL", "medium")
+    max_attempts = max(1, min(5, int(os.environ.get("GEMINI_MAX_ATTEMPTS", "5"))))
+    requested_room_count = sum(room["count"] for room in program["rooms"])
+    complex_program = "tower" in program["building_type"].lower() or requested_room_count >= 40
+    iterations: list[dict[str, Any]] = []
+
+    def publish_checkpoint(
+        phase: str,
+        *,
+        result: dict[str, Any] | None = None,
+        code: str | None = None,
+        source: str | None = None,
+        model: str | None = None,
+        message: str | None = None,
+    ) -> None:
+        publish_job_progress(
+            iterations,
+            phase=phase,
+            result=result,
+            code=code,
+            source=source,
+            model=model,
+            message=message,
+        )
+
+    if mode != "auto":
+        raise ValueError("Generation mode must be auto.")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY is not configured. Add the key before running the coding agent.")
+
+    previous_code = current_code
+    latest_error = ""
+    first_error = ""
+    best_result: dict[str, Any] | None = None
+    best_candidate: dict[str, Any] | None = None
+
+    if action == "fix":
+        try:
+            current_result = execute_and_validate(current_code, program, enforce_ai_contract=True)
+            latest_error = candidate_rejection_reason(current_result)
+            if not latest_error:
+                latest_error = "The current code runs, but the user requested an additional quality pass."
+        except Exception as error:
+            latest_error = str(error)
+    elif action == "revise":
+        latest_error = f"User revision request: {design_request or 'Improve the current plan.'}"
+
+    for attempt_number in range(1, max_attempts + 1):
+        started = time.perf_counter()
+        candidate: dict[str, Any] | None = None
+        result: dict[str, Any] | None = None
+        if action == "generate" and attempt_number == 1:
+            model = complex_model if complex_program else fast_model
+            thinking_level = complex_thinking if complex_program else fast_thinking
+            phase = "initial"
+            agent_context = None
+        else:
+            model = complex_model if complex_program else quality_model
+            thinking_level = (
+                complex_thinking
+                if complex_program
+                else (repair_thinking if attempt_number > 1 or action == "fix" else quality_thinking)
+            )
+            phase = action if attempt_number == 1 and action != "generate" else "repair"
+            if action == "revise" and attempt_number == 1:
+                agent_context = (
+                    "Revise the existing complete floor-plan program according to the user request. "
+                    "Preserve working behavior that is not affected. Return the entire revised program, not a patch.\n\n"
+                    f"User request:\n{design_request or 'Improve the current plan.'}\n\n"
+                    f"Existing complete program:\n{previous_code}"
+                )
+            else:
+                agent_context = (
+                    f"Code-agent iteration {attempt_number} of {max_attempts}.\n"
+                    f"The previous complete program failed or was rejected with:\n{latest_error}\n\n"
+                    f"Previous complete program:\n{previous_code}\n\n"
+                    "Diagnose the exact failure and return a complete revised program. Do not return a patch."
+                )
+        running_iteration = {
+            "attempt": attempt_number,
+            "phase": phase,
+            "source": "gemini",
+            "model": model,
+            "status": "running",
+            "duration_ms": 0,
+            "started_at_ms": round(time.time() * 1000),
+            "score": None,
+            "message": f"Waiting for {model} to return a complete Python program.",
+            "issues": [],
+            "code": None,
+        }
+        publish_job_progress(
+            [*iterations, running_iteration],
+            phase=phase,
+            source="gemini",
+            model=model,
+            message=running_iteration["message"],
+        )
+        try:
+            candidate = generate_gemini_code(
+                api_key,
+                model,
+                program,
+                design_request,
+                options,
+                agent_context,
+                thinking_level=thinking_level,
+            )
+            previous_code = candidate["code"]
+            result = execute_and_validate(previous_code, program, enforce_ai_contract=True)
+            latest_error = candidate_rejection_reason(result)
+            if best_result is None or result["validation"]["score"] > best_result["validation"]["score"]:
+                best_result = result
+                best_candidate = candidate
+            if not latest_error:
+                iterations.append(
+                    make_iteration(
+                        attempt_number,
+                        phase,
+                        "gemini",
+                        candidate["model"],
+                        "accepted",
+                        started,
+                        f"Agent {phase} program passed execution and architectural validation.",
+                        result,
+                        previous_code,
+                        candidate.get("usage"),
+                    )
+                )
+                publish_checkpoint(
+                    phase,
+                    result=result,
+                    code=previous_code,
+                    source="gemini",
+                    model=candidate["model"],
+                    message=iterations[-1]["message"],
+                )
+                if action == "generate":
+                    source = "gemini" if attempt_number == 1 else "gemini-repaired"
+                else:
+                    source = "gemini-fixed" if action == "fix" else "gemini-revised"
+                return {
+                    **result,
+                    "accepted": True,
+                    "source": source,
+                    "provider": "Google Gemini",
+                    "model": candidate["model"],
+                    "strategy": candidate["strategy"],
+                    "assumptions": candidate["assumptions"],
+                    "usage": candidate.get("usage"),
+                    "program": program,
+                    "prompt": design_request,
+                    "repair_note": first_error if attempt_number > 1 else None,
+                    "iterations": iterations,
+                }
+            if best_result is not result and best_result is not None and best_candidate is not None:
+                regressed_error = latest_error
+                previous_code = best_candidate["code"]
+                latest_error = (
+                    "The latest executable candidate regressed. Continue from the best executable program below. "
+                    f"Latest candidate feedback: {regressed_error} "
+                    f"Best candidate feedback: {candidate_rejection_reason(best_result)}"
+                )
+            status = "rejected"
+        except Exception as error:
+            attempt_error = str(error)
+            if best_result is not None and best_candidate is not None:
+                previous_code = best_candidate["code"]
+                latest_error = (
+                    "The latest attempted edit failed before validation. Continue from the best executable program below. "
+                    f"Failed edit error: {attempt_error} "
+                    f"Best candidate feedback: {candidate_rejection_reason(best_result)}"
+                )
+            else:
+                latest_error = attempt_error
+            status = "failed"
+
+        if attempt_number == 1:
+            first_error = latest_error
+        iterations.append(
+            make_iteration(
+                attempt_number,
+                phase,
+                "gemini",
+                candidate["model"] if candidate else model,
+                status,
+                started,
+                latest_error,
+                result,
+                candidate["code"] if candidate else None,
+                candidate.get("usage") if candidate else None,
+            )
+        )
+        publish_checkpoint(
+            phase,
+            result=result,
+            code=candidate["code"] if candidate else None,
+            source="gemini",
+            model=candidate["model"] if candidate else model,
+            message=iterations[-1]["message"],
+        )
+
+    exhaustion = f"The floor-plan coding agent exhausted {max_attempts} attempts. Last failure: {latest_error}"
+    if best_result is None or best_candidate is None:
+        raise ValueError(exhaustion)
+    result_source = "gemini-unaccepted" if action == "generate" else f"gemini-{action}-unaccepted"
+    return {
+        **best_result,
+        "accepted": False,
+        "source": result_source,
+        "provider": "Google Gemini",
+        "model": best_candidate["model"],
+        "strategy": best_candidate["strategy"],
+        "assumptions": best_candidate["assumptions"],
+        "usage": best_candidate.get("usage"),
+        "program": program,
+        "prompt": design_request,
+        "ai_error": exhaustion,
+        "iterations": iterations,
+    }
+
+
+def dispatch_job(payload: dict[str, Any]) -> dict[str, Any]:
+    job_kind = str(payload.get("job_kind", "agent"))
+    if job_kind == "execute":
+        return execute_code_action(payload)
+    if job_kind == "agent":
+        return generate_plan(payload)
+    raise ValueError("Unknown job kind.")

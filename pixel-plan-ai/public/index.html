@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#17211f" />
+    <title>Pixel Plan AI</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="#" aria-label="Pixel Plan home">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+        <span>PIXEL<span class="brand-slash">/</span>PLAN</span>
+      </a>
+      <div class="topbar-meta">
+        <span class="prototype-pill">PROTOTYPE 01</span>
+        <span id="providerStatus" class="provider-status"><b></b> Checking Gemini…</span>
+      </div>
+    </header>
+
+    <main class="app-shell">
+      <aside class="control-panel">
+        <div class="panel-intro">
+          <span class="eyebrow">INPUT / PROGRAM</span>
+          <h1>Program to<br />pixel plan.</h1>
+          <p>A focused coding agent writes, runs, inspects, and revises Python that produces a validated semantic plan with doors.</p>
+        </div>
+
+        <section class="control-section">
+          <label class="field-label" for="sampleSelect"><span>01</span> Sample program</label>
+          <div class="select-wrap">
+            <select id="sampleSelect"></select>
+            <span aria-hidden="true">⌄</span>
+          </div>
+        </section>
+
+        <section class="control-section editor-section">
+          <div class="field-label-row">
+            <label class="field-label" for="programEditor"><span>02</span> Program JSON</label>
+            <button id="formatJson" class="text-button" type="button">FORMAT</button>
+          </div>
+          <textarea id="programEditor" spellcheck="false" aria-label="Program JSON"></textarea>
+          <div id="jsonStatus" class="field-note">Valid JSON</div>
+        </section>
+
+        <section class="control-section">
+          <label class="field-label" for="promptInput"><span>03</span> Design brief</label>
+          <textarea id="promptInput" class="prompt-input" placeholder="Example: entrance on the west, waiting near entry, patient rooms along the perimeter."></textarea>
+        </section>
+
+        <section class="control-section">
+          <span class="field-label"><span>04</span> Canvas + engine</span>
+          <div class="compact-grid">
+            <label>W<input id="gridWidth" type="number" min="32" max="160" value="96" /></label>
+            <label>H<input id="gridHeight" type="number" min="24" max="120" value="64" /></label>
+            <span class="engine-field">ENGINE<b>Gemini coding agent</b></span>
+          </div>
+        </section>
+
+        <button id="generateButton" class="generate-button" type="button">
+          <span class="button-icon">✦</span>
+          <span><b id="generateLabel">GENERATE PLAN</b><small id="generateHint">write code · run · inspect · repair</small></span>
+          <span class="button-arrow">→</span>
+        </button>
+        <div id="requestStatus" class="request-status">Ready</div>
+      </aside>
+
+      <section class="workspace">
+        <div class="workspace-head">
+          <div>
+            <span class="eyebrow">OUTPUT / SEMANTIC PLAN</span>
+            <h2 id="outputTitle">Waiting for program</h2>
+            <p id="outputSubtitle">Select a sample and generate the first layout.</p>
+          </div>
+          <div class="score-card">
+            <div id="scoreValue" class="score-value">—</div>
+            <div><b>PLAN SCORE</b><span>constraint fit</span></div>
+          </div>
+        </div>
+
+        <div class="toolbar">
+          <div class="view-tabs" role="tablist">
+            <button class="view-tab active" data-view="plan">PLAN</button>
+            <button class="view-tab" data-view="code">GENERATED CODE</button>
+            <button class="view-tab" data-view="data">DATA</button>
+            <button class="view-tab" data-view="runlog">RUN LOG</button>
+          </div>
+          <div class="export-actions">
+            <button id="downloadPng" disabled>PNG ↓</button>
+            <button id="downloadJson" disabled>JSON ↓</button>
+            <button id="copyCode" disabled>COPY CODE</button>
+          </div>
+        </div>
+
+        <div id="planView" class="view-panel active">
+          <div class="canvas-frame">
+            <div class="canvas-ruler ruler-top"><span>0</span><span>NORTH</span><span id="gridWidthLabel">96 PX</span></div>
+            <div class="canvas-stage">
+              <canvas id="planCanvas" width="960" height="640" aria-label="Generated semantic floor plan"></canvas>
+              <div id="canvasEmpty" class="canvas-empty">
+                <span class="empty-grid" aria-hidden="true"></span>
+                <b>No plan generated</b>
+                <p>The generated result will appear here.</p>
+              </div>
+              <div id="canvasTooltip" class="canvas-tooltip" hidden></div>
+              <div id="generationOverlay" class="generation-overlay" hidden aria-live="polite">
+                <div class="generation-card">
+                  <div class="generation-spinner" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+                  <span class="eyebrow">GENERATING / CODE + PLAN</span>
+                  <h3 id="generationPhase">Gemini is writing floor-plan Python</h3>
+                  <p>The current plan stays in place while a new candidate is generated and validated.</p>
+                  <div class="generation-meta">
+                    <span>ELAPSED</span><b id="generationElapsed">0s</b>
+                  </div>
+                  <button id="stopGeneration" class="stop-generation" type="button">STOP GENERATION</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="inspector-grid">
+            <section class="inspector-card legend-card">
+              <div class="card-title"><span>PROGRAM LEGEND</span><b id="roomCount">0 SPACES</b></div>
+              <div id="legendList" class="legend-list"><p class="empty-copy">No program data yet.</p></div>
+            </section>
+            <section class="inspector-card">
+              <div class="card-title"><span>VALIDATION</span><b id="validationCount">—</b></div>
+              <div id="validationList" class="check-list"><p class="empty-copy">Checks appear after generation.</p></div>
+            </section>
+            <section class="inspector-card">
+              <div class="card-title"><span>DOORS</span><b id="doorCount">0</b></div>
+              <div id="doorList" class="door-list"><p class="empty-copy">No doors yet.</p></div>
+            </section>
+          </div>
+        </div>
+
+        <div id="codeView" class="view-panel code-panel">
+          <div class="code-head">
+            <div><span>ACTIVE PYTHON PROGRAM</span><small>Edit the complete program, run it, inspect it, or ask Gemini to revise it</small></div>
+            <span id="codeSource" class="source-badge">—</span>
+          </div>
+          <div class="agent-code-actions">
+            <button id="runCode" type="button" disabled>RUN CODE</button>
+            <button id="inspectCode" type="button" disabled>INSPECT</button>
+            <button id="fixCode" type="button" disabled>FIX WITH AI</button>
+          </div>
+          <textarea id="codeOutput" class="code-editor" spellcheck="false" aria-label="Active generated Python"># Generate a plan to inspect and edit the code.</textarea>
+          <div class="revision-panel">
+            <div>
+              <label for="revisionInput">REVISION INSTRUCTION</label>
+              <textarea id="revisionInput" placeholder="Example: move the main entrance to the south and create an L-shaped corridor."></textarea>
+            </div>
+            <button id="reviseCode" type="button" disabled>REVISE WITH AI</button>
+          </div>
+          <div id="inspectionSummary" class="inspection-summary">No code inspection has run.</div>
+        </div>
+
+        <div id="dataView" class="view-panel data-panel">
+          <section>
+            <h3>Generation metadata</h3>
+            <div id="metadataGrid" class="metadata-grid"></div>
+          </section>
+          <section>
+            <h3>Area report</h3>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>SPACE</th><th>TYPE</th><th>TARGET</th><th>ACTUAL</th><th>ERROR</th></tr></thead>
+                <tbody id="areaTable"><tr><td colspan="5">No data.</td></tr></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+
+        <div id="runlogView" class="view-panel runlog-panel">
+          <div class="runlog-head">
+            <div>
+              <span class="eyebrow">BOUNDED REPAIR LOOP</span>
+              <h3>Generation run log</h3>
+            </div>
+            <p>Generate, run, inspect, fix, and revise complete Python programs. AI repair actions use up to five attempts.</p>
+          </div>
+          <div id="iterationList" class="iteration-list">
+            <p class="empty-copy">Generate a plan to inspect its attempts.</p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <span>PIXEL PLAN AI · CODE-GENERATED SPATIAL STUDIES</span>
+      <span>Concept design only — not construction documentation.</span>
+    </footer>
+    <script type="module" src="/app.js?v=6"></script>
+  </body>
+</html>

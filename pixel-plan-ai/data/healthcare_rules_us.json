@@ -1,0 +1,131 @@
+{
+  "profile": "us-healthcare-schematic-v1",
+  "jurisdiction": "United States",
+  "status": "Schematic planning defaults; not a substitute for project-specific code review",
+  "units": "imperial",
+  "sources": [
+    {
+      "name": "VA PG-18-12 Medical/Surgical Inpatient Units Design Guide",
+      "url": "https://www.cfm.va.gov/cfm/til/dGuide/dgInpatientNU.pdf",
+      "basis": "Patient-room planning modules and inpatient functional relationships"
+    },
+    {
+      "name": "VA PG-18-9 Space Planning Criteria",
+      "url": "https://www.cfm.va.gov/cfm/til/planning.asp",
+      "basis": "Room families, net square feet, contents, circulation, and functional clearances"
+    },
+    {
+      "name": "FGI Guidelines public guidance",
+      "url": "https://fgiguidelines.org/",
+      "basis": "Patient and exam-room clear floor areas"
+    },
+    {
+      "name": "U.S. Access Board ADA Standards Guides",
+      "url": "https://www.access-board.gov/ada/guides/",
+      "basis": "Accessible turning, clear floor space, toilet-room, and doorway requirements"
+    }
+  ],
+  "allowed_module_containment": [
+    ["patient_room", "toilet"]
+  ],
+  "door_swing_defaults": {
+    "corridor_to_room": "swing_into_room",
+    "exterior_entrance": "swing_into_building",
+    "derivation": "deterministic_from_final_grid",
+    "note": "Schematic default only; egress, accessibility, behavioral health, isolation, and equipment clearances may require project-specific exceptions."
+  },
+  "room_types": {
+    "patient_room": {
+      "zone": "patient_care",
+      "en_suite_module": {
+        "allowed_inset_type": "toilet",
+        "preferred_placement": "inboard_corner",
+        "allowed_placements": ["inboard_corner", "nested", "outboard_corner"],
+        "require_internal_door": true,
+        "require_direct_corridor_access_for_patient_space": true,
+        "validate_combined_module_compactness": true,
+        "validate_patient_clear_rectangle_separately": true
+      },
+      "minimum_area_ft2": 120,
+      "area_tolerance_fraction": 0.25,
+      "minimum_clear_dimension_ft": 10,
+      "preferred_aspect_ratio": [1.0, 1.65],
+      "hard_max_aspect_ratio": 2.0,
+      "minimum_compactness": 0.88,
+      "allowed_door_connections": ["corridor", "circulation", "toilet"],
+      "requires_direct_corridor_access": true
+    },
+    "exam_room": {
+      "zone": "clinical_care",
+      "minimum_area_ft2": 100,
+      "area_tolerance_fraction": 0.25,
+      "minimum_clear_dimension_ft": 9,
+      "preferred_aspect_ratio": [1.0, 1.6],
+      "hard_max_aspect_ratio": 1.9,
+      "minimum_compactness": 0.9,
+      "allowed_door_connections": ["corridor", "circulation"],
+      "requires_direct_corridor_access": true,
+      "must_be_independent": true
+    },
+    "office": {
+      "zone": "staff_support",
+      "minimum_area_ft2": 80,
+      "area_tolerance_fraction": 0.25,
+      "minimum_clear_dimension_ft": 8,
+      "preferred_aspect_ratio": [1.0, 1.6],
+      "hard_max_aspect_ratio": 1.9,
+      "minimum_compactness": 0.9,
+      "allowed_door_connections": ["corridor", "circulation"],
+      "requires_direct_corridor_access": true,
+      "must_be_independent": true
+    },
+    "storage": {
+      "zone": "clinical_support",
+      "minimum_area_ft2": 40,
+      "area_tolerance_fraction": 0.3,
+      "minimum_clear_dimension_ft": 6,
+      "preferred_aspect_ratio": [1.0, 2.0],
+      "hard_max_aspect_ratio": 2.5,
+      "minimum_compactness": 0.85,
+      "allowed_door_connections": ["corridor", "circulation"],
+      "requires_direct_corridor_access": true,
+      "must_be_independent": true
+    },
+    "toilet": {
+      "zone": "patient_or_building_support",
+      "preferred_patient_room_placement": "inboard_corner_en_suite",
+      "minimum_area_ft2": 35,
+      "area_tolerance_fraction": 0.3,
+      "minimum_clear_dimension_ft": 5,
+      "preferred_aspect_ratio": [1.0, 1.8],
+      "hard_max_aspect_ratio": 2.2,
+      "minimum_compactness": 0.85,
+      "allowed_door_connections": ["patient_room", "corridor", "circulation"],
+      "requires_direct_corridor_access": false
+    },
+    "nurse_station": {
+      "zone": "clinical_support",
+      "minimum_area_ft2": 100,
+      "area_tolerance_fraction": 0.25,
+      "minimum_clear_dimension_ft": 10,
+      "preferred_aspect_ratio": [1.0, 1.8],
+      "hard_max_aspect_ratio": 2.2,
+      "minimum_compactness": 0.8,
+      "allowed_door_connections": ["corridor", "circulation"],
+      "requires_direct_corridor_access": true,
+      "must_be_independent": true
+    },
+    "waiting": {
+      "zone": "public_support",
+      "minimum_area_ft2": 100,
+      "area_tolerance_fraction": 0.3,
+      "minimum_clear_dimension_ft": 10,
+      "preferred_aspect_ratio": [1.0, 2.2],
+      "hard_max_aspect_ratio": 3.0,
+      "minimum_compactness": 0.7,
+      "allowed_door_connections": ["corridor", "circulation"],
+      "requires_direct_corridor_access": true,
+      "must_be_independent": true
+    }
+  }
+}
