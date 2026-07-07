@@ -70,17 +70,35 @@ def detect_label_quads(gray: np.ndarray) -> list[np.ndarray]:
     base = 2.0 if min(height, width) < _UPSCALE_BELOW else 1.0
     precise = _detect_at_scale(bgr, base)
     kept: list[np.ndarray] = list(precise)
-    # half-scale quads only fill true blind spots: keep one when it overlaps NO
-    # precise quad at all (giant fonts detect only when shrunk; everything the
-    # base scale saw stays authoritative)
-    for quad in _detect_at_scale(bgr, base * 0.5):
+
+    def covered_by_precise(quad: np.ndarray, min_frac: float) -> bool:
         qx0, qy0 = float(quad[:, 0].min()), float(quad[:, 1].min())
         qx1, qy1 = float(quad[:, 0].max()), float(quad[:, 1].max())
-        overlaps = any(
-            qx0 < float(k[:, 0].max()) and qx1 > float(k[:, 0].min())
-            and qy0 < float(k[:, 1].max()) and qy1 > float(k[:, 1].min())
-            for k in precise
-        )
-        if not overlaps:
+        area = max(1.0, (qx1 - qx0) * (qy1 - qy0))
+        for k in precise:
+            ix = min(qx1, float(k[:, 0].max())) - max(qx0, float(k[:, 0].min()))
+            iy = min(qy1, float(k[:, 1].max())) - max(qy0, float(k[:, 1].min()))
+            if ix > 0 and iy > 0 and (ix * iy) / area >= min_frac:
+                return True
+        return False
+
+    # half-scale quads only fill true blind spots (giant fonts detect only when
+    # shrunk); everything the base scale saw stays authoritative
+    for quad in _detect_at_scale(bgr, base * 0.5):
+        if not covered_by_precise(quad, min_frac=1e-9):
             kept.append(quad)
+
+    # vertical labels (rotated corridor text) detect poorly upright — run a pass
+    # on the 90°-rotated image and map the quads back; keep those the base pass
+    # did not already box properly (junk fragments over vertical text cover
+    # little of the true tall quad)
+    rotated = np.rot90(bgr)
+    for quad in _detect_at_scale(np.ascontiguousarray(rotated), base):
+        mapped = np.stack([width - 1 - quad[:, 1], quad[:, 0]], axis=1).astype(np.int32)
+        w = float(mapped[:, 0].max() - mapped[:, 0].min())
+        h = float(mapped[:, 1].max() - mapped[:, 1].min())
+        if h <= 1.4 * w:                      # not vertical in the original frame
+            continue
+        if not covered_by_precise(mapped, min_frac=0.5):
+            kept.append(mapped)
     return kept

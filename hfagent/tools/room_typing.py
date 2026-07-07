@@ -180,15 +180,24 @@ def type_rooms(png: bytes, plan, program: dict) -> dict[str, RoomTypeGuess]:
             if distance is None or distance > reach:
                 continue
             owner = rid
-        text = _recognize(net, image, quad)
         w = float(quad[:, 0].max() - quad[:, 0].min())
         h = float(quad[:, 1].max() - quad[:, 1].min())
-        if h > 1.4 * w:      # vertical label (rotated corridor text): read rotated too
-            rotated = np.array(np.roll(quad, 1, axis=0), dtype=np.int32)
-            alt = _recognize(net, image, rotated)
-            if len(alt) > len(text):
-                text = alt
+        readings = [_recognize(net, image, quad)]
+        if h > 1.4 * w:
+            # vertical label (rotated corridor text): read at every vertex
+            # rotation and keep whatever the vocabulary recognises best
+            for roll in (1, 2, 3):
+                rotated = np.array(np.roll(quad.reshape(4, 2), roll, axis=0),
+                                   dtype=np.int32)
+                readings.append(_recognize(net, image, rotated))
+        text = max(readings,
+                   key=lambda s: (match_program_type(s, vocabulary)[2], len(s)))
         per_room.setdefault(owner, []).append((float(center.y), quad, text))
+
+    areas = sorted(ShapelyPolygon(r.polygon).area for r in plan.rooms) or [0.0]
+    median_area = areas[len(areas) // 2]
+    room_area = {r.id: ShapelyPolygon(r.polygon).area for r in plan.rooms}
+    circulation = {"corridor", "waiting"}
 
     guesses: dict[str, RoomTypeGuess] = {}
     for rid, entries in per_room.items():
@@ -196,13 +205,22 @@ def type_rooms(png: bytes, plan, program: dict) -> dict[str, RoomTypeGuess]:
         # reading-order concatenations repair labels split across quads
         entries.sort(key=lambda e: (round(e[0] / 20.0), float(e[1][:, 0].min())))
         candidates.append("".join(text for _, _, text in entries))
+        # a merged circulation mega-space swallows unclosed member rooms AND
+        # their labels — and the member label often reads BETTER than the
+        # rotated corridor text, so in oversized rooms any circulation label
+        # above the match floor outranks score itself
+        oversized = room_area.get(rid, 0.0) > 2.5 * median_area
         best: RoomTypeGuess | None = None
+        best_key: tuple | None = None
         for text in candidates:
             room_type, instance, score = match_program_type(text, vocabulary)
             if room_type is None:
                 continue
-            if best is None or score > best.score or (score == best.score
-                                                      and instance is not None and best.instance is None):
+            key = (1 if (oversized and room_type in circulation) else 0,
+                   score,
+                   1 if instance is not None else 0)
+            if best_key is None or key > best_key:
+                best_key = key
                 best = RoomTypeGuess(type=room_type, instance=instance, score=score, text=text)
         if best is not None:
             guesses[rid] = best
