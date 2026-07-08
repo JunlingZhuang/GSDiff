@@ -6,7 +6,7 @@ from typing import Any
 
 from code_policy import validate_program_contract
 from gemini import generate_gemini_code
-from job_progress import publish_job_progress
+from job_progress import append_job_event, publish_job_progress
 from plan_image import generate_plan_images
 from program import calculate_scale, normalize_program
 from runtime import execute_pixel_code
@@ -417,6 +417,7 @@ def generate_plan(
             "issues": [],
             "code": None,
         }
+        append_job_event({"e": "attempt_start", "attempt": attempt_number, "phase": phase, "model": model})
         publish_job_progress(
             [*iterations, running_iteration],
             phase=phase,
@@ -436,12 +437,24 @@ def generate_plan(
                 reference_image=reference_image,
                 seed_repair=seed_repair,
             )
+            append_job_event({
+                "e": "model_returned",
+                "attempt": attempt_number,
+                "model": candidate["model"],
+                "tokens": candidate.get("usage", {}).get("total_tokens"),
+            })
             usage_row = candidate.get("usage") or {}
             spent_tokens += int(usage_row.get("total_tokens") or 0)
             spent_usd += float(usage_row.get("estimated_cost_usd") or 0.0)
             previous_code = candidate["code"]
             result = execute_and_validate(previous_code, program, enforce_ai_contract=True)
             latest_error = candidate_rejection_reason(result)
+            append_job_event({
+                "e": "validator_verdict",
+                "attempt": attempt_number,
+                "score": result["validation"]["score"],
+                "rejected": bool(latest_error),
+            })
             prior_validation = previous_validation
             previous_validation = result["validation"]
             if latest_error and prior_validation is not None:
@@ -464,6 +477,7 @@ def generate_plan(
                         candidate.get("usage"),
                     )
                 )
+                append_job_event({"e": "attempt_end", "attempt": attempt_number, "status": "accepted"})
                 publish_checkpoint(
                     phase,
                     result=result,
@@ -476,6 +490,7 @@ def generate_plan(
                     source = "gemini" if attempt_number == 1 else "gemini-repaired"
                 else:
                     source = "gemini-fixed" if action == "fix" else "gemini-revised"
+                append_job_event({"e": "run_end", "stop_reason": "accepted", "accepted": True})
                 return {
                     **result,
                     "accepted": True,
@@ -534,6 +549,7 @@ def generate_plan(
                 candidate.get("usage") if candidate else None,
             )
         )
+        append_job_event({"e": "attempt_end", "attempt": attempt_number, "status": status})
         publish_checkpoint(
             phase,
             result=result,
@@ -550,6 +566,7 @@ def generate_plan(
     if best_result is None or best_candidate is None:
         raise ValueError(exhaustion)
     result_source = "gemini-unaccepted" if action == "generate" else f"gemini-{action}-unaccepted"
+    append_job_event({"e": "run_end", "stop_reason": stop_reason, "accepted": False})
     return {
         **best_result,
         "accepted": False,
@@ -590,6 +607,7 @@ def refine_plan(payload: dict[str, Any]) -> dict[str, Any]:
     seed = normalize_seed(payload.get("seed"))
     seed_program_code = seed_to_code(seed)
     started = time.perf_counter()
+    append_job_event({"e": "attempt_start", "attempt": 0, "phase": "seed"})
     publish_job_progress(
         [],
         phase="seed",
@@ -627,7 +645,15 @@ def refine_plan(payload: dict[str, Any]) -> dict[str, Any]:
         source="seed-translator",
         message=message,
     )
+    append_job_event({
+        "e": "validator_verdict",
+        "attempt": 0,
+        "score": result["validation"]["score"] if result is not None else None,
+        "rejected": bool(rejection),
+    })
+    append_job_event({"e": "attempt_end", "attempt": 0, "status": seed_iteration["status"]})
     if result is not None and not rejection:
+        append_job_event({"e": "run_end", "stop_reason": "accepted", "accepted": True})
         return {
             **result,
             "accepted": True,

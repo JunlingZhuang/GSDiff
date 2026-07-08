@@ -56,6 +56,23 @@ def write_initial_progress(request_id: str) -> Path:
     return path
 
 
+def read_progress_events(progress_file: Path) -> list[dict[str, Any]]:
+    """Last 200 parsed events from the JSONL timeline beside the snapshot (docs #6)."""
+    events_path = Path(str(progress_file) + ".events.jsonl")
+    if not events_path.is_file():
+        return []
+    events: list[dict[str, Any]] = []
+    for line in events_path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            events.append(json.loads(stripped))
+        except json.JSONDecodeError:
+            continue  # tolerate a torn last line from a concurrent append
+    return events[-200:]
+
+
 def read_generation_progress(request_id: str) -> dict[str, Any]:
     path = progress_path_for(request_id)
     with JOB_LOCK:
@@ -67,6 +84,7 @@ def read_generation_progress(request_id: str) -> dict[str, Any]:
             "message": "Waiting for the first agent checkpoint." if active else "No active generation job was found.",
             "iterations": [],
             "preview": None,
+            "events": read_progress_events(path),
             "active": active,
         }
     try:
@@ -79,6 +97,7 @@ def read_generation_progress(request_id: str) -> dict[str, Any]:
             "iterations": [],
             "preview": None,
         }
+    payload["events"] = read_progress_events(path)
     payload["active"] = active
     if not active and payload.get("status") == "running":
         payload["status"] = "complete"

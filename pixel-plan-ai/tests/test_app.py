@@ -443,6 +443,67 @@ class AgentGenerationTests(unittest.TestCase):
         self.assertIn("usage_total", result)
         self.assertEqual(result["usage_total"]["total_tokens"], 0)
 
+    def test_generate_plan_appends_typed_event_timeline(self) -> None:
+        model_outputs = [
+            {"code": "first", "strategy": "first", "assumptions": [], "model": "test-model"},
+            {"code": "second", "strategy": "second", "assumptions": [], "model": "test-model"},
+        ]
+        execution_outputs = [
+            {
+                "code": "first",
+                "plan": {},
+                "validation": {"score": 40, "checks": [], "issues": ["Missing required adjacency."]},
+            },
+            {
+                "code": "second",
+                "plan": {},
+                "validation": {"score": 91, "checks": [], "issues": []},
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            progress_path = Path(directory) / "progress.json"
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "GEMINI_API_KEY": "test-key",
+                        "GEMINI_MODEL": "test-model",
+                        "PIXEL_PLAN_PROGRESS_FILE": str(progress_path),
+                    },
+                ),
+                patch.object(service, "generate_gemini_code", side_effect=model_outputs),
+                patch.object(service, "execute_and_validate", side_effect=execution_outputs),
+            ):
+                service.generate_plan(
+                    {
+                        "program": self.samples["clinic-small"],
+                        "mode": "auto",
+                        "options": {"width": 64, "height": 40},
+                    }
+                )
+            events_path = Path(str(progress_path) + ".events.jsonl")
+            self.assertTrue(events_path.is_file())
+            events = [
+                json.loads(line)
+                for line in events_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+        self.assertEqual(
+            [event["e"] for event in events],
+            [
+                "attempt_start",
+                "model_returned",
+                "validator_verdict",
+                "attempt_end",
+                "attempt_start",
+                "model_returned",
+                "validator_verdict",
+                "attempt_end",
+                "run_end",
+            ],
+        )
+        self.assertEqual(events[-1]["stop_reason"], "accepted")
+
     def test_repair_reverts_to_best_executable_code_after_failed_edit(self) -> None:
         model_outputs = [
             {"code": "best-code", "strategy": "best", "assumptions": [], "model": "test-model"},
