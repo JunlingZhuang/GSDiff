@@ -186,9 +186,73 @@ its agent.
 Gate: same benchmark as batch A; adopt only if acceptance/attempts/cost beat
 the plain loop.
 
+## E. Prompt-specific lessons
+
+Claude Code's prompt content itself (not just its assembly) encodes five
+techniques we can transplant into `build_prompt` / `SYSTEM_INSTRUCTION` /
+the three mode guidance slots.
+
+### 9. Counterweight every prohibition
+
+Their rules come in pairs to prevent overcorrection ("never claim success
+falsely" is immediately followed by "equally, when a check did pass, state
+it plainly — do not hedge confirmed results"; comments literally label these
+"assertiveness counterweight"). Our `REFERENCE_IMAGE_GUIDANCE` already has
+its counterweight (transcribe faithfully / may deviate locally where the
+drawing cannot satisfy a rule). **`SEED_REPAIR_GUIDANCE` does not**: it only
+forbids redesign, and the very first trace-mode E2E hit the gap — the seed
+was missing the waiting room entirely, and "only adjust literals" vs "add a
+room" was left to the model to guess. Add: `If a named failure cannot be
+fixed by a local edit (for example a required room is missing entirely),
+add the minimal new geometry, placed consistently with the traced topology.`
+
+### 10. Replace adjectives with the validator's own numbers
+
+They quantify even politeness ("keep text between tool calls to <=25
+words", annotated with a measured ~1.2% token saving). Our layout
+requirements still say "Fill most of the canvas" and "prefer compact
+spaces" while the validator checks an exact `coverage_percent` threshold
+and compactness metrics — the gap between the adjective and the number is
+paid for in wasted repair attempts. Every adjective in the layout
+requirements should become the validator-sourced number, ideally generated
+from the same rules profile (single source of truth, no drift).
+
+### 11. One worked micro-example for the highest-failure rule
+
+Their prompt embeds tiny worked examples ("if the user asks to change
+methodName to snake case, do not reply with just method_name — find the
+method and modify the code"). Our door contract is six paragraphs of
+abstract description and zero examples, and door placement is our
+highest-frequency failure class. Add one 4-line example: a small grid
+fragment plus the correct door tuple derived from it, demonstrating the
+`grid[y][x-1]` vs `grid[y][x]` boundary convention.
+
+### 12. Durable contract belongs in systemInstruction
+
+They put identity/behavior in the system prompt and per-turn state in user
+messages. We do the opposite: `SYSTEM_INSTRUCTION` is seven lines while the
+never-changing result contract, execution environment, and grid contract are
+re-sent in every user prompt. Moving the durable contract into Gemini's
+`systemInstruction` is both the correct role split and the same cut as #4's
+cache layering — do them together.
+
+### 13. Epistemic framing for injected content
+
+They explicitly teach the model how to weigh meta-content
+("<system-reminder> tags ... bear no direct relation to the specific tool
+results in which they appear"). Our real counterpart: mode-2 candidate
+drawings can carry duplicate or missing room labels (observed live — one
+candidate drew `exam_room_3` twice). State the precedence explicitly:
+`If the drawing's labels conflict with the program JSON (duplicate or
+missing labels), the program wins; map the surplus or missing rooms onto
+the closest sensible geometry.` Likewise tag #1's delta block as computed
+by the harness from the actual previous run — ground truth, not a guess.
+
 ## Sequencing
 
-1. Batch A: #1 + #2 + #3 (+#7 in passing) — one theme, one regression run.
-2. Batch B: #4 + #5.
-3. Batch C: #6.
+1. Batch A: #1 + #2 + #3 + #9 + #13 (+#7 in passing) — all repair-feedback
+   themed, one regression run.
+2. Batch B: #4 + #12 (one prompt restructuring) + #5.
+3. Batch C: #6, plus #10 + #11 as prompt-quality follow-ups behind the
+   benchmark.
 4. Experiment #8 rides on batch A's benchmark.
