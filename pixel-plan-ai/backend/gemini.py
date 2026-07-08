@@ -225,6 +225,7 @@ def build_prompt(
     elif with_reference_image:
         family_guidance = REFERENCE_IMAGE_GUIDANCE
     # Section order = variation frequency (static -> mode -> program -> attempt) so implicit prefix caching survives repair attempts (docs/claude-code-lessons.md #4).
+    # Numbers below mirror validator.py thresholds exactly — update together (docs/claude-code-lessons.md #10).
     return f"""You are a specialized floor-plan coding agent.
 Read the architectural program, design a spatial strategy, and write a complete executable Python layout algorithm. Work like a coding agent: inspect the previous code and exact executor or validator feedback, revise the implementation, and return the entire corrected program on every attempt.
 Return JSON matching the required response schema.
@@ -234,12 +235,12 @@ Layout requirements:
 - Include the requested number of corridor instances.
 - The corridor count must match the program exactly. Do not add an extra core, lobby, or connector with type corridor; merge such geometry into one of the requested corridor indexes.
 - No overlap and no geometry outside the canvas.
-- Prefer compact spaces and continuous corridors.
+- Keep every room compact: the proportion check rejects any room whose bounding-box aspect ratio (longer clear side / shorter clear side) exceeds its type's hard_max_aspect_ratio (default 4.0), whose shorter clear dimension is below its type's minimum_clear_dimension_ft, or whose fill ratio (owned cells / bounding-box cells) is under its type's minimum_compactness. Corridors carry no proportion limit, but every non-corridor room must share a boundary with a corridor so the access check passes.
 - Every non-corridor room needs a door, normally connected to a corridor.
 - Door coordinates must lie on the shared room boundary.
 - Include one exterior main entrance with to_room_id_or_none set to None.
 - Satisfy every requested type adjacency where practical.
-- Fill most of the canvas.
+- Assign rooms to at least 85% of the footprint cells; the validator rejects coverage below 0.85.
 - Prefer algorithms and loops over hundreds of repeated literal assignments. Keep the code under 50 KB even for large hospitals.
 - For large programs, use data lists plus loops or helper functions to allocate every requested room instance exactly once.
 - Derive integer room-module widths and depths from meters_per_cell and the physical rules below before placing modules. Audit actual pixel area, minimum dimension, bounding-box aspect ratio, and compactness for every room before returning result.

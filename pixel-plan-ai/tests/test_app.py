@@ -98,6 +98,23 @@ class CodePolicyTests(unittest.TestCase):
         self.assertIn("sole judge of correctness", SYSTEM_INSTRUCTION)
         self.assertIn("minimal edit that fixes the named failures", SYSTEM_INSTRUCTION)
 
+    def test_layout_requirements_state_validator_thresholds_not_adjectives(self) -> None:
+        samples = json.loads((ROOT / "data" / "samples.json").read_text(encoding="utf-8"))
+        program = normalize_program(samples["clinic-small"])
+        prompt = build_prompt(
+            program,
+            "",
+            {"width": 64, "height": 40, "meters_per_cell": 0.25},
+            None,
+        )
+        # Coverage threshold from validator.py: coverage >= 0.85.
+        self.assertIn("85%", prompt)
+        self.assertNotIn("Fill most of the canvas", prompt)
+        self.assertNotIn("Prefer compact spaces and continuous corridors", prompt)
+        # Proportion check: aspect ratio <= hard_max_aspect_ratio (default 4.0).
+        self.assertIn("hard_max_aspect_ratio (default 4.0)", prompt)
+        self.assertIn("minimum_compactness", prompt)
+
     def test_gemini_usage_metadata_includes_thinking_cost(self) -> None:
         usage = normalize_usage_metadata(
             "gemini-3.1-pro-preview",
