@@ -17,7 +17,9 @@ Models (both optional, in ``data/models/``, graceful no-op when absent):
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+import re
+from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
 
@@ -47,6 +49,32 @@ class RoomTypeGuess:
     @property
     def name(self) -> str:
         return f"{self.type}_{self.instance}" if self.instance is not None else self.type
+
+
+@dataclass
+class RoomTyping:
+    """Label-reading result for a plan: per-room type guesses + drawing scale.
+
+    ``meters_per_pixel`` is calibrated from the drawn AREA sublabels ("16 m²"):
+    each area label divided by its room's polygon pixel area yields one scale
+    sample, and the median of all samples is robust to the odd mis-assigned
+    label or merged mega-room. None when no area labels were readable.
+    """
+    guesses: dict[str, RoomTypeGuess]
+    meters_per_pixel: float | None = None
+    area_samples: int = 0
+
+    def get(self, room_id: str) -> RoomTypeGuess | None:
+        return self.guesses.get(room_id)
+
+    def __len__(self) -> int:
+        return len(self.guesses)
+
+    def items(self):
+        return self.guesses.items()
+
+    def values(self):
+        return self.guesses.values()
 
 
 class _PpocrRecognizer:
@@ -283,7 +311,24 @@ def type_rooms(png: bytes, plan, program: dict) -> dict[str, RoomTypeGuess]:
                 best = RoomTypeGuess(type=room_type, instance=instance, score=score, text=text)
         if best is not None:
             guesses[rid] = best
-    return guesses
+
+    # scale calibration from AREA sublabels: "16 m²" reads as "16m2"/"16m";
+    # each one over its room's polygon pixel area is a (m/px)² sample
+    scale_samples: list[float] = []
+    for rid, entries in per_room.items():
+        pixel_area = room_area.get(rid, 0.0)
+        if pixel_area <= 0 or pixel_area > 2.5 * median_area:
+            continue                       # merged mega-rooms poison the sample
+        for _, _, text in entries:
+            clean = "".join(ch for ch in text.lower() if ch.isalnum())
+            match = re.fullmatch(r"(\d{1,4})m2?", clean)
+            if match:
+                area_m2 = float(match.group(1))
+                if 1.0 <= area_m2 <= 2000.0:
+                    scale_samples.append(math.sqrt(area_m2 / pixel_area))
+    meters_per_pixel = float(np.median(scale_samples)) if scale_samples else None
+    return RoomTyping(guesses=guesses, meters_per_pixel=meters_per_pixel,
+                      area_samples=len(scale_samples))
 
 
 def program_overview(rooms_colorful_png: bytes, plan, program: dict | None) -> bytes:
