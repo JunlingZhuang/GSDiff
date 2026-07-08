@@ -315,11 +315,13 @@ export function ProgramPanel({ studio }: { studio: Studio }) {
           {/* brief */}
           <section className="flex flex-col gap-2">
             <span className="label-xs">Brief</span>
+            {/* Auto-grows to its content (field-sizing) so a fitting brief never
+                shows a scrollbar; caps out and scrolls with the themed bar. */}
             <Textarea
               value={studio.prompt}
               onChange={(event) => studio.setPrompt(event.target.value)}
               placeholder="Entrance on the west, waiting near entry, patient rooms along the perimeter."
-              className="h-20 resize-y text-[12px] leading-relaxed"
+              className="min-h-20 max-h-40 resize-y text-[12px] leading-relaxed"
             />
           </section>
 

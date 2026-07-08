@@ -137,6 +137,35 @@
   }
 }
 
+/* Dark-theme scrollbars + resizers: the native Windows chrome renders white on
+   the dark instrument theme, so recolor it everywhere (textareas, ScrollArea
+   fallbacks, any overflow container). */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #262b33 transparent;
+}
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: #262b33;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #333944;
+}
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+textarea {
+  resize: vertical;
+}
+textarea::-webkit-resizer {
+  background: transparent;
+}
+
 /* Shared small section label — the ONLY letterspaced-uppercase style in the app. */
 .label-xs {
   font-size: 10px;
