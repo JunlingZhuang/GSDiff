@@ -217,15 +217,38 @@ paid for in wasted repair attempts. Every adjective in the layout
 requirements should become the validator-sourced number, ideally generated
 from the same rules profile (single source of truth, no drift).
 
-### 11. One worked micro-example for the highest-failure rule
+### 11. Micro-examples policy (yes to micro-examples, no to full few-shot)
 
-Their prompt embeds tiny worked examples ("if the user asks to change
-methodName to snake case, do not reply with just method_name — find the
-method and modify the code"). Our door contract is six paragraphs of
-abstract description and zero examples, and door placement is our
-highest-frequency failure class. Add one 4-line example: a small grid
-fragment plus the correct door tuple derived from it, demonstrating the
-`grid[y][x-1]` vs `grid[y][x]` boundary convention.
+Their prompt embeds tiny worked examples inside rules ("if the user asks to
+change methodName to snake case, do not reply with just method_name — find
+the method and modify the code") and contains NO full task transcripts.
+That is the right call for us too:
+
+**Do not add full example programs.** (a) Our output envelope is already
+locked by `responseJsonSchema`, and Gemini's Python is not the failure
+class — semantic geometry is; (b) a complete correct layout anchors the
+model to copy its topology, hurting mode-1 diversity and fighting the
+reference/seed in modes 2-3; (c) examples outrank instructions when they
+conflict, so every example is a maintenance liability that must track the
+contract.
+
+**Do add three targeted micro-examples**, all in the static cacheable
+prefix (#4):
+
+1. *Door derivation* (highest-frequency failure): a 4-line grid fragment
+   plus the correct door tuple derived from it, pinning the
+   `grid[y][x-1]` vs `grid[y][x]` off-by-one boundary convention.
+2. *Delta response* (with #1): "delta says fixed:doors,
+   still_failing:area -> touch only the area-related literals" — teaches
+   minimal-edit behavior in repair attempts.
+3. *Seed minimal edit* (trace mode): one before/after literal nudge,
+   `(40, 8, 10, 12) -> (40, 8, 11, 12)` to widen a room by one cell —
+   makes "repair = data edit, not rewrite" concrete.
+
+**Lock examples with tests**: the door micro-example's grid fragment and
+door tuple get a unit test that runs them through the actual sandbox door
+validator — if the example rots, the suite goes red. (One step beyond
+Claude Code, whose examples are maintained by eye.)
 
 ### 12. Durable contract belongs in systemInstruction
 
