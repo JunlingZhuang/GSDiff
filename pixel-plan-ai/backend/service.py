@@ -10,6 +10,7 @@ from job_progress import publish_job_progress
 from plan_image import generate_plan_images
 from program import calculate_scale, normalize_program
 from runtime import execute_pixel_code
+from seed_code import normalize_seed, seed_to_code
 from validator import validate_plan
 
 
@@ -228,7 +229,13 @@ def execute_code_action(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def generate_plan(payload: dict[str, Any]) -> dict[str, Any]:
+def generate_plan(
+    payload: dict[str, Any],
+    *,
+    seed_repair: bool = False,
+    preseeded_iterations: list[dict[str, Any]] | None = None,
+    initial_error: str | None = None,
+) -> dict[str, Any]:
     program = normalize_program(payload.get("program"))
     action = str(payload.get("action", "generate"))
     if action not in {"generate", "fix", "revise"}:
@@ -239,7 +246,13 @@ def generate_plan(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"The {action} action requires the current complete Python program.")
 
     options = normalize_options(payload.get("options"))
-    options["meters_per_cell"] = round(calculate_scale(program, options["width"], options["height"]), 4)
+    # A seed carries its own physical scale; everything else derives it from the program.
+    scale_override = (payload.get("options") or {}).get("meters_per_cell") if isinstance(payload.get("options"), dict) else None
+    options["meters_per_cell"] = (
+        round(float(scale_override), 4)
+        if scale_override
+        else round(calculate_scale(program, options["width"], options["height"]), 4)
+    )
     reference_image = normalize_reference_image(payload.get("reference_image"))
     mode = str(payload.get("mode", "auto"))
     api_key = os.environ.get("GEMINI_API_KEY", "")
@@ -253,7 +266,7 @@ def generate_plan(payload: dict[str, Any]) -> dict[str, Any]:
     max_attempts = max(1, min(5, int(os.environ.get("GEMINI_MAX_ATTEMPTS", "5"))))
     requested_room_count = sum(room["count"] for room in program["rooms"])
     complex_program = "tower" in program["building_type"].lower() or requested_room_count >= 40
-    iterations: list[dict[str, Any]] = []
+    iterations: list[dict[str, Any]] = list(preseeded_iterations or [])
 
     def publish_checkpoint(
         phase: str,
@@ -286,13 +299,17 @@ def generate_plan(payload: dict[str, Any]) -> dict[str, Any]:
     best_candidate: dict[str, Any] | None = None
 
     if action == "fix":
-        try:
-            current_result = execute_and_validate(current_code, program, enforce_ai_contract=True)
-            latest_error = candidate_rejection_reason(current_result)
-            if not latest_error:
-                latest_error = "The current code runs, but the user requested an additional quality pass."
-        except Exception as error:
-            latest_error = str(error)
+        if initial_error is not None:
+            # The caller (seed refine) already executed the code; skip the probe.
+            latest_error = initial_error
+        else:
+            try:
+                current_result = execute_and_validate(current_code, program, enforce_ai_contract=True)
+                latest_error = candidate_rejection_reason(current_result)
+                if not latest_error:
+                    latest_error = "The current code runs, but the user requested an additional quality pass."
+            except Exception as error:
+                latest_error = str(error)
     elif action == "revise":
         latest_error = f"User revision request: {design_request or 'Improve the current plan.'}"
 
@@ -357,6 +374,7 @@ def generate_plan(payload: dict[str, Any]) -> dict[str, Any]:
                 agent_context,
                 thinking_level=thinking_level,
                 reference_image=reference_image,
+                seed_repair=seed_repair,
             )
             previous_code = candidate["code"]
             result = execute_and_validate(previous_code, program, enforce_ai_contract=True)
@@ -488,6 +506,84 @@ def generate_images_action(payload: dict[str, Any]) -> dict[str, Any]:
     return {"images": images, "program": program, "count": len(images)}
 
 
+def refine_plan(payload: dict[str, Any]) -> dict[str, Any]:
+    """Trace mode: deterministic seed translation as attempt 0, then the normal repair loop."""
+    program = normalize_program(payload.get("program"))
+    seed = normalize_seed(payload.get("seed"))
+    seed_program_code = seed_to_code(seed)
+    started = time.perf_counter()
+    publish_job_progress(
+        [],
+        phase="seed",
+        source="seed-translator",
+        message="Executing the deterministic translation of the traced plan.",
+    )
+    result: dict[str, Any] | None = None
+    rejection = ""
+    try:
+        result = execute_and_validate(seed_program_code, program, enforce_ai_contract=True)
+        rejection = candidate_rejection_reason(result)
+    except Exception as error:
+        rejection = str(error)
+    message = (
+        "Seed plan executed and passed validation; no AI repair was needed."
+        if result is not None and not rejection
+        else rejection
+    )
+    seed_iteration = make_iteration(
+        0,
+        "seed",
+        "seed-translator",
+        None,
+        "accepted" if result is not None and not rejection else "rejected",
+        started,
+        message,
+        result,
+        seed_program_code,
+    )
+    publish_job_progress(
+        [seed_iteration],
+        phase="seed",
+        result=result,
+        code=seed_program_code,
+        source="seed-translator",
+        message=message,
+    )
+    if result is not None and not rejection:
+        return {
+            **result,
+            "accepted": True,
+            "source": "seed-translated",
+            "provider": None,
+            "model": None,
+            "strategy": "Deterministic translation of the traced seed plan; the validator passed without AI repair.",
+            "assumptions": [],
+            "program": program,
+            "prompt": str(payload.get("prompt", "")),
+            "iterations": [seed_iteration],
+        }
+
+    repair_payload = {
+        **payload,
+        "action": "fix",
+        "current_code": seed_program_code,
+        "options": {
+            "width": seed["width"],
+            "height": seed["height"],
+            "meters_per_cell": seed["meters_per_cell"],
+        },
+    }
+    outcome = generate_plan(
+        repair_payload,
+        seed_repair=True,
+        preseeded_iterations=[seed_iteration],
+        initial_error=rejection,
+    )
+    source_map = {"gemini-fixed": "seed-repaired", "gemini-fix-unaccepted": "seed-repair-unaccepted"}
+    outcome["source"] = source_map.get(outcome["source"], outcome["source"])
+    return outcome
+
+
 def dispatch_job(payload: dict[str, Any]) -> dict[str, Any]:
     job_kind = str(payload.get("job_kind", "agent"))
     if job_kind == "execute":
@@ -496,4 +592,6 @@ def dispatch_job(payload: dict[str, Any]) -> dict[str, Any]:
         return generate_plan(payload)
     if job_kind == "images":
         return generate_images_action(payload)
+    if job_kind == "refine":
+        return refine_plan(payload)
     raise ValueError("Unknown job kind.")

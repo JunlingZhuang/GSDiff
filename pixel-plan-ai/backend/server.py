@@ -230,7 +230,12 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
-        job_kinds = {"/api/generate": "agent", "/api/execute": "execute", "/api/images": "images"}
+        job_kinds = {
+            "/api/generate": "agent",
+            "/api/execute": "execute",
+            "/api/images": "images",
+            "/api/refine": "refine",
+        }
         if path not in job_kinds:
             self.send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
             return

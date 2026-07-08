@@ -17,6 +17,7 @@ from healthcare_rules import load_healthcare_rules
 from job_progress import publish_job_progress
 from program import calculate_scale, normalize_program
 from runtime import execute_pixel_code
+from seed_code import normalize_seed, seed_to_code
 from service import generate_plan
 from validator import has_non_rectangular_footprint, validate_plan
 import service
@@ -749,6 +750,163 @@ class ImageModeTests(unittest.TestCase):
         with patch.object(service, "generate_images_action", return_value={"images": []}) as action_mock:
             service.dispatch_job({"job_kind": "images", "program": {}})
         action_mock.assert_called_once()
+
+
+def make_test_seed() -> dict[str, object]:
+    """40x24 seed: corridor band with a waiting room above and a toilet below."""
+    width, height = 40, 24
+    cells = [-2] * (width * height)
+
+    def paint(x0: int, y0: int, x1: int, y1: int, value: int) -> None:
+        for y in range(y0, y1):
+            for x in range(x0, x1):
+                cells[y * width + x] = value
+
+    paint(2, 2, 38, 22, -1)      # footprint interior
+    paint(2, 2, 38, 10, 0)       # waiting_0 (top band)
+    paint(2, 10, 38, 14, 1)      # corridor_0 (middle band)
+    paint(2, 14, 20, 22, 2)      # toilet_0 (bottom left)
+    return {
+        "width": width,
+        "height": height,
+        "meters_per_cell": 0.5,
+        "cells": cells,
+        "rooms": [
+            {"id": "waiting_0", "type": "waiting"},
+            {"id": "corridor_0", "type": "corridor"},
+            {"id": "toilet_0", "type": "toilet"},
+        ],
+        "doors": [
+            {
+                "id": "door_waiting",
+                "from_room": "waiting_0",
+                "to_room": "corridor_0",
+                "x": 18,
+                "y": 10,
+                "orientation": "horizontal",
+                "width_cells": 2,
+            },
+            {
+                "id": "door_toilet",
+                "from_room": "toilet_0",
+                "to_room": "corridor_0",
+                "x": 10,
+                "y": 14,
+                "orientation": "horizontal",
+                "width_cells": 1,
+            },
+        ],
+    }
+
+
+class SeedRefineTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.samples = json.loads((ROOT / "data" / "samples.json").read_text(encoding="utf-8"))
+
+    def test_seed_translation_executes_and_reproduces_the_grid_exactly(self) -> None:
+        seed = normalize_seed(make_test_seed())
+        code = seed_to_code(seed)
+        sanitized, plan = execute_pixel_code(code)
+        self.assertIn("ROOM_DATA", sanitized)
+        self.assertEqual(plan["width"], seed["width"])
+        self.assertEqual(plan["height"], seed["height"])
+        self.assertEqual(plan["meters_per_cell"], seed["meters_per_cell"])
+        self.assertEqual([room["id"] for room in plan["rooms"]], ["waiting_0", "corridor_0", "toilet_0"])
+        self.assertEqual(len(plan["doors"]), 2)
+        expected_cells = [-1 if cell == -2 else cell for cell in seed["cells"]]
+        self.assertEqual(plan["cells"], expected_cells)
+
+    def test_normalize_seed_rejects_malformed_input(self) -> None:
+        good = make_test_seed()
+        with self.assertRaises(ValueError):
+            normalize_seed({**good, "width": 4})
+        with self.assertRaises(ValueError):
+            normalize_seed({**good, "cells": good["cells"][:-1]})
+        with self.assertRaises(ValueError):
+            normalize_seed({**good, "rooms": good["rooms"][:1]})  # cells reference index 2
+        with self.assertRaises(ValueError):
+            normalize_seed({**good, "doors": [{**good["doors"][0], "orientation": "diagonal"}]})
+        with self.assertRaises(ValueError):
+            normalize_seed({**good, "meters_per_cell": 0})
+
+    def test_refine_short_circuits_without_ai_when_seed_passes(self) -> None:
+        passing = {
+            "code": "seed-code",
+            "plan": {"rooms": []},
+            "validation": {"score": 95, "checks": [], "issues": [], "areas": []},
+        }
+        with (
+            patch.object(service, "execute_and_validate", return_value=passing),
+            patch.object(service, "generate_gemini_code") as generate_mock,
+        ):
+            outcome = service.refine_plan(
+                {"program": self.samples["clinic-small"], "seed": make_test_seed()}
+            )
+        generate_mock.assert_not_called()
+        self.assertTrue(outcome["accepted"])
+        self.assertEqual(outcome["source"], "seed-translated")
+        self.assertEqual(outcome["iterations"][0]["attempt"], 0)
+        self.assertEqual(outcome["iterations"][0]["phase"], "seed")
+
+    def test_refine_repairs_failing_seed_with_seed_guidance(self) -> None:
+        failing = {
+            "code": "seed-code",
+            "plan": {"rooms": []},
+            "validation": {
+                "score": 40,
+                "checks": [{"category": "doors", "label": "waiting_0 has no door", "pass": False}],
+                "issues": ["waiting_0 has no door."],
+                "areas": [],
+            },
+        }
+        passing = {
+            "code": "repaired-code",
+            "plan": {"rooms": []},
+            "validation": {"score": 92, "checks": [], "issues": [], "areas": []},
+        }
+        model_output = {
+            "code": "repaired-code",
+            "strategy": "moved a door literal",
+            "assumptions": [],
+            "model": "quality-model",
+        }
+        with (
+            patch.dict(os.environ, {"GEMINI_API_KEY": "test-key", "GEMINI_MODEL": "quality-model"}),
+            patch.object(service, "execute_and_validate", side_effect=[failing, passing]),
+            patch.object(service, "generate_gemini_code", return_value=model_output) as generate_mock,
+        ):
+            outcome = service.refine_plan(
+                {"program": self.samples["clinic-small"], "seed": make_test_seed()}
+            )
+        self.assertTrue(generate_mock.call_args.kwargs["seed_repair"])
+        repair_context = generate_mock.call_args.args[5]
+        self.assertIn("ROOM_DATA", repair_context)
+        self.assertTrue(outcome["accepted"])
+        self.assertEqual(outcome["source"], "seed-repaired")
+        self.assertEqual(outcome["iterations"][0]["phase"], "seed")
+        self.assertEqual(outcome["iterations"][0]["status"], "rejected")
+        self.assertEqual(outcome["iterations"][1]["phase"], "fix")
+        # The repair loop must inherit the seed's physical scale, not re-derive it.
+        options = generate_mock.call_args.args[4]
+        self.assertEqual(options["meters_per_cell"], 0.5)
+
+    def test_prompt_uses_seed_guidance_and_keeps_reference_note(self) -> None:
+        program = normalize_program(self.samples["clinic-small"])
+        options = {"width": 40, "height": 24, "meters_per_cell": 0.5}
+        seed_prompt = build_prompt(program, "", options, None, with_seed_repair=True)
+        self.assertIn("Repair it; do not redesign it", seed_prompt)
+        self.assertNotIn("TRANSCRIBE that drawing", seed_prompt)
+        both_prompt = build_prompt(
+            program, "", options, None, with_reference_image=True, with_seed_repair=True
+        )
+        self.assertIn("Repair it; do not redesign it", both_prompt)
+        self.assertIn("visual grounding", both_prompt)
+
+    def test_dispatch_routes_refine_job_kind(self) -> None:
+        with patch.object(service, "refine_plan", return_value={"accepted": True}) as refine_mock:
+            service.dispatch_job({"job_kind": "refine", "program": {}, "seed": {}})
+        refine_mock.assert_called_once()
 
 
 if __name__ == "__main__":

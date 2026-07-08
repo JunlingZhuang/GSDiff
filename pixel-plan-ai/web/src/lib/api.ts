@@ -6,6 +6,7 @@ import type {
   HealthResponse,
   Program,
   Samples,
+  SeedPlan,
 } from "./types";
 
 async function readJson<T>(response: Response): Promise<T> {
@@ -34,11 +35,16 @@ export interface AgentRequest {
   width: number;
   height: number;
   referenceImage?: CandidateImage | null;
+  seed?: SeedPlan | null;
   signal: AbortSignal;
 }
 
 export async function postAgentAction(request: AgentRequest): Promise<GenerationResult> {
-  const endpoint = request.action === "run" || request.action === "inspect" ? "/api/execute" : "/api/generate";
+  const endpoint = request.seed
+    ? "/api/refine"
+    : request.action === "run" || request.action === "inspect"
+      ? "/api/execute"
+      : "/api/generate";
   const response = await fetch(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -53,6 +59,7 @@ export async function postAgentAction(request: AgentRequest): Promise<Generation
       mode: "auto",
       options: { width: request.width, height: request.height },
       reference_image: request.referenceImage ?? undefined,
+      seed: request.seed ?? undefined,
     }),
   });
   return readJson(await Promise.resolve(response));

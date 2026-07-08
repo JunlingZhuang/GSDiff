@@ -160,7 +160,24 @@ export type Samples = Record<string, Program>;
 
 export type AgentAction = "generate" | "run" | "inspect" | "fix" | "revise";
 
-export type StudioMode = "program" | "image";
+export type StudioMode = "program" | "image" | "trace";
+
+export interface SeedPlan {
+  width: number;
+  height: number;
+  meters_per_cell: number;
+  cells: number[] | number[][];
+  rooms: { id?: string; type: string }[];
+  doors?: {
+    id?: string;
+    from_room: string;
+    to_room: string | null;
+    x: number;
+    y: number;
+    orientation: "horizontal" | "vertical";
+    width_cells?: number;
+  }[];
+}
 
 export function candidateDataUrl(candidate: CandidateImage): string {
   return `data:${candidate.mime};base64,${candidate.data}`;

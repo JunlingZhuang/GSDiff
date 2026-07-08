@@ -86,7 +86,7 @@ export function ProgramPanel({ studio }: { studio: Studio }) {
 
           <section className="flex flex-col gap-2">
             <SectionLabel index="03">Generation mode</SectionLabel>
-            <Tabs value={studio.mode} onValueChange={(value) => studio.setMode(value as "program" | "image")}>
+            <Tabs value={studio.mode} onValueChange={(value) => studio.setMode(value as "program" | "image" | "trace")}>
               <TabsList className="grid h-8 w-full grid-cols-3">
                 <TabsTrigger value="program" className="text-[10px] font-bold tracking-wide">
                   PROGRAM
@@ -94,7 +94,7 @@ export function ProgramPanel({ studio }: { studio: Studio }) {
                 <TabsTrigger value="image" className="text-[10px] font-bold tracking-wide">
                   FROM IMAGE
                 </TabsTrigger>
-                <TabsTrigger value="trace" disabled className="text-[10px] font-bold tracking-wide" title="Coming soon: refine a traced plan">
+                <TabsTrigger value="trace" className="text-[10px] font-bold tracking-wide">
                   FROM TRACE
                 </TabsTrigger>
               </TabsList>
@@ -153,6 +153,42 @@ export function ProgramPanel({ studio }: { studio: Studio }) {
                 </div>
               </div>
             ) : null}
+
+            {studio.mode === "trace" ? (
+              <div className="flex flex-col gap-2 rounded-lg border bg-muted/40 p-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-bold tracking-wide text-muted-foreground">TRACED PLAN SEED</span>
+                  <label className="cursor-pointer text-[10px] font-bold tracking-wide text-primary hover:underline">
+                    UPLOAD JSON
+                    <input
+                      type="file"
+                      accept=".json,application/json"
+                      className="hidden"
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        if (!file) return;
+                        void file.text().then((text) => studio.setSeedText(text));
+                        event.target.value = "";
+                      }}
+                    />
+                  </label>
+                </div>
+                <Textarea
+                  value={studio.seedText}
+                  onChange={(event) => studio.setSeedText(event.target.value)}
+                  spellCheck={false}
+                  placeholder='Paste the traced seed JSON: {"width":..,"height":..,"meters_per_cell":..,"cells":[..],"rooms":[..],"doors":[..]}'
+                  className="h-32 resize-y font-mono text-[10px] leading-relaxed"
+                />
+                <p className={`text-[11px] leading-snug ${studio.seedError ? "text-destructive" : "text-muted-foreground"}`}>
+                  {studio.seedError
+                    ? `Invalid seed · ${studio.seedError}`
+                    : studio.seed
+                      ? `Seed ready · ${studio.seed.width}×${studio.seed.height} cells · ${studio.seed.rooms.length} rooms — the plan is executed as-is and repaired only if validation fails.`
+                      : "Export a traced plan from hfagent (or any tool) as grid JSON and refine it here."}
+                </p>
+              </div>
+            ) : null}
           </section>
 
           <section className="flex flex-col gap-2">
@@ -199,19 +235,28 @@ export function ProgramPanel({ studio }: { studio: Studio }) {
       <div className="border-t p-3">
         <Button
           className="h-10 w-full gap-2 text-xs font-bold tracking-wide"
-          disabled={!!studio.busyAction || !studio.program || (imageMode && studio.selectedCandidate < 0)}
+          disabled={
+            !!studio.busyAction ||
+            !studio.program ||
+            (imageMode && studio.selectedCandidate < 0) ||
+            (studio.mode === "trace" && !studio.seed)
+          }
           onClick={() => void studio.runAgentAction("generate")}
         >
           <Sparkles className="size-3.5" />
           {studio.busyAction === "generate"
-            ? studio.transcribing
-              ? "TRANSCRIBING…"
-              : "GENERATING…"
-            : imageMode
-              ? "TRANSCRIBE DRAWING"
-              : studio.result
-                ? "RE-GENERATE PLAN"
-                : "GENERATE PLAN"}
+            ? studio.mode === "trace"
+              ? "REFINING…"
+              : studio.transcribing
+                ? "TRANSCRIBING…"
+                : "GENERATING…"
+            : studio.mode === "trace"
+              ? "REFINE TRACED PLAN"
+              : imageMode
+                ? "TRANSCRIBE DRAWING"
+                : studio.result
+                  ? "RE-GENERATE PLAN"
+                  : "GENERATE PLAN"}
         </Button>
         <p className={`mt-2 truncate text-[11px] ${studio.status.error ? "text-destructive" : "text-muted-foreground"}`}>
           {studio.status.text}

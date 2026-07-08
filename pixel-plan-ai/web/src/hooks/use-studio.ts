@@ -20,6 +20,7 @@ import type {
   Plan,
   Program,
   Samples,
+  SeedPlan,
   StudioMode,
   Validation,
 } from "@/lib/types";
@@ -50,6 +51,7 @@ export function useStudio() {
 
   const [mode, setMode] = React.useState<StudioMode>("program");
   const [viewport, setViewport] = React.useState<ViewportMode>("2d");
+  const [seedText, setSeedText] = React.useState("");
   const [candidates, setCandidates] = React.useState<CandidateImage[]>([]);
   const [selectedCandidate, setSelectedCandidate] = React.useState(-1);
   const [candidatesBusy, setCandidatesBusy] = React.useState(false);
@@ -133,6 +135,31 @@ export function useStudio() {
   const activePlan = livePlan ?? result?.plan ?? null;
   const activeValidation = liveValidation ?? result?.validation ?? null;
 
+  const seed = React.useMemo<SeedPlan | null>(() => {
+    if (!seedText.trim()) return null;
+    try {
+      const parsed = JSON.parse(seedText) as SeedPlan;
+      if (!parsed || typeof parsed !== "object") return null;
+      if (!parsed.width || !parsed.height || !parsed.cells || !parsed.rooms?.length) return null;
+      return parsed;
+    } catch {
+      return null;
+    }
+  }, [seedText]);
+
+  const seedError = React.useMemo<string | null>(() => {
+    if (!seedText.trim()) return null;
+    try {
+      const parsed = JSON.parse(seedText) as SeedPlan;
+      if (!parsed?.width || !parsed?.height) return "seed needs width and height";
+      if (!parsed?.cells) return "seed needs a cells grid";
+      if (!parsed?.rooms?.length) return "seed needs a rooms list";
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }, [seedText]);
+
   const loadSample = React.useCallback(
     (key: string) => {
       const sample = samples[key];
@@ -198,27 +225,41 @@ export function useStudio() {
         setStatus({ text: "Draw candidates and pick one drawing first.", error: true });
         return;
       }
+      if (action === "generate" && mode === "trace" && !seed) {
+        setStatus({ text: "Paste or upload a valid traced-plan seed JSON first.", error: true });
+        return;
+      }
       const requestId = crypto.randomUUID();
       const controller = new AbortController();
       abortRef.current = controller;
       requestIdRef.current = requestId;
       const isTranscription = action === "generate" && mode === "image" && selectedCandidate >= 0;
+      const isRefinement = action === "generate" && mode === "trace" && !!seed;
       const referenceImage = isTranscription ? candidates[selectedCandidate] : null;
       if (referenceImage) setReference({ image: referenceImage, index: selectedCandidate });
       setBusyAction(action);
       setShowReference(false);
       setPhaseText(
-        isTranscription
-          ? "Gemini is transcribing the selected drawing into floor-plan Python"
-          : action === "generate"
-            ? "Gemini is writing a complete Python program"
-            : action === "fix"
-              ? "Gemini is diagnosing and fixing the current code"
-              : action === "revise"
-                ? "Gemini is revising the complete Python program"
-                : "Executing the current Python program",
+        isRefinement
+          ? "Executing the seed translation, then repairing only if validation fails"
+          : isTranscription
+            ? "Gemini is transcribing the selected drawing into floor-plan Python"
+            : action === "generate"
+              ? "Gemini is writing a complete Python program"
+              : action === "fix"
+                ? "Gemini is diagnosing and fixing the current code"
+                : action === "revise"
+                  ? "Gemini is revising the complete Python program"
+                  : "Executing the current Python program",
       );
-      setStatus({ text: isTranscription ? "Transcribing the drawing, then validating..." : "Working...", error: false });
+      setStatus({
+        text: isRefinement
+          ? "Refining the traced plan..."
+          : isTranscription
+            ? "Transcribing the drawing, then validating..."
+            : "Working...",
+        error: false,
+      });
       let finished = false;
       const progressTask =
         action === "run" || action === "inspect"
@@ -236,6 +277,7 @@ export function useStudio() {
           width: gridWidth,
           height: gridHeight,
           referenceImage,
+          seed: isRefinement ? seed : null,
           signal: controller.signal,
         });
         setResult(payload);
@@ -268,7 +310,7 @@ export function useStudio() {
         }
       }
     },
-    [busyAction, program, code, revision, mode, selectedCandidate, candidates, prompt, gridWidth, gridHeight, pollProgress],
+    [busyAction, program, code, revision, mode, selectedCandidate, candidates, seed, prompt, gridWidth, gridHeight, pollProgress],
   );
 
   const stopGeneration = React.useCallback(async () => {
@@ -346,6 +388,10 @@ export function useStudio() {
     setMode,
     viewport,
     setViewport,
+    seedText,
+    setSeedText,
+    seed,
+    seedError,
     candidates,
     selectedCandidate,
     selectCandidate,

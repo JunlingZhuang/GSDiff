@@ -140,17 +140,34 @@ Your program must TRANSCRIBE that drawing onto the cell grid, not invent a new d
 - Encode the layout you SEE as data (room rectangles read off the drawing) plus painting loops; do not substitute a generic packing algorithm."""
 
 
+SEED_REPAIR_GUIDANCE = """The current program encodes an EXISTING traced floor plan as data literals
+(FOOTPRINT_RECTS / ROOM_DATA / DOORS) followed by a fixed rasterizing builder.
+Repair it; do not redesign it:
+- Fix validator failures by minimally adjusting the data literals: nudge rectangle bounds, resize or split one room's rectangles, move or add door entries on real shared boundaries.
+- Preserve the traced massing, corridor topology, and relative room placement. Do not reorder rooms, do not swap the builder for a generic packing or banding algorithm, and do not regenerate the layout from scratch.
+- Keep the ROOM_DATA/DOORS + builder structure in every revision so later repairs stay local. You may extend the builder with ownership audits or shared-boundary door scanners, but geometry always stays in the data literals."""
+
+
 def build_prompt(
     program: dict[str, Any],
     design_request: str,
     options: dict[str, Any],
     repair_context: str | None,
     with_reference_image: bool = False,
+    with_seed_repair: bool = False,
 ) -> str:
     healthcare_rules = rules_for_prompt(program) if uses_healthcare_rules(program) else {}
     pixel_targets = pixel_planning_targets(program, options)
     family_guidance = layout_family_guidance(program)
-    if with_reference_image:
+    if with_seed_repair:
+        family_guidance = SEED_REPAIR_GUIDANCE
+        if with_reference_image:
+            family_guidance += (
+                "\n\nThe original drawing this plan was traced from is attached for visual grounding "
+                "(grid row y=0 is the TOP edge; do not mirror). Use it to resolve ambiguity, "
+                "but geometry edits still happen in the data literals."
+            )
+    elif with_reference_image:
         family_guidance = REFERENCE_IMAGE_GUIDANCE
     return f"""You are a specialized floor-plan coding agent.
 Read the architectural program, design a spatial strategy, and write a complete executable Python layout algorithm. Work like a coding agent: inspect the previous code and exact executor or validator feedback, revise the implementation, and return the entire corrected program on every attempt.
@@ -257,6 +274,7 @@ def generate_gemini_code(
     repair_context: str | None = None,
     thinking_level: str | None = None,
     reference_image: dict[str, str] | None = None,
+    seed_repair: bool = False,
 ) -> dict[str, Any]:
     if not api_key:
         raise ValueError("GEMINI_API_KEY is not configured.")
@@ -284,7 +302,8 @@ def generate_gemini_code(
 
     parts: list[dict[str, Any]] = [{
         "text": build_prompt(program, design_request, options, repair_context,
-                             with_reference_image=reference_image is not None),
+                             with_reference_image=reference_image is not None,
+                             with_seed_repair=seed_repair),
     }]
     if reference_image is not None:
         # the drawing rides along on EVERY attempt, so repairs stay anchored to
