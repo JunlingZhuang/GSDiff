@@ -12,6 +12,42 @@ from healthcare_rules import rules_for_prompt, uses_healthcare_rules
 
 DEFAULT_MODEL = "gemini-3.5-flash"
 
+
+def attempt_tools_enabled() -> bool:
+    """True when the in-attempt self-check tool loop is switched on (docs #8).
+
+    Unset or 0/false/no/off (case-insensitive) keeps the byte-identical single-call path.
+    """
+    return os.environ.get("GEMINI_ATTEMPT_TOOLS", "").strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+# In-attempt self-check tool (docs/claude-code-lessons.md #8): behind GEMINI_ATTEMPT_TOOLS the model
+# may call this to run a draft in the real sandbox + validator before submitting its structured answer.
+ATTEMPT_TOOL_DECLARATION = {
+    "name": "execute_and_validate",
+    "description": (
+        "Run a complete candidate program in the real sandbox and architectural validator. "
+        "Returns score, rejected flag, and compact validator feedback. "
+        "Use it to self-check before submitting your final answer."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "code": {
+                "type": "string",
+                "description": "A complete standalone Python program that assigns the final plan to top-level variable result.",
+            },
+        },
+        "required": ["code"],
+    },
+}
+
+# Appended after the repair-context layer only when the tool loop is active.
+ATTEMPT_TOOLS_GUIDANCE = (
+    "You may call execute_and_validate at most 2 times to test a draft before answering. "
+    "After the final tool result, return the required JSON answer."
+)
+
 # Verdict-ownership + anti-thrashing rules added 2026-07-08 (docs/claude-code-lessons.md #3); pair with the validator delta feedback.
 # Durable coding contract (execution env, result/grid contracts) moved here 2026-07-08 for role separation + prefix caching (docs/claude-code-lessons.md #12).
 # Micro-examples added 2026-07-08; the door example is locked by a sandbox test (docs/claude-code-lessons.md #11).
@@ -107,6 +143,106 @@ def normalize_usage_metadata(model: str, raw: Any) -> dict[str, Any]:
         "total_tokens": total_tokens,
         "estimated_cost_usd": estimated_cost,
     }
+
+
+def sum_attempt_usage(model: str, raw_metadatas: list[Any]) -> dict[str, Any]:
+    """Normalize every per-call usageMetadata in one attempt and sum the token fields.
+
+    estimated_cost_usd is summed only across the calls that priced (None otherwise).
+    """
+    total = {
+        "prompt_tokens": 0,
+        "candidate_tokens": 0,
+        "thinking_tokens": 0,
+        "total_tokens": 0,
+        "estimated_cost_usd": None,
+    }
+    for raw in raw_metadatas:
+        row = normalize_usage_metadata(model, raw)
+        total["prompt_tokens"] += row["prompt_tokens"]
+        total["candidate_tokens"] += row["candidate_tokens"]
+        total["thinking_tokens"] += row["thinking_tokens"]
+        total["total_tokens"] += row["total_tokens"]
+        if row["estimated_cost_usd"] is not None:
+            total["estimated_cost_usd"] = round((total["estimated_cost_usd"] or 0.0) + row["estimated_cost_usd"], 6)
+    return total
+
+
+def call_gemini(
+    api_key: str,
+    model_name: str,
+    contents: list[dict[str, Any]],
+    generation_config: dict[str, Any],
+    system_instruction_text: str,
+    tools: list[dict[str, Any]] | None = None,
+    tool_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """POST one (possibly multi-turn) generateContent request and return the parsed JSON."""
+    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+    payload: dict[str, Any] = {
+        "systemInstruction": {"parts": [{"text": system_instruction_text}]},
+        "contents": contents,
+        "generationConfig": generation_config,
+    }
+    if tools is not None:
+        payload["tools"] = tools
+    if tool_config is not None:
+        payload["toolConfig"] = tool_config
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+        method="POST",
+    )
+    timeout_seconds = max(30.0, float(os.environ.get("GEMINI_TIMEOUT_SECONDS", "300")))
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        body = error.read().decode("utf-8", errors="replace")
+        try:
+            message = json.loads(body).get("error", {}).get("message", body)
+        except json.JSONDecodeError:
+            message = body
+        raise ValueError(f"Gemini request failed: {message}") from error
+    except urllib.error.URLError as error:
+        raise ValueError(f"Gemini network request failed: {error.reason}") from error
+
+
+def first_candidate_parts(response_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates = response_payload.get("candidates", [])
+    if not candidates:
+        return []
+    return candidates[0].get("content", {}).get("parts", []) or []
+
+
+def find_function_call(parts: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for part in parts:
+        if isinstance(part, dict) and isinstance(part.get("functionCall"), dict):
+            return part["functionCall"]
+    return None
+
+
+def parse_structured_answer(response_payload: dict[str, Any]) -> dict[str, Any]:
+    """Extract, unfence, json-parse and shape-validate a structured code answer."""
+    parts = first_candidate_parts(response_payload)
+    text = "".join(str(part.get("text", "")) for part in parts).strip()
+    if not text:
+        raise ValueError("Gemini returned no candidate text.")
+    if text.startswith("```"):
+        lines = text.splitlines()
+        text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+    try:
+        structured = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"Gemini returned invalid structured JSON: {error.msg}.") from error
+    if not isinstance(structured.get("code"), str):
+        raise ValueError("Gemini output is missing the code string.")
+    if not isinstance(structured.get("strategy"), str):
+        raise ValueError("Gemini output is missing the strategy string.")
+    if not isinstance(structured.get("assumptions"), list):
+        raise ValueError("Gemini output is missing the assumptions array.")
+    return structured
 
 
 def pixel_planning_targets(program: dict[str, Any], options: dict[str, Any]) -> dict[str, Any]:
@@ -290,11 +426,12 @@ def generate_gemini_code(
     thinking_level: str | None = None,
     reference_image: dict[str, str] | None = None,
     seed_repair: bool = False,
+    attempt_executor: Any = None,
+    max_tool_calls: int = 2,
 ) -> dict[str, Any]:
     if not api_key:
         raise ValueError("GEMINI_API_KEY is not configured.")
     model_name = model or DEFAULT_MODEL
-    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
     requested_room_count = sum(int(room.get("count", 1)) for room in program.get("rooms", []))
     complex_request = "tower" in str(program.get("building_type", "")).lower() or requested_room_count >= 40
     output_token_setting = (
@@ -315,11 +452,17 @@ def generate_gemini_code(
             raise ValueError("Gemini thinking level must be minimal, low, medium, or high.")
         generation_config["thinkingConfig"] = {"thinkingLevel": normalized_level}
 
-    parts: list[dict[str, Any]] = [{
-        "text": build_prompt(program, design_request, options, repair_context,
-                             with_reference_image=reference_image is not None,
-                             with_seed_repair=seed_repair),
-    }]
+    # Only build the tool loop when a real executor is wired AND the flag is on;
+    # otherwise the request is byte-identical to the plain single structured call.
+    use_tools = attempt_executor is not None and attempt_tools_enabled()
+    prompt_text = build_prompt(
+        program, design_request, options, repair_context,
+        with_reference_image=reference_image is not None,
+        with_seed_repair=seed_repair,
+    )
+    if use_tools:
+        prompt_text = prompt_text + "\n\n" + ATTEMPT_TOOLS_GUIDANCE
+    parts: list[dict[str, Any]] = [{"text": prompt_text}]
     if reference_image is not None:
         # the drawing rides along on EVERY attempt, so repairs stay anchored to
         # the reference design instead of drifting toward a generic layout
@@ -329,56 +472,67 @@ def generate_gemini_code(
                 "data": reference_image["data"],
             },
         })
-    payload = {
-        "systemInstruction": {
-            "parts": [{"text": SYSTEM_INSTRUCTION}],
-        },
-        "contents": [
-            {
-                "role": "user",
-                "parts": parts,
-            }
-        ],
-        "generationConfig": generation_config,
-    }
-    request = urllib.request.Request(
-        endpoint,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
-        method="POST",
-    )
-    timeout_seconds = max(30.0, float(os.environ.get("GEMINI_TIMEOUT_SECONDS", "300")))
-    try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-            response_payload = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as error:
-        body = error.read().decode("utf-8", errors="replace")
-        try:
-            message = json.loads(body).get("error", {}).get("message", body)
-        except json.JSONDecodeError:
-            message = body
-        raise ValueError(f"Gemini request failed: {message}") from error
-    except urllib.error.URLError as error:
-        raise ValueError(f"Gemini network request failed: {error.reason}") from error
 
-    candidates = response_payload.get("candidates", [])
-    parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
-    text = "".join(str(part.get("text", "")) for part in parts).strip()
-    if not text:
-        raise ValueError("Gemini returned no candidate text.")
-    if text.startswith("```"):
-        lines = text.splitlines()
-        text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
-    try:
-        structured = json.loads(text)
-    except json.JSONDecodeError as error:
-        raise ValueError(f"Gemini returned invalid structured JSON: {error.msg}.") from error
-    if not isinstance(structured.get("code"), str):
-        raise ValueError("Gemini output is missing the code string.")
-    if not isinstance(structured.get("strategy"), str):
-        raise ValueError("Gemini output is missing the strategy string.")
-    if not isinstance(structured.get("assumptions"), list):
-        raise ValueError("Gemini output is missing the assumptions array.")
+    if not use_tools:
+        response_payload = call_gemini(
+            api_key, model_name, [{"role": "user", "parts": parts}], generation_config, SYSTEM_INSTRUCTION
+        )
+        structured = parse_structured_answer(response_payload)
+        structured["model"] = model_name
+        structured["usage"] = normalize_usage_metadata(model_name, response_payload.get("usageMetadata"))
+        return structured
+
+    # In-attempt self-check loop (docs #8): the model may call execute_and_validate up to
+    # max_tool_calls times against the real sandbox+validator, then we take one tools-free
+    # schema-constrained call as the final structured answer. Probe confirmed tools and
+    # responseJsonSchema can coexist, so the generation_config is unchanged across phases.
+    contents: list[dict[str, Any]] = [{"role": "user", "parts": parts}]
+    tools = [{"functionDeclarations": [ATTEMPT_TOOL_DECLARATION]}]
+    tool_config = {"functionCallingConfig": {"mode": "AUTO"}}
+    usage_metadatas: list[Any] = []
+    calls_used = 0
+    while calls_used < max_tool_calls:
+        tool_response = call_gemini(
+            api_key, model_name, contents, generation_config, SYSTEM_INSTRUCTION,
+            tools=tools, tool_config=tool_config,
+        )
+        usage_metadatas.append(tool_response.get("usageMetadata"))
+        model_parts = first_candidate_parts(tool_response)
+        function_call = find_function_call(model_parts)
+        if function_call is None:
+            break  # the model chose to answer directly; the final phase re-asks under the schema
+        contents.append({"role": "model", "parts": model_parts})
+        code_argument = str((function_call.get("args") or {}).get("code", ""))
+        feedback = attempt_executor(code_argument)
+        contents.append({
+            "role": "user",
+            "parts": [{
+                "functionResponse": {
+                    "name": function_call.get("name") or ATTEMPT_TOOL_DECLARATION["name"],
+                    "response": feedback,
+                },
+            }],
+        })
+        calls_used += 1
+    else:
+        # Budget consumed without an early break: the model used every tool call.
+        # Tell it to finalize instead of silently dropping its next intent (docs #8 guard).
+        if calls_used:
+            contents.append({
+                "role": "user",
+                "parts": [{
+                    "functionResponse": {
+                        "name": ATTEMPT_TOOL_DECLARATION["name"],
+                        "response": {"note": "tool budget exhausted; submit your final JSON now"},
+                    },
+                }],
+            })
+
+    final_response = call_gemini(
+        api_key, model_name, contents, generation_config, SYSTEM_INSTRUCTION
+    )
+    usage_metadatas.append(final_response.get("usageMetadata"))
+    structured = parse_structured_answer(final_response)
     structured["model"] = model_name
-    structured["usage"] = normalize_usage_metadata(model_name, response_payload.get("usageMetadata"))
+    structured["usage"] = sum_attempt_usage(model_name, usage_metadatas)
     return structured

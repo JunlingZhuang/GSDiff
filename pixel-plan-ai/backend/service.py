@@ -5,7 +5,7 @@ import time
 from typing import Any
 
 from code_policy import validate_program_contract
-from gemini import generate_gemini_code
+from gemini import attempt_tools_enabled, generate_gemini_code
 from job_progress import append_job_event, publish_job_progress
 from plan_image import generate_plan_images
 from program import calculate_scale, normalize_program
@@ -310,6 +310,9 @@ def generate_plan(
     max_attempts = max(1, min(5, int(os.environ.get("GEMINI_MAX_ATTEMPTS", "5"))))
     max_total_tokens = max(0, int(os.environ.get("GEMINI_MAX_TOTAL_TOKENS", "0")))
     max_budget_usd = max(0.0, float(os.environ.get("GEMINI_MAX_BUDGET_USD", "0")))
+    # docs #8: behind the flag the model self-checks drafts against the real sandbox+validator
+    # mid-attempt; unset leaves generation byte-identical (attempt_executor stays None).
+    attempt_tools_on = attempt_tools_enabled()
     requested_room_count = sum(room["count"] for room in program["rooms"])
     complex_program = "tower" in program["building_type"].lower() or requested_room_count >= 40
     iterations: list[dict[str, Any]] = list(preseeded_iterations or [])
@@ -425,6 +428,27 @@ def generate_plan(
             model=model,
             message=running_iteration["message"],
         )
+        attempt_executor = None
+        if attempt_tools_on:
+            def attempt_executor(code: str, _attempt: int = attempt_number) -> dict[str, Any]:
+                """Run one candidate through the real sandbox+validator for the model's self-check (docs #8)."""
+                try:
+                    tool_result = execute_and_validate(code, program, enforce_ai_contract=True)
+                    reason = candidate_rejection_reason(tool_result)
+                    feedback = {
+                        "score": tool_result["validation"]["score"],
+                        "rejected": bool(reason),
+                        "feedback": (reason or "passes acceptance")[:4000],
+                    }
+                except Exception as tool_error:
+                    feedback = {"score": 0, "rejected": True, "feedback": str(tool_error)[:4000]}
+                append_job_event({
+                    "e": "tool_check",
+                    "attempt": _attempt,
+                    "score": feedback["score"],
+                    "rejected": feedback["rejected"],
+                })
+                return feedback
         try:
             candidate = generate_gemini_code(
                 api_key,
@@ -436,6 +460,8 @@ def generate_plan(
                 thinking_level=thinking_level,
                 reference_image=reference_image,
                 seed_repair=seed_repair,
+                attempt_executor=attempt_executor,
+                max_tool_calls=2,
             )
             append_job_event({
                 "e": "model_returned",

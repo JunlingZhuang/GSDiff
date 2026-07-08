@@ -5,12 +5,14 @@ import os
 import sys
 import tempfile
 import unittest
+import urllib.request
 from pathlib import Path
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "backend"))
 
+import gemini
 from code_policy import validate_generated_code, validate_program_contract
 from gemini import SYSTEM_INSTRUCTION, build_prompt, normalize_usage_metadata
 from healthcare_rules import load_healthcare_rules
@@ -1277,6 +1279,132 @@ class SeedRefineTests(unittest.TestCase):
         with patch.object(service, "refine_plan", return_value={"accepted": True}) as refine_mock:
             service.dispatch_job({"job_kind": "refine", "program": {}, "seed": {}})
         refine_mock.assert_called_once()
+
+
+def _fake_urlopen_response(payload: dict[str, object]) -> object:
+    """Minimal context-manager stand-in for urllib.request.urlopen's return value."""
+
+    class _Response:
+        def __enter__(self) -> "_Response":
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+        def read(self) -> bytes:
+            return json.dumps(payload).encode("utf-8")
+
+    return _Response()
+
+
+def _function_call_payload(code: str, total_tokens: int) -> dict[str, object]:
+    """Response shaped like the live probe: a model turn carrying one functionCall part."""
+    return {
+        "candidates": [{
+            "content": {
+                "role": "model",
+                "parts": [{
+                    "functionCall": {"name": "execute_and_validate", "args": {"code": code}, "id": "call-1"},
+                }],
+            },
+            "finishReason": "STOP",
+        }],
+        "usageMetadata": {"promptTokenCount": total_tokens, "candidatesTokenCount": 0, "totalTokenCount": total_tokens},
+    }
+
+
+def _structured_json_payload(code: str, total_tokens: int) -> dict[str, object]:
+    """Response shaped like the live probe: a model turn carrying the final JSON text part."""
+    text = json.dumps({"code": code, "strategy": "s", "assumptions": []})
+    return {
+        "candidates": [{"content": {"role": "model", "parts": [{"text": text}]}}],
+        "usageMetadata": {"promptTokenCount": total_tokens, "candidatesTokenCount": 0, "totalTokenCount": total_tokens},
+    }
+
+
+class AttemptToolLoopTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        samples = json.loads((ROOT / "data" / "samples.json").read_text(encoding="utf-8"))
+        cls.program = normalize_program(samples["clinic-small"])
+        cls.options = {"width": 64, "height": 40, "meters_per_cell": 0.25}
+
+    def test_flag_off_builds_a_single_tools_free_request(self) -> None:
+        response = _fake_urlopen_response(_structured_json_payload("off-code", 42))
+        with (
+            patch.dict(os.environ, {"GEMINI_ATTEMPT_TOOLS": "0"}),
+            patch("urllib.request.urlopen", return_value=response) as urlopen_mock,
+        ):
+            result = gemini.generate_gemini_code(
+                "test-key", "test-model", self.program, "", self.options
+            )
+        self.assertEqual(urlopen_mock.call_count, 1)
+        body = json.loads(urlopen_mock.call_args.args[0].data.decode("utf-8"))
+        self.assertNotIn("tools", body)
+        self.assertNotIn("toolConfig", body)
+        self.assertEqual(result["code"], "off-code")
+        self.assertEqual(result["model"], "test-model")
+        self.assertEqual(result["usage"]["total_tokens"], 42)
+
+    def test_tool_loop_self_checks_two_drafts_then_submits_final_json(self) -> None:
+        recorded: list[str] = []
+
+        def fake_executor(code: str) -> dict[str, object]:
+            recorded.append(code)
+            return {"score": 40, "rejected": True, "feedback": "f"}
+
+        responses = [
+            _fake_urlopen_response(_function_call_payload("draft-1", 100)),
+            _fake_urlopen_response(_function_call_payload("draft-2", 200)),
+            _fake_urlopen_response(_structured_json_payload("final-code", 300)),
+        ]
+        with (
+            patch.dict(os.environ, {"GEMINI_ATTEMPT_TOOLS": "1"}),
+            patch("urllib.request.urlopen", side_effect=responses) as urlopen_mock,
+        ):
+            result = gemini.generate_gemini_code(
+                "test-key", "test-model", self.program, "", self.options,
+                attempt_executor=fake_executor, max_tool_calls=2,
+            )
+        # The executor ran on each of the two drafts the model asked to test.
+        self.assertEqual(recorded, ["draft-1", "draft-2"])
+        self.assertEqual(urlopen_mock.call_count, 3)
+        self.assertEqual(result["code"], "final-code")
+
+        first_body = json.loads(urlopen_mock.call_args_list[0].args[0].data.decode("utf-8"))
+        self.assertIn("tools", first_body)
+        self.assertEqual(first_body["toolConfig"]["functionCallingConfig"]["mode"], "AUTO")
+
+        third_body = json.loads(urlopen_mock.call_args_list[2].args[0].data.decode("utf-8"))
+        self.assertNotIn("tools", third_body)  # final phase is tools-free
+        self.assertIn("responseJsonSchema", third_body["generationConfig"])
+        function_responses = [
+            part["functionResponse"]["response"]
+            for turn in third_body["contents"]
+            for part in turn.get("parts", [])
+            if "functionResponse" in part
+        ]
+        # Both real validator feedbacks are carried into the final request.
+        self.assertEqual(
+            function_responses.count({"score": 40, "rejected": True, "feedback": "f"}), 2
+        )
+
+    def test_tool_loop_sums_usage_across_all_calls_in_the_attempt(self) -> None:
+        responses = [
+            _fake_urlopen_response(_function_call_payload("draft-1", 100)),
+            _fake_urlopen_response(_function_call_payload("draft-2", 200)),
+            _fake_urlopen_response(_structured_json_payload("final-code", 300)),
+        ]
+        with (
+            patch.dict(os.environ, {"GEMINI_ATTEMPT_TOOLS": "1"}),
+            patch("urllib.request.urlopen", side_effect=responses),
+        ):
+            result = gemini.generate_gemini_code(
+                "test-key", "test-model", self.program, "", self.options,
+                attempt_executor=lambda code: {"score": 0, "rejected": True, "feedback": "x"},
+                max_tool_calls=2,
+            )
+        self.assertEqual(result["usage"]["total_tokens"], 600)
 
 
 if __name__ == "__main__":
