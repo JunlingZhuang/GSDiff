@@ -5,8 +5,11 @@ import type { Door, Plan } from "./types";
 // low-alpha room fills with a full-strength inner accent, crisp dark wall
 // strokes traced from the cell grid, proper door swing arcs, and a layered
 // two-line label lockup. Cells are always square — the canvas takes the plan's
-// aspect ratio, never the container's; pan/zoom is applied as a CSS transform
-// by the viewport wrapper, so this raster is drawn once per plan/hover change.
+// aspect ratio, never the container's. The caller passes the *effective* px/cell
+// (fitBaseCellPx × zoom) and a devicePixelRatio, so the raster is drawn at the
+// display's true resolution and re-drawn on every zoom step instead of being
+// resampled by a CSS scale transform. Panning stays a CSS translate (which does
+// not blur), so this only redraws on plan / zoom / hover / dpr / size changes.
 const BACKDROP = "#f7f8fa";
 const GRID_MINOR = "rgba(46,90,180,0.045)";
 const GRID_MAJOR = "rgba(46,90,180,0.09)";
@@ -26,6 +29,10 @@ const OUTSIDE = -2;
 const UNASSIGNED = -1;
 
 interface RenderOptions {
+  // Effective px/cell at draw time (fitBaseCellPx × zoom); may be fractional.
+  cellPx: number;
+  // Capped devicePixelRatio for the backing store (viewport clamps to ≤ 2.5).
+  dpr: number;
   hoveredRoomIndex?: number;
   preview?: boolean;
 }
@@ -92,19 +99,22 @@ function titleCase(id: string): string {
 
 function prepareCanvas(
   canvas: HTMLCanvasElement,
-  cols: number,
-  rows: number,
-  scale: number,
+  cssWidth: number,
+  cssHeight: number,
+  dpr: number,
 ): CanvasRenderingContext2D {
-  const deviceScale = Math.min(2, window.devicePixelRatio || 1);
-  canvas.width = cols * scale * deviceScale;
-  canvas.height = rows * scale * deviceScale;
-  canvas.style.width = `${cols * scale}px`;
-  canvas.style.height = `${rows * scale}px`;
+  // CSS size is the plan's display size at the current effective scale; the
+  // backing store is dpr× larger so every stroke, arc, and glyph rasterizes at
+  // the display's true resolution instead of being resampled by a CSS scale.
+  canvas.width = Math.max(1, Math.round(cssWidth * dpr));
+  canvas.height = Math.max(1, Math.round(cssHeight * dpr));
+  canvas.style.width = `${cssWidth}px`;
+  canvas.style.height = `${cssHeight}px`;
   const context = canvas.getContext("2d");
   if (!context) throw new Error("Canvas rendering is unavailable.");
-  context.setTransform(1, 0, 0, 1, 0, 0);
-  context.scale(deviceScale, deviceScale);
+  // One transform maps CSS-pixel drawing coordinates to device pixels; every
+  // path, arc, and label below is expressed in CSS pixels and stays crisp.
+  context.setTransform(dpr, 0, 0, dpr, 0, 0);
   return context;
 }
 
@@ -147,10 +157,14 @@ function drawBlueprint(context: CanvasRenderingContext2D, cols: number, rows: nu
 }
 
 // Empty viewport: just the blueprint grid, sized to a default plan footprint.
-export function renderEmptyGrid(canvas: HTMLCanvasElement, cols = 96, rows = 64): void {
-  const scale = cellScale(cols);
-  const context = prepareCanvas(canvas, cols, rows, scale);
-  drawBlueprint(context, cols, rows, scale);
+export function renderEmptyGrid(
+  canvas: HTMLCanvasElement,
+  cols: number,
+  rows: number,
+  { cellPx, dpr }: { cellPx: number; dpr: number },
+): void {
+  const context = prepareCanvas(canvas, cols * cellPx, rows * cellPx, dpr);
+  drawBlueprint(context, cols, rows, cellPx);
 }
 
 // Largest inscribed axis-aligned rectangle of a room's cells, in cell coords.
@@ -189,10 +203,13 @@ function largestInnerRect(
   return best.area > 0 ? best : null;
 }
 
-export function renderPlanToCanvas(canvas: HTMLCanvasElement, plan: Plan, options: RenderOptions = {}): void {
-  const { hoveredRoomIndex = -1, preview = false } = options;
-  const scale = planCellScale(plan);
-  const context = prepareCanvas(canvas, plan.width, plan.height, scale);
+export function renderPlanToCanvas(canvas: HTMLCanvasElement, plan: Plan, options: RenderOptions): void {
+  const { cellPx, dpr, hoveredRoomIndex = -1, preview = false } = options;
+  // `cellPx` is the effective px/cell (fitBaseCellPx × zoom); every coordinate
+  // below derives from it at draw time, so zooming re-rasterizes rather than
+  // CSS-scaling. The label hide threshold now reads against this effective size.
+  const scale = cellPx;
+  const context = prepareCanvas(canvas, plan.width * cellPx, plan.height * cellPx, dpr);
   drawBlueprint(context, plan.width, plan.height, scale);
 
   const W = plan.width;
@@ -350,8 +367,10 @@ export function renderPlanToCanvas(canvas: HTMLCanvasElement, plan: Plan, option
       h: room.bounds.height,
     };
     if (rect.w * scale < 64 || rect.h * scale < 28) return;
-    const cx = (rect.x + rect.w / 2) * scale;
-    const cy = (rect.y + rect.h / 2) * scale;
+    // Snap the label anchor to whole CSS pixels so the two-line lockup lands on
+    // a device-pixel-consistent baseline (crisp at dpr ≥ 1).
+    const cx = Math.round((rect.x + rect.w / 2) * scale);
+    const cy = Math.round((rect.y + rect.h / 2) * scale);
     const areaFt2 = Math.round(room.pixel_count * plan.meters_per_cell * plan.meters_per_cell * 10.7639);
 
     context.font = `500 11px ${sans}`;

@@ -17,6 +17,18 @@ const PANEL_RIGHT = 344;
 const PANEL_RIGHT_CLOSED = 12;
 const FIT_PADDING = 48;
 
+// Whole-plan rasters are cheap (plans are ~96×64), but at extreme zoom the
+// backing store could exceed the browser's max canvas area. Past this cap we
+// trade backing-store resolution (never a CSS scale) so we never crash.
+const MAX_BACKING_PX = 8192;
+// devicePixelRatio is capped here so a 3×/4× display never quadruples fill cost.
+const MAX_DPR = 2.5;
+
+function resolveDpr(): number {
+  if (typeof window === "undefined") return 1;
+  return Math.min(MAX_DPR, window.devicePixelRatio || 1);
+}
+
 interface Viewport2DProps {
   plan: Plan | null;
   reference: CandidateImage | null;
@@ -43,56 +55,91 @@ interface HoverState {
   room: PlanRoom | null;
 }
 
+// zoom is the factor relative to the fitted baseline (1 = fitted). base is the
+// fitted px/cell; the effective px/cell drawn at any moment is base × zoom.
+// x / y are the plan's top-left offset in CSS pixels (applied as a CSS translate
+// — translation never blurs, so panning does not force a re-raster).
+interface View {
+  zoom: number;
+  x: number;
+  y: number;
+  base: number;
+}
+
 export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(function Viewport2D(
   { plan, reference, showReference, referenceOpacity, preview = false, rightPanelOpen = false, onViewChange, onHoverCell },
   handleRef,
 ) {
   const containerRef = React.useRef<HTMLDivElement>(null);
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
-  const [view, setView] = React.useState({ zoom: 1, x: 0, y: 0 });
+  const [view, setView] = React.useState<View>({ zoom: 1, x: 0, y: 0, base: cellScale(DEFAULT_COLS) });
   const viewRef = React.useRef(view);
   viewRef.current = view;
   const planSizeRef = React.useRef<string>("");
-  // The fitted scale is the 100% baseline; the zoom cluster multiplies on top.
-  const baseZoomRef = React.useRef(1);
   const rightPanelOpenRef = React.useRef(rightPanelOpen);
   rightPanelOpenRef.current = rightPanelOpen;
   const dragRef = React.useRef<{ pointerId: number; startX: number; startY: number; originX: number; originY: number } | null>(null);
   const [hover, setHover] = React.useState<HoverState | null>(null);
   const hoveredRoomIndex = hover?.roomIndex ?? -1;
+  const [dpr, setDpr] = React.useState(resolveDpr);
 
   const dims = React.useMemo(() => {
     const cols = plan?.width ?? DEFAULT_COLS;
     const rows = plan?.height ?? DEFAULT_ROWS;
+    // Natural px/cell — used only to bound the fitted scale's readability floor.
     const scale = plan ? planCellScale(plan) : cellScale(cols);
     return { cols, rows, scale };
   }, [plan]);
 
-  const contentSize = { width: dims.cols * dims.scale, height: dims.rows * dims.scale };
+  // Effective px/cell and the plan's display box at the current zoom. Derived in
+  // render so the wrapper and the canvas backing store size stay in lock-step.
+  const cellPx = view.base * view.zoom;
+  const contentSize = { width: dims.cols * cellPx, height: dims.rows * cellPx };
+
+  // Rasterize the plan at the current effective scale and device pixel ratio.
+  const draw = React.useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const v = viewRef.current;
+    const effectiveCellPx = v.base * v.zoom;
+    if (!(effectiveCellPx > 0)) return;
+    const contentW = dims.cols * effectiveCellPx;
+    const contentH = dims.rows * effectiveCellPx;
+    // Backing-store guard: shrink dpr (not the CSS size) past the area cap.
+    const capScale = Math.min(1, MAX_BACKING_PX / (contentW * dpr), MAX_BACKING_PX / (contentH * dpr));
+    const effectiveDpr = dpr * capScale;
+    if (plan) {
+      renderPlanToCanvas(canvas, plan, { cellPx: effectiveCellPx, dpr: effectiveDpr, hoveredRoomIndex, preview });
+    } else {
+      renderEmptyGrid(canvas, dims.cols, dims.rows, { cellPx: effectiveCellPx, dpr: effectiveDpr });
+    }
+  }, [plan, dims.cols, dims.rows, hoveredRoomIndex, preview, dpr]);
 
   const fit = React.useCallback(() => {
     const container = containerRef.current;
-    if (!container || !contentSize.width) return;
+    if (!container) return;
     const bounds = container.getBoundingClientRect();
     const rightInset = rightPanelOpenRef.current ? PANEL_RIGHT : PANEL_RIGHT_CLOSED;
     const availLeft = PANEL_LEFT + FIT_PADDING;
     const availTop = FIT_PADDING;
     const availWidth = Math.max(80, bounds.width - rightInset - FIT_PADDING - availLeft);
     const availHeight = Math.max(80, bounds.height - FIT_PADDING - availTop);
-    // Fit the plan into the visible rect; keep a readability floor on the base.
-    const base = Math.max(
-      0.2,
-      Math.min(8, availWidth / contentSize.width, availHeight / contentSize.height),
+    // px/cell that lands the plan inside the visible rect, with the same
+    // readability floor/ceiling the old CSS-scale fit used (0.2×–8× natural).
+    const fitCellPx = Math.max(
+      0.2 * dims.scale,
+      Math.min(8 * dims.scale, availWidth / dims.cols, availHeight / dims.rows),
     );
-    baseZoomRef.current = base;
-    const next = {
-      zoom: base,
-      x: availLeft + (availWidth - contentSize.width * base) / 2,
-      y: availTop + (availHeight - contentSize.height * base) / 2,
-    };
-    setView(next);
+    const contentW = dims.cols * fitCellPx;
+    const contentH = dims.rows * fitCellPx;
+    setView({
+      zoom: 1,
+      base: fitCellPx,
+      x: availLeft + (availWidth - contentW) / 2,
+      y: availTop + (availHeight - contentH) / 2,
+    });
     onViewChange?.(1);
-  }, [contentSize.width, contentSize.height, onViewChange]);
+  }, [dims.cols, dims.rows, dims.scale, onViewChange]);
 
   const zoomAt = React.useCallback(
     (factor: number, clientX?: number, clientY?: number) => {
@@ -105,11 +152,12 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
         const zoom = Math.max(0.05, Math.min(12, current.zoom * factor));
         const scaleChange = zoom / current.zoom;
         const next = {
+          ...current,
           zoom,
           x: pivotX - (pivotX - current.x) * scaleChange,
           y: pivotY - (pivotY - current.y) * scaleChange,
         };
-        onViewChange?.(zoom / (baseZoomRef.current || 1));
+        onViewChange?.(zoom);
         return next;
       });
     },
@@ -126,17 +174,21 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
     [zoomAt, fit],
   );
 
+  // Re-fit when the plan's footprint changes (also fits the default empty grid
+  // once on mount). Zoom/pan are otherwise preserved across re-renders.
   React.useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    if (plan) renderPlanToCanvas(canvas, plan, { hoveredRoomIndex, preview });
-    else renderEmptyGrid(canvas, DEFAULT_COLS, DEFAULT_ROWS);
     const signature = plan ? `${plan.width}x${plan.height}` : `empty-${DEFAULT_COLS}x${DEFAULT_ROWS}`;
     if (planSizeRef.current !== signature) {
       planSizeRef.current = signature;
       fit();
     }
-  }, [plan, fit, hoveredRoomIndex, preview]);
+  }, [plan, fit]);
+
+  // Re-raster on plan / zoom / scale / hover / preview / dpr change. Panning
+  // (view.x / view.y) intentionally does not appear here — it is a CSS translate.
+  React.useEffect(() => {
+    draw();
+  }, [draw, view.base, view.zoom]);
 
   // Native listener: React wheel events are passive and cannot preventDefault.
   React.useEffect(() => {
@@ -150,16 +202,47 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
     return () => container.removeEventListener("wheel", onWheel);
   }, [zoomAt]);
 
+  // Container resize → redraw (rAF-debounced so a resize drag redraws once/frame).
+  React.useEffect(() => {
+    const container = containerRef.current;
+    if (!container || typeof ResizeObserver === "undefined") return;
+    let raf = 0;
+    const observer = new ResizeObserver(() => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        draw();
+      });
+    });
+    observer.observe(container);
+    return () => {
+      observer.disconnect();
+      if (raf) cancelAnimationFrame(raf);
+    };
+  }, [draw]);
+
+  // devicePixelRatio can change (moving the window across displays / OS zoom).
+  // The media query is pinned to the current dppx, so re-subscribe when it flips.
+  React.useEffect(() => {
+    if (typeof window === "undefined") return;
+    const query = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+    const onChange = () => setDpr(resolveDpr());
+    query.addEventListener("change", onChange);
+    return () => query.removeEventListener("change", onChange);
+  }, [dpr]);
+
   const updateHover = React.useCallback(
     (clientX: number, clientY: number) => {
       const container = containerRef.current;
       if (!container) return;
       const bounds = container.getBoundingClientRect();
       const v = viewRef.current;
+      const effectiveCellPx = v.base * v.zoom;
+      if (!(effectiveCellPx > 0)) return;
       const localX = clientX - bounds.left;
       const localY = clientY - bounds.top;
-      const cx = Math.floor((localX - v.x) / (dims.scale * v.zoom));
-      const cy = Math.floor((localY - v.y) / (dims.scale * v.zoom));
+      const cx = Math.floor((localX - v.x) / effectiveCellPx);
+      const cy = Math.floor((localY - v.y) / effectiveCellPx);
       if (cx < 0 || cy < 0 || cx >= dims.cols || cy >= dims.rows) {
         setHover(null);
         onHoverCell?.(null);
@@ -171,7 +254,7 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
       setHover({ cx, cy, px: localX, py: localY, roomIndex: room ? roomIndex : -1, room });
       onHoverCell?.({ x: cx, y: cy });
     },
-    [dims.scale, dims.cols, dims.rows, plan, onHoverCell],
+    [dims.cols, dims.rows, plan, onHoverCell],
   );
 
   const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -226,8 +309,9 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
         style={{
           width: contentSize.width,
           height: contentSize.height,
-          transform: `translate(${view.x}px, ${view.y}px) scale(${view.zoom})`,
-          transformOrigin: "0 0",
+          // Translate only — the plan is rasterized at its final size, so there
+          // is no CSS scale to resample and blur it.
+          transform: `translate(${view.x}px, ${view.y}px)`,
         }}
       >
         <canvas ref={canvasRef} className={plan ? "block shadow-[0_4px_24px_rgba(16,24,40,0.10)]" : "block"} />
