@@ -1,14 +1,34 @@
 import type { Door, Plan } from "./types";
 
-// Ported from the legacy frontend/app.ts renderer. The plan sheet keeps the
-// light drafting palette; it now sits on a dark blueprint backdrop with a faint
-// cell grid so the full-bleed viewport reads as a drafting surface. Cells are
-// always square — the canvas takes the plan's aspect ratio, never the container's.
-const PAPER = "#f7f6f2";
-const WALL = "rgba(31,36,42,.78)";
+// CAD-grade 2D plan renderer. The plan reads as an architectural linework
+// drawing sitting on a dark drafting canvas: a merged footprint silhouette,
+// low-alpha room fills with a full-strength inner accent, crisp light wall
+// strokes traced from the cell grid, proper door swing arcs, and a layered
+// two-line label lockup. Cells are always square — the canvas takes the plan's
+// aspect ratio, never the container's; pan/zoom is applied as a CSS transform
+// by the viewport wrapper, so this raster is drawn once per plan/hover change.
 const BACKDROP = "#101318";
 const GRID_MINOR = "rgba(120,150,200,0.06)";
 const GRID_MAJOR = "rgba(120,150,200,0.11)";
+
+// Linework palette (light ink on the dark canvas).
+const INK = "232,234,237"; // --foreground channels
+const FOOTPRINT_FILL = `rgba(${INK},0.05)`;
+const HATCH = `rgba(${INK},0.10)`;
+const WALL_INTERIOR = `rgba(${INK},0.65)`;
+const WALL_EXTERIOR = `rgba(${INK},0.92)`;
+const DOOR_BLUE = "#5CA9FF";
+const DOOR_GREEN = "#57C08C";
+const LABEL_NAME = `rgba(${INK},0.92)`;
+const LABEL_AREA = "rgba(154,161,171,0.9)";
+
+const OUTSIDE = -2;
+const UNASSIGNED = -1;
+
+interface RenderOptions {
+  hoveredRoomIndex?: number;
+  preview?: boolean;
+}
 
 export function cellScale(width: number): number {
   return Math.max(6, Math.min(14, Math.floor(1280 / width)));
@@ -16,6 +36,58 @@ export function cellScale(width: number): number {
 
 export function planCellScale(plan: Plan): number {
   return cellScale(plan.width);
+}
+
+// Canvas cannot resolve CSS variables inside ctx.font, so read the resolved
+// families off the DOM once and reuse them for every label.
+let cachedSans: string | null = null;
+let cachedMono: string | null = null;
+function fontFamilies(): { sans: string; mono: string } {
+  if (cachedSans === null) {
+    try {
+      const style = getComputedStyle(document.body);
+      cachedSans = style.fontFamily || "Inter, sans-serif";
+      const mono = style.getPropertyValue("--font-geist-mono").trim();
+      cachedMono = mono || "ui-monospace, SFMono-Regular, monospace";
+    } catch {
+      cachedSans = "Inter, sans-serif";
+      cachedMono = "ui-monospace, SFMono-Regular, monospace";
+    }
+  }
+  return { sans: cachedSans, mono: cachedMono ?? "ui-monospace, monospace" };
+}
+
+function withAlpha(color: string, alpha: number): string {
+  const c = color.trim();
+  if (c.startsWith("#")) {
+    let hex = c.slice(1);
+    if (hex.length === 3) hex = hex.split("").map((ch) => ch + ch).join("");
+    if (hex.length >= 6) {
+      const r = parseInt(hex.slice(0, 2), 16);
+      const g = parseInt(hex.slice(2, 4), 16);
+      const b = parseInt(hex.slice(4, 6), 16);
+      return `rgba(${r},${g},${b},${alpha})`;
+    }
+  }
+  const match = c.match(/rgba?\(([^)]+)\)/);
+  if (match) {
+    const [r, g, b] = match[1].split(",").map((s) => s.trim());
+    return `rgba(${r},${g},${b},${alpha})`;
+  }
+  return `rgba(${INK},${alpha})`;
+}
+
+function isCirculation(type: string): boolean {
+  const t = type.toLowerCase();
+  return t.includes("corridor") || t.includes("circulation");
+}
+
+function titleCase(id: string): string {
+  return id
+    .split(/[_\s]+/)
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
 }
 
 function prepareCanvas(
@@ -36,7 +108,8 @@ function prepareCanvas(
   return context;
 }
 
-// Blueprint layer: dark backdrop + minor grid every cell + major grid every 8.
+// Blueprint layer: dark backdrop + minor grid every cell + major grid every 8,
+// spanning the full canvas so the plan floats on a continuous drafting surface.
 function drawBlueprint(context: CanvasRenderingContext2D, cols: number, rows: number, scale: number): void {
   const width = cols * scale;
   const height = rows * scale;
@@ -80,126 +153,283 @@ export function renderEmptyGrid(canvas: HTMLCanvasElement, cols = 96, rows = 64)
   drawBlueprint(context, cols, rows, scale);
 }
 
-export function renderPlanToCanvas(canvas: HTMLCanvasElement, plan: Plan): void {
+// Largest inscribed axis-aligned rectangle of a room's cells, in cell coords.
+// Runs a histogram maximal-rectangle sweep restricted to the room's bounds.
+function largestInnerRect(
+  cells: number[],
+  planWidth: number,
+  roomIndex: number,
+  bounds: { x: number; y: number; width: number; height: number },
+): { x: number; y: number; w: number; h: number } | null {
+  const bw = bounds.width;
+  const bh = bounds.height;
+  if (bw <= 0 || bh <= 0) return null;
+  const heights = new Array<number>(bw).fill(0);
+  let best = { area: 0, x: 0, y: 0, w: 0, h: 0 };
+  for (let r = 0; r < bh; r += 1) {
+    for (let c = 0; c < bw; c += 1) {
+      const occupied = cells[(bounds.y + r) * planWidth + (bounds.x + c)] === roomIndex;
+      heights[c] = occupied ? heights[c] + 1 : 0;
+    }
+    const stack: number[] = [];
+    for (let c = 0; c <= bw; c += 1) {
+      const cur = c === bw ? 0 : heights[c];
+      while (stack.length && heights[stack[stack.length - 1]] > cur) {
+        const height = heights[stack.pop() as number];
+        const left = stack.length ? stack[stack.length - 1] + 1 : 0;
+        const width = c - left;
+        const area = height * width;
+        if (area > best.area) {
+          best = { area, x: bounds.x + left, y: bounds.y + (r - height + 1), w: width, h: height };
+        }
+      }
+      stack.push(c);
+    }
+  }
+  return best.area > 0 ? best : null;
+}
+
+export function renderPlanToCanvas(canvas: HTMLCanvasElement, plan: Plan, options: RenderOptions = {}): void {
+  const { hoveredRoomIndex = -1, preview = false } = options;
   const scale = planCellScale(plan);
   const context = prepareCanvas(canvas, plan.width, plan.height, scale);
   drawBlueprint(context, plan.width, plan.height, scale);
 
-  for (let y = 0; y < plan.height; y += 1) {
-    for (let x = 0; x < plan.width; x += 1) {
-      const offset = y * plan.width + x;
-      if (plan.footprint?.[offset]) {
-        context.fillStyle = PAPER;
-        context.fillRect(x * scale, y * scale, scale + 0.4, scale + 0.4);
-      }
-    }
-  }
+  const W = plan.width;
+  const H = plan.height;
+  const hasFootprint = Array.isArray(plan.footprint) && plan.footprint.length === W * H;
 
-  for (let y = 0; y < plan.height; y += 1) {
-    for (let x = 0; x < plan.width; x += 1) {
-      const roomIndex = plan.cells[y * plan.width + x];
-      const room = roomIndex === undefined || roomIndex < 0 ? undefined : plan.rooms[roomIndex];
-      if (!room) continue;
-      context.fillStyle = room.color;
-      context.fillRect(x * scale, y * scale, scale + 0.4, scale + 0.4);
-    }
-  }
+  // Room index of a cell (>= 0) or UNASSIGNED, out of bounds → UNASSIGNED.
+  const cellRoom = (x: number, y: number): number => {
+    if (x < 0 || y < 0 || x >= W || y >= H) return UNASSIGNED;
+    const v = plan.cells[y * W + x];
+    return v === undefined || v < 0 ? UNASSIGNED : v;
+  };
 
-  context.strokeStyle = WALL;
-  context.lineWidth = Math.max(1, scale * 0.09);
-  context.beginPath();
-  for (let y = 0; y < plan.height; y += 1) {
-    for (let x = 0; x < plan.width; x += 1) {
-      const index = plan.cells[y * plan.width + x];
-      if (index === undefined || index < 0) continue;
-      if (x === 0 || plan.cells[y * plan.width + x - 1] !== index) {
-        context.moveTo(x * scale, y * scale);
-        context.lineTo(x * scale, (y + 1) * scale);
-      }
-      if (y === 0 || plan.cells[(y - 1) * plan.width + x] !== index) {
-        context.moveTo(x * scale, y * scale);
-        context.lineTo((x + 1) * scale, y * scale);
-      }
-      if (x === plan.width - 1) {
-        context.moveTo((x + 1) * scale, y * scale);
-        context.lineTo((x + 1) * scale, (y + 1) * scale);
-      }
-      if (y === plan.height - 1) {
-        context.moveTo(x * scale, (y + 1) * scale);
-        context.lineTo((x + 1) * scale, (y + 1) * scale);
-      }
-    }
-  }
-  context.stroke();
+  // Region id used for wall classification: a specific room, an unassigned but
+  // in-footprint cell, or OUTSIDE (past the building envelope / off-grid).
+  const regionAt = (x: number, y: number): number => {
+    if (x < 0 || y < 0 || x >= W || y >= H) return OUTSIDE;
+    const off = y * W + x;
+    const v = plan.cells[off];
+    if (v !== undefined && v >= 0) return v;
+    const inside = hasFootprint ? !!plan.footprint[off] : false;
+    return inside ? UNASSIGNED : OUTSIDE;
+  };
 
-  if (scale >= 7 && plan.rooms.length <= 90) {
-    context.textAlign = "center";
-    context.textBaseline = "middle";
-    for (const [roomIndex, room] of plan.rooms.entries()) {
-      const bounds = room.bounds;
-      if (bounds.width * scale < 32 || bounds.height * scale < 20) continue;
-      const targetX = bounds.x + bounds.width / 2;
-      const targetY = bounds.y + bounds.height / 2;
-      let labelX = targetX;
-      let labelY = targetY;
-      let bestDistance = Number.POSITIVE_INFINITY;
-      for (let y = bounds.y; y < bounds.y + bounds.height; y += 1) {
-        for (let x = bounds.x; x < bounds.x + bounds.width; x += 1) {
-          if (plan.cells[y * plan.width + x] !== roomIndex) continue;
-          const distance = (x + 0.5 - targetX) ** 2 + (y + 0.5 - targetY) ** 2;
-          if (distance < bestDistance) {
-            bestDistance = distance;
-            labelX = x + 0.5;
-            labelY = y + 0.5;
-          }
+  context.save();
+  if (preview) context.globalAlpha = 0.6;
+
+  // 3. Footprint body — one merged silhouette fill (composited once so shared
+  //    cell edges never accumulate alpha), plus a hatch on unassigned interior.
+  if (hasFootprint) {
+    const footPath = new Path2D();
+    const hatchRegion = new Path2D();
+    let hasHatch = false;
+    for (let y = 0; y < H; y += 1) {
+      for (let x = 0; x < W; x += 1) {
+        if (!plan.footprint[y * W + x]) continue;
+        footPath.rect(x * scale, y * scale, scale, scale);
+        if (cellRoom(x, y) < 0) {
+          hatchRegion.rect(x * scale, y * scale, scale, scale);
+          hasHatch = true;
         }
       }
-      const label = room.id.replaceAll("_", " ");
-      context.font = `600 ${Math.max(7, Math.min(10, scale * 0.72))}px var(--font-geist-mono), ui-monospace, monospace`;
-      context.fillStyle = "rgba(24,29,35,.8)";
-      context.fillText(label.length > 17 ? `${label.slice(0, 15)}...` : label, labelX * scale, labelY * scale);
+    }
+    context.fillStyle = FOOTPRINT_FILL;
+    context.fill(footPath);
+
+    if (hasHatch) {
+      context.save();
+      context.clip(hatchRegion);
+      context.strokeStyle = HATCH;
+      context.lineWidth = 1;
+      context.beginPath();
+      const pxW = W * scale;
+      const pxH = H * scale;
+      for (let o = -pxH; o < pxW; o += 6) {
+        context.moveTo(o, 0);
+        context.lineTo(o + pxH, pxH);
+      }
+      context.stroke();
+      context.restore();
     }
   }
+
+  // 4. Room fills at low alpha + a full-strength inner accent hugging the walls.
+  plan.rooms.forEach((room, roomIndex) => {
+    const bounds = room.bounds;
+    const hovered = roomIndex === hoveredRoomIndex;
+    const fillPath = new Path2D();
+    const boundaryPath = new Path2D();
+    for (let y = bounds.y; y < bounds.y + bounds.height; y += 1) {
+      for (let x = bounds.x; x < bounds.x + bounds.width; x += 1) {
+        if (cellRoom(x, y) !== roomIndex) continue;
+        fillPath.rect(x * scale, y * scale, scale, scale);
+        if (cellRoom(x - 1, y) !== roomIndex) {
+          boundaryPath.moveTo(x * scale, y * scale);
+          boundaryPath.lineTo(x * scale, (y + 1) * scale);
+        }
+        if (cellRoom(x + 1, y) !== roomIndex) {
+          boundaryPath.moveTo((x + 1) * scale, y * scale);
+          boundaryPath.lineTo((x + 1) * scale, (y + 1) * scale);
+        }
+        if (cellRoom(x, y - 1) !== roomIndex) {
+          boundaryPath.moveTo(x * scale, y * scale);
+          boundaryPath.lineTo((x + 1) * scale, y * scale);
+        }
+        if (cellRoom(x, y + 1) !== roomIndex) {
+          boundaryPath.moveTo(x * scale, (y + 1) * scale);
+          boundaryPath.lineTo((x + 1) * scale, (y + 1) * scale);
+        }
+      }
+    }
+    const fillAlpha = hovered ? 0.26 : isCirculation(room.type) ? 0.1 : 0.16;
+    context.fillStyle = withAlpha(room.color, fillAlpha);
+    context.fill(fillPath);
+
+    // Inner accent: clip to the room, then stroke the boundary at double width
+    // so the visible band lands ~3px inside the wall line.
+    context.save();
+    context.clip(fillPath);
+    context.strokeStyle = withAlpha(room.color, hovered ? 0.8 : 0.45);
+    context.lineWidth = 6;
+    context.lineJoin = "round";
+    context.stroke(boundaryPath);
+    context.restore();
+  });
+
+  // 5. Walls — traced from every region transition on the cell grid.
+  const align = (v: number): number => Math.round(v) + 0.5;
+  const interiorPath = new Path2D();
+  const exteriorPath = new Path2D();
+  const addEdge = (exterior: boolean, x0: number, y0: number, x1: number, y1: number): void => {
+    const path = exterior ? exteriorPath : interiorPath;
+    path.moveTo(align(x0), align(y0));
+    path.lineTo(align(x1), align(y1));
+  };
+  // Vertical edges: boundary between (x-1,y) and (x,y).
+  for (let y = 0; y < H; y += 1) {
+    for (let x = 0; x <= W; x += 1) {
+      const a = regionAt(x - 1, y);
+      const b = regionAt(x, y);
+      if (a === b) continue;
+      addEdge(a === OUTSIDE || b === OUTSIDE, x * scale, y * scale, x * scale, (y + 1) * scale);
+    }
+  }
+  // Horizontal edges: boundary between (x,y-1) and (x,y).
+  for (let y = 0; y <= H; y += 1) {
+    for (let x = 0; x < W; x += 1) {
+      const a = regionAt(x, y - 1);
+      const b = regionAt(x, y);
+      if (a === b) continue;
+      addEdge(a === OUTSIDE || b === OUTSIDE, x * scale, y * scale, (x + 1) * scale, y * scale);
+    }
+  }
+  context.lineCap = "butt";
+  context.lineJoin = "miter";
+  context.strokeStyle = WALL_INTERIOR;
+  context.lineWidth = 1.25;
+  context.stroke(interiorPath);
+  context.strokeStyle = WALL_EXTERIOR;
+  context.lineWidth = 2.5;
+  context.stroke(exteriorPath);
+
+  // 6. Doors — carve an opening, then draw the swing arc + leaf.
   plan.doors.forEach((door) => drawDoor(context, door, scale));
+
+  // 7. Labels — two-line lockup in each room's largest inscribed rectangle.
+  const { sans, mono } = fontFamilies();
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  plan.rooms.forEach((room, roomIndex) => {
+    const rect = largestInnerRect(plan.cells, W, roomIndex, room.bounds) ?? {
+      x: room.bounds.x,
+      y: room.bounds.y,
+      w: room.bounds.width,
+      h: room.bounds.height,
+    };
+    if (rect.w * scale < 64 || rect.h * scale < 28) return;
+    const cx = (rect.x + rect.w / 2) * scale;
+    const cy = (rect.y + rect.h / 2) * scale;
+    const areaFt2 = Math.round(room.pixel_count * plan.meters_per_cell * plan.meters_per_cell * 10.7639);
+
+    context.font = `500 11px ${sans}`;
+    context.fillStyle = LABEL_NAME;
+    context.fillText(titleCase(room.id), cx, cy - 7);
+
+    context.font = `500 9.5px ${mono}`;
+    context.fillStyle = LABEL_AREA;
+    context.fillText(`${areaFt2} ft²`, cx, cy + 6);
+  });
+
+  context.restore();
 }
 
 function drawDoor(context: CanvasRenderingContext2D, door: Door, scale: number): void {
-  const width = door.width_cells * scale;
-  const x = door.x * scale;
-  const y = door.y * scale;
+  const span = door.width_cells * scale;
+  const x0 = door.x * scale;
+  const y0 = door.y * scale;
+  const horizontal = door.orientation === "horizontal";
+  const base = context.globalAlpha;
+
   context.save();
-  context.lineCap = "square";
-  context.strokeStyle = PAPER;
-  context.lineWidth = Math.max(3, scale * 0.35);
+
+  // (a) Erase the wall stroke across the opening span, in the backdrop color.
+  context.lineCap = "butt";
+  context.strokeStyle = BACKDROP;
+  context.lineWidth = Math.max(3.5, scale * 0.34);
   context.beginPath();
-  if (door.orientation === "horizontal") {
-    context.moveTo(x, y);
-    context.lineTo(x + width, y);
-  } else {
-    context.moveTo(x, y);
-    context.lineTo(x, y + width);
-  }
+  context.moveTo(x0, y0);
+  if (horizontal) context.lineTo(x0 + span, y0);
+  else context.lineTo(x0, y0 + span);
   context.stroke();
-  context.strokeStyle = door.to_room === null ? "#e2593a" : "#1f242a";
-  context.lineWidth = Math.max(1, scale * 0.12);
-  context.beginPath();
-  let openAngle = 0;
-  let closedAngle = 0;
-  if (door.orientation === "horizontal") {
-    openAngle = door.swing_side === "south" ? Math.PI / 2 : -Math.PI / 2;
+
+  // Closed leaf points along the wall; open leaf swings perpendicular.
+  let closedAngle: number;
+  let openAngle: number;
+  if (horizontal) {
     closedAngle = 0;
-    context.moveTo(x, y);
-    context.lineTo(x + Math.cos(openAngle) * width, y + Math.sin(openAngle) * width);
-    context.moveTo(x + width, y);
-    context.arc(x, y, width, closedAngle, openAngle, openAngle < closedAngle);
+    openAngle = door.swing_side === "south" ? Math.PI / 2 : -Math.PI / 2;
   } else {
-    openAngle = door.swing_side === "west" ? Math.PI : 0;
     closedAngle = Math.PI / 2;
-    context.moveTo(x, y);
-    context.lineTo(x + Math.cos(openAngle) * width, y + Math.sin(openAngle) * width);
-    context.moveTo(x, y + width);
-    context.arc(x, y, width, closedAngle, openAngle, openAngle < closedAngle);
+    openAngle = door.swing_side === "west" ? Math.PI : 0;
   }
+
+  const entrance = door.to_room === null;
+  context.strokeStyle = entrance ? DOOR_GREEN : DOOR_BLUE;
+  context.globalAlpha = base * 0.9;
+  context.lineWidth = 1.25;
+  context.lineCap = "round";
+  context.lineJoin = "round";
+
+  // (c) Door leaf in the open position + (b) quarter-circle swing arc.
+  context.beginPath();
+  context.moveTo(x0, y0);
+  context.lineTo(x0 + Math.cos(openAngle) * span, y0 + Math.sin(openAngle) * span);
+  context.moveTo(x0 + Math.cos(closedAngle) * span, y0 + Math.sin(closedAngle) * span);
+  context.arc(x0, y0, span, closedAngle, openAngle, openAngle < closedAngle);
   context.stroke();
+
+  // (d) Main entrance: a small outward chevron away from the swing side.
+  if (entrance) {
+    const midX = horizontal ? x0 + span / 2 : x0;
+    const midY = horizontal ? y0 : y0 + span / 2;
+    const outAngle = openAngle + Math.PI;
+    const ox = Math.cos(outAngle);
+    const oy = Math.sin(outAngle);
+    const perpX = -oy;
+    const perpY = ox;
+    const tipX = midX + ox * 10;
+    const tipY = midY + oy * 10;
+    const baseX = midX + ox * 4;
+    const baseY = midY + oy * 4;
+    context.beginPath();
+    context.moveTo(baseX + perpX * 5, baseY + perpY * 5);
+    context.lineTo(tipX, tipY);
+    context.lineTo(baseX - perpX * 5, baseY - perpY * 5);
+    context.stroke();
+  }
+
   context.restore();
 }

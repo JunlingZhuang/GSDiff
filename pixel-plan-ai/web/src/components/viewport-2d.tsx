@@ -5,15 +5,25 @@ import * as React from "react";
 import { cellScale, planCellScale, renderEmptyGrid, renderPlanToCanvas } from "@/lib/render";
 import type { CandidateImage, Plan, PlanRoom } from "@/lib/types";
 import { candidateDataUrl, prettyType } from "@/lib/types";
+import { cn } from "@/lib/utils";
 
 const DEFAULT_COLS = 96;
 const DEFAULT_ROWS = 64;
+
+// The floating panels overlap the viewport; fit-to-view reserves their gutters
+// so the plan lands centered in the visible drawing area, not behind a panel.
+const PANEL_LEFT = 324;
+const PANEL_RIGHT = 344;
+const PANEL_RIGHT_CLOSED = 12;
+const FIT_PADDING = 48;
 
 interface Viewport2DProps {
   plan: Plan | null;
   reference: CandidateImage | null;
   showReference: boolean;
   referenceOpacity: number;
+  preview?: boolean;
+  rightPanelOpen?: boolean;
   onViewChange?: (zoom: number) => void;
   onHoverCell?: (cell: { x: number; y: number } | null) => void;
 }
@@ -29,11 +39,12 @@ interface HoverState {
   cy: number;
   px: number;
   py: number;
+  roomIndex: number;
   room: PlanRoom | null;
 }
 
 export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(function Viewport2D(
-  { plan, reference, showReference, referenceOpacity, onViewChange, onHoverCell },
+  { plan, reference, showReference, referenceOpacity, preview = false, rightPanelOpen = false, onViewChange, onHoverCell },
   handleRef,
 ) {
   const containerRef = React.useRef<HTMLDivElement>(null);
@@ -42,8 +53,13 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
   const viewRef = React.useRef(view);
   viewRef.current = view;
   const planSizeRef = React.useRef<string>("");
+  // The fitted scale is the 100% baseline; the zoom cluster multiplies on top.
+  const baseZoomRef = React.useRef(1);
+  const rightPanelOpenRef = React.useRef(rightPanelOpen);
+  rightPanelOpenRef.current = rightPanelOpen;
   const dragRef = React.useRef<{ pointerId: number; startX: number; startY: number; originX: number; originY: number } | null>(null);
   const [hover, setHover] = React.useState<HoverState | null>(null);
+  const hoveredRoomIndex = hover?.roomIndex ?? -1;
 
   const dims = React.useMemo(() => {
     const cols = plan?.width ?? DEFAULT_COLS;
@@ -58,14 +74,24 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
     const container = containerRef.current;
     if (!container || !contentSize.width) return;
     const bounds = container.getBoundingClientRect();
-    const zoom = Math.min(bounds.width / contentSize.width, bounds.height / contentSize.height) * 0.9;
+    const rightInset = rightPanelOpenRef.current ? PANEL_RIGHT : PANEL_RIGHT_CLOSED;
+    const availLeft = PANEL_LEFT + FIT_PADDING;
+    const availTop = FIT_PADDING;
+    const availWidth = Math.max(80, bounds.width - rightInset - FIT_PADDING - availLeft);
+    const availHeight = Math.max(80, bounds.height - FIT_PADDING - availTop);
+    // Fit the plan into the visible rect; keep a readability floor on the base.
+    const base = Math.max(
+      0.2,
+      Math.min(8, availWidth / contentSize.width, availHeight / contentSize.height),
+    );
+    baseZoomRef.current = base;
     const next = {
-      zoom,
-      x: (bounds.width - contentSize.width * zoom) / 2,
-      y: (bounds.height - contentSize.height * zoom) / 2,
+      zoom: base,
+      x: availLeft + (availWidth - contentSize.width * base) / 2,
+      y: availTop + (availHeight - contentSize.height * base) / 2,
     };
     setView(next);
-    onViewChange?.(next.zoom);
+    onViewChange?.(1);
   }, [contentSize.width, contentSize.height, onViewChange]);
 
   const zoomAt = React.useCallback(
@@ -76,14 +102,14 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
       const pivotX = clientX === undefined ? bounds.width / 2 : clientX - bounds.left;
       const pivotY = clientY === undefined ? bounds.height / 2 : clientY - bounds.top;
       setView((current) => {
-        const zoom = Math.max(0.15, Math.min(6, current.zoom * factor));
+        const zoom = Math.max(0.05, Math.min(12, current.zoom * factor));
         const scaleChange = zoom / current.zoom;
         const next = {
           zoom,
           x: pivotX - (pivotX - current.x) * scaleChange,
           y: pivotY - (pivotY - current.y) * scaleChange,
         };
-        onViewChange?.(next.zoom);
+        onViewChange?.(zoom / (baseZoomRef.current || 1));
         return next;
       });
     },
@@ -103,14 +129,14 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
   React.useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    if (plan) renderPlanToCanvas(canvas, plan);
+    if (plan) renderPlanToCanvas(canvas, plan, { hoveredRoomIndex, preview });
     else renderEmptyGrid(canvas, DEFAULT_COLS, DEFAULT_ROWS);
     const signature = plan ? `${plan.width}x${plan.height}` : `empty-${DEFAULT_COLS}x${DEFAULT_ROWS}`;
     if (planSizeRef.current !== signature) {
       planSizeRef.current = signature;
       fit();
     }
-  }, [plan, fit]);
+  }, [plan, fit, hoveredRoomIndex, preview]);
 
   // Native listener: React wheel events are passive and cannot preventDefault.
   React.useEffect(() => {
@@ -139,9 +165,10 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
         onHoverCell?.(null);
         return;
       }
-      const roomIndex = plan ? plan.cells[cy * dims.cols + cx] : -1;
-      const room = plan && roomIndex !== undefined && roomIndex >= 0 ? plan.rooms[roomIndex] ?? null : null;
-      setHover({ cx, cy, px: localX, py: localY, room });
+      const rawIndex = plan ? plan.cells[cy * dims.cols + cx] : -1;
+      const roomIndex = rawIndex !== undefined && rawIndex >= 0 ? rawIndex : -1;
+      const room = plan && roomIndex >= 0 ? plan.rooms[roomIndex] ?? null : null;
+      setHover({ cx, cy, px: localX, py: localY, roomIndex: room ? roomIndex : -1, room });
       onHoverCell?.({ x: cx, y: cy });
     },
     [dims.scale, dims.cols, dims.rows, plan, onHoverCell],
@@ -184,7 +211,10 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
   return (
     <div
       ref={containerRef}
-      className="relative h-full w-full cursor-grab touch-none overflow-hidden bg-[#101318] active:cursor-grabbing"
+      className={cn(
+        "relative h-full w-full touch-none overflow-hidden bg-[#101318]",
+        hover?.room ? "cursor-pointer" : "cursor-grab active:cursor-grabbing",
+      )}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
@@ -215,11 +245,20 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
 
       {hover?.room ? (
         <div
-          className="pointer-events-none absolute z-20 rounded-md border border-border bg-popover/95 px-2 py-1 text-[11px] text-popover-foreground shadow-lg backdrop-blur-md"
+          className="pointer-events-none absolute z-20 flex items-center gap-2 rounded-md border border-border bg-card/90 px-2 py-1 text-[11px] text-foreground shadow-lg backdrop-blur-md"
           style={{ left: hover.px + 14, top: hover.py + 14 }}
         >
+          <span
+            className="size-2.5 shrink-0 rounded-[3px] border border-black/30"
+            style={{ background: hover.room.color }}
+            aria-hidden
+          />
           <span className="font-medium capitalize">{prettyType(hover.room.type)}</span>
-          <span className="ml-1.5 font-mono text-muted-foreground">{hover.room.id}</span>
+          {plan ? (
+            <span className="font-mono tabular-nums text-muted-foreground">
+              {Math.round(hover.room.pixel_count * plan.meters_per_cell * plan.meters_per_cell * 10.7639)} ft²
+            </span>
+          ) : null}
         </div>
       ) : null}
     </div>

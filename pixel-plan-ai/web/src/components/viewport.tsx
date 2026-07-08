@@ -62,6 +62,8 @@ export function Viewport({ studio }: { studio: Studio }) {
           reference={studio.reference?.image ?? null}
           showReference={studio.showReference}
           referenceOpacity={studio.referenceOpacity}
+          preview={busy}
+          rightPanelOpen={!!plan}
           onViewChange={handleViewChange}
           onHoverCell={handleHoverCell}
         />
