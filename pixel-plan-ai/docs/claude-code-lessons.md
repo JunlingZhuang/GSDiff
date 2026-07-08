@@ -8,7 +8,9 @@ regression: mode 1 score 98 in 2 attempts with stop_reason/usage_total
 populated, mode 3 seed 65 -> 93 in 1 repair). Batch C implemented
 2026-07-08 (#6 c1ba5db, #10 3b37fb7, #11 9825502; live regression: mode 1
 score 97 in 1 attempt with the full event timeline served by the progress
-API, mode 3 seed 65 -> 98 in 1 repair). Experiment #8 remains a proposal.
+API, mode 3 seed 65 -> 98 in 1 repair). Experiment #8 implemented ae5cef1
+behind GEMINI_ATTEMPT_TOOLS and benchmarked: split verdict, default OFF —
+see the table in section D.
 
 Source of the lessons: a firsthand read of the leaked Claude Code TypeScript
 source (`yasasbanukaofficial/claude-code`, ~1,900 files, recovered from npm
@@ -193,6 +195,27 @@ its agent.
 
 Gate: same benchmark as batch A; adopt only if acceptance/attempts/cost beat
 the plain loop.
+
+**Benchmark verdict (2026-07-08, benchmark/results-ab1.json, 3 programs x
+2 arms):** split decision — flag stays DEFAULT OFF.
+
+| program | arm | accepted | score | attempts | tokens | wall s |
+|---|---|---|---|---|---|---|
+| clinic-small | off | yes | 98 | 1 | 7,129 | 15 |
+| clinic-small | on | yes | 97 | 3 | 53,665 | 420 |
+| clinic-mixed | off | yes | 97 | 1 | 6,949 | 13 |
+| clinic-mixed | on | yes | 96 | 4 | 71,907 | 374 |
+| outpatient-dept | off | **no** | 88 | 5 | 8,211 | 419 |
+| outpatient-dept | on | yes | **97** | **1** | 46,322 | **66** |
+
+Reading: on easy programs the tool loop is strictly worse (7-10x tokens,
+more outer attempts — the final submission sometimes diverges from the
+draft it validated, so the outer validator rejects what the inner check
+passed). On the hard program it flips a 5-attempt FAILURE into a
+1-attempt 97 at 6x fewer wall seconds. Follow-up worth benchmarking
+separately: staged escalation — run blind attempts first and enable the
+tool loop only from attempt 3 on when the best score has plateaued,
+buying the hard-program win without the easy-program tax.
 
 ## E. Prompt-specific lessons
 

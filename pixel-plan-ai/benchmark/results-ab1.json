@@ -1,0 +1,87 @@
+{
+  "generated_at": "20260708T201832Z",
+  "arms": [
+    "off",
+    "on"
+  ],
+  "rows": [
+    {
+      "program": "clinic-small",
+      "arm": "off",
+      "accepted": true,
+      "score": 98,
+      "attempts": 1,
+      "stop_reason": "accepted",
+      "usage_total": {
+        "total_tokens": 7129,
+        "estimated_cost_usd": 0.070292
+      },
+      "wall_seconds": 14.67
+    },
+    {
+      "program": "clinic-small",
+      "arm": "on",
+      "accepted": true,
+      "score": 97,
+      "attempts": 3,
+      "stop_reason": "accepted",
+      "usage_total": {
+        "total_tokens": 53665,
+        "estimated_cost_usd": 0.346559
+      },
+      "wall_seconds": 419.62
+    },
+    {
+      "program": "clinic-mixed",
+      "arm": "off",
+      "accepted": true,
+      "score": 97,
+      "attempts": 1,
+      "stop_reason": "accepted",
+      "usage_total": {
+        "total_tokens": 6949,
+        "estimated_cost_usd": 0.063515
+      },
+      "wall_seconds": 12.92
+    },
+    {
+      "program": "clinic-mixed",
+      "arm": "on",
+      "accepted": true,
+      "score": 96,
+      "attempts": 4,
+      "stop_reason": "accepted",
+      "usage_total": {
+        "total_tokens": 71907,
+        "estimated_cost_usd": 0.397
+      },
+      "wall_seconds": 374.43
+    },
+    {
+      "program": "outpatient-dept",
+      "arm": "off",
+      "accepted": false,
+      "score": 88,
+      "attempts": 5,
+      "stop_reason": "attempts_exhausted",
+      "usage_total": {
+        "total_tokens": 8211,
+        "estimated_cost_usd": 0.074334
+      },
+      "wall_seconds": 419.39
+    },
+    {
+      "program": "outpatient-dept",
+      "arm": "on",
+      "accepted": true,
+      "score": 97,
+      "attempts": 1,
+      "stop_reason": "accepted",
+      "usage_total": {
+        "total_tokens": 46322,
+        "estimated_cost_usd": 0.316175
+      },
+      "wall_seconds": 66.46
+    }
+  ]
+}
