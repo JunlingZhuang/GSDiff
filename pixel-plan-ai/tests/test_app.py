@@ -45,8 +45,19 @@ class CodePolicyTests(unittest.TestCase):
             {"width": 64, "height": 40, "meters_per_cell": 0.25},
             None,
         )
-        self.assertIn("Never guess or hard-code door coordinates", prompt)
-        self.assertIn("shared-boundary scanner", prompt)
+        # The durable coding contract now lives in SYSTEM_INSTRUCTION, not the per-request prompt.
+        self.assertIn("Never guess or hard-code door coordinates", SYSTEM_INSTRUCTION)
+        self.assertIn("shared-boundary scanner", SYSTEM_INSTRUCTION)
+        self.assertIn("Grid contract:", SYSTEM_INSTRUCTION)
+        self.assertIn("Authorized imports:", SYSTEM_INSTRUCTION)
+        self.assertIn("standalone Python program", SYSTEM_INSTRUCTION)
+        self.assertNotIn("Grid contract:", prompt)
+        self.assertNotIn("Execution environment:", prompt)
+        self.assertNotIn("Authorized imports:", prompt)
+        self.assertNotIn("standalone Python program", prompt)
+        self.assertNotIn("Never guess or hard-code door coordinates", prompt)
+        self.assertNotIn("shared-boundary scanner", prompt)
+        # Task-level data still belongs in the per-request prompt.
         self.assertIn("corridor count must match", prompt)
         self.assertIn("Precomputed pixel planning targets", prompt)
         self.assertIn("recommended_rectangle_cells", prompt)

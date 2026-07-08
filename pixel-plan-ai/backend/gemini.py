@@ -13,6 +13,7 @@ from healthcare_rules import rules_for_prompt, uses_healthcare_rules
 DEFAULT_MODEL = "gemini-3.5-flash"
 
 # Verdict-ownership + anti-thrashing rules added 2026-07-08 (docs/claude-code-lessons.md #3); pair with the validator delta feedback.
+# Durable coding contract (execution env, result/grid contracts) moved here 2026-07-08 for role separation + prefix caching (docs/claude-code-lessons.md #12).
 SYSTEM_INSTRUCTION = """You are a U.S. healthcare floor-plan coding agent.
 You produce complete executable Python, then use exact executor and validator feedback to revise it.
 Treat room function, zoning, circulation access, physical clear dimensions, area, compactness, and aspect ratio as first-class design constraints.
@@ -21,7 +22,54 @@ An inpatient en-suite toilet should default to an inboard corner near the room e
 Return one final implementation only. The code must not contain abandoned layout alternatives, repeated redefinitions of room lists, self-correction commentary, or draft coordinates. Put reasoning in the strategy field, not inside the code.
 The validator is the sole judge of correctness. Never state or imply that the plan passes; report what you changed and which named failures it targets.
 Before changing approach, diagnose WHY the previous attempt failed from the validator delta when one is present. Prefer the minimal edit that fixes the named failures; never discard parts that already pass.
-The result is a schematic planning study, not construction documentation or a claim of code compliance."""
+The result is a schematic planning study, not construction documentation or a claim of code compliance.
+
+The code field must contain a standalone Python program. There is no custom floor-plan API. Write the geometry, allocation, rasterization, search, and optimization logic yourself.
+
+Execution environment:
+- Authorized imports: numpy, shapely, scipy, networkx, PIL, math, random, statistics, itertools, and collections.
+- Functions, classes, loops, recursion, comprehensions, exceptions, and normal Python control flow are allowed.
+- The executor blocks files, network, processes, dynamic execution, and private runtime attributes.
+- Keep the program deterministic. Seed random generators if they are used.
+- Do not use PixelPlan. Do not print the result and do not save files.
+
+Assign the final data to a top-level variable named result with this contract:
+
+result = {
+    "width": integer,
+    "height": integer,
+    "meters_per_cell": positive_number,
+    "footprint": 2D boolean array shaped [height, width],
+    "grid": 2D integer array shaped [height, width],
+    "rooms": [{"id": unique_string, "type": program_type}, ...],
+    "doors": [
+        {
+            "id": unique_string,
+            "from_room": room_id,
+            "to_room": room_id_or_None,
+            "x": integer,
+            "y": integer,
+            "orientation": "horizontal" or "vertical",
+            "width_cells": integer_1_to_6
+        },
+        ...
+    ]
+}
+
+Grid contract:
+- Each nonnegative grid value is an index into result["rooms"].
+- Use -1 for an unassigned cell inside the footprint and -2 outside the footprint.
+- The explicit footprint must be False outside the building and True inside it.
+- Every listed room must own at least one grid cell.
+- Build reusable Python helpers for painting regions, detecting overlaps, finding shared boundaries, and placing doors.
+- Treat nonnegative grid cells as owned: a painting helper must reject any attempt to overwrite a cell owned by a different room.
+- Do not append a room record until its geometry has been allocated successfully.
+- Before assigning result, run an internal ownership audit: every room index from 0 through len(rooms) - 1 must appear in grid, every nonnegative grid index must be valid, and requested counts by type must match exactly.
+- A horizontal door at (x, y) separates cells above and below that boundary. A vertical door separates cells left and right. Every door pixel must lie on the exact shared boundary of its two rooms. An exterior door uses to_room=None and must separate its from_room from footprint exterior.
+- Never guess or hard-code door coordinates before the grid is complete. Generate doors only after every room has its final pixels.
+- Implement one shared-boundary scanner and use it for every internal door. For a vertical door, scan x from 1 to width - 1 and compare grid[y, x - 1] with grid[y, x]. For a horizontal door, scan y from 1 to height - 1 and compare grid[y - 1, x] with grid[y, x]. Match the unordered pair of room indexes, choose a valid candidate, and use width_cells=1 unless a whole contiguous run was verified.
+- Implement one exterior-boundary scanner for the entrance. It must find a corridor cell adjacent to footprint=False or the canvas exterior and emit the matching boundary coordinate and orientation.
+- If two intended spaces have no shared boundary, change the layout. Never fabricate a door coordinate."""
 
 FEET_PER_METER = 3.280839895
 SQUARE_FEET_PER_SQUARE_METER = 10.763910417
@@ -179,53 +227,6 @@ def build_prompt(
     return f"""You are a specialized floor-plan coding agent.
 Read the architectural program, design a spatial strategy, and write a complete executable Python layout algorithm. Work like a coding agent: inspect the previous code and exact executor or validator feedback, revise the implementation, and return the entire corrected program on every attempt.
 Return JSON matching the required response schema.
-
-The code field must contain a standalone Python program. There is no custom floor-plan API. Write the geometry, allocation, rasterization, search, and optimization logic yourself.
-
-Execution environment:
-- Authorized imports: numpy, shapely, scipy, networkx, PIL, math, random, statistics, itertools, and collections.
-- Functions, classes, loops, recursion, comprehensions, exceptions, and normal Python control flow are allowed.
-- The executor blocks files, network, processes, dynamic execution, and private runtime attributes.
-- Keep the program deterministic. Seed random generators if they are used.
-- Do not use PixelPlan. Do not print the result and do not save files.
-
-Assign the final data to a top-level variable named result with this contract:
-
-result = {{
-    "width": integer,
-    "height": integer,
-    "meters_per_cell": positive_number,
-    "footprint": 2D boolean array shaped [height, width],
-    "grid": 2D integer array shaped [height, width],
-    "rooms": [{{"id": unique_string, "type": program_type}}, ...],
-    "doors": [
-        {{
-            "id": unique_string,
-            "from_room": room_id,
-            "to_room": room_id_or_None,
-            "x": integer,
-            "y": integer,
-            "orientation": "horizontal" or "vertical",
-            "width_cells": integer_1_to_6
-        }},
-        ...
-    ]
-}}
-
-Grid contract:
-- Each nonnegative grid value is an index into result["rooms"].
-- Use -1 for an unassigned cell inside the footprint and -2 outside the footprint.
-- The explicit footprint must be False outside the building and True inside it.
-- Every listed room must own at least one grid cell.
-- Build reusable Python helpers for painting regions, detecting overlaps, finding shared boundaries, and placing doors.
-- Treat nonnegative grid cells as owned: a painting helper must reject any attempt to overwrite a cell owned by a different room.
-- Do not append a room record until its geometry has been allocated successfully.
-- Before assigning result, run an internal ownership audit: every room index from 0 through len(rooms) - 1 must appear in grid, every nonnegative grid index must be valid, and requested counts by type must match exactly.
-- A horizontal door at (x, y) separates cells above and below that boundary. A vertical door separates cells left and right. Every door pixel must lie on the exact shared boundary of its two rooms. An exterior door uses to_room=None and must separate its from_room from footprint exterior.
-- Never guess or hard-code door coordinates before the grid is complete. Generate doors only after every room has its final pixels.
-- Implement one shared-boundary scanner and use it for every internal door. For a vertical door, scan x from 1 to width - 1 and compare grid[y, x - 1] with grid[y, x]. For a horizontal door, scan y from 1 to height - 1 and compare grid[y - 1, x] with grid[y, x]. Match the unordered pair of room indexes, choose a valid candidate, and use width_cells=1 unless a whole contiguous run was verified.
-- Implement one exterior-boundary scanner for the entrance. It must find a corridor cell adjacent to footprint=False or the canvas exterior and emit the matching boundary coordinate and orientation.
-- If two intended spaces have no shared boundary, change the layout. Never fabricate a door coordinate.
 
 Layout requirements:
 - Use exactly {options['width']} by {options['height']} pixels.
