@@ -145,3 +145,51 @@
   text-transform: uppercase;
   color: var(--muted-foreground);
 }
+
+/* Generation scanline: a glowing primary line sweeps the viewport top-to-bottom. */
+.scan-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  z-index: 5;
+  height: 2px;
+  pointer-events: none;
+  background: var(--primary);
+  box-shadow: 0 0 12px 2px color-mix(in oklch, var(--primary) 60%, transparent);
+  animation: scanline-sweep 2.4s linear infinite;
+}
+
+@keyframes scanline-sweep {
+  0% {
+    top: 0;
+    opacity: 0;
+  }
+  8% {
+    opacity: 0.9;
+  }
+  92% {
+    opacity: 0.9;
+  }
+  100% {
+    top: 100%;
+    opacity: 0;
+  }
+}
+
+/* Reduced motion: no sweep — a static, gently pulsing top border instead. */
+@media (prefers-reduced-motion: reduce) {
+  .scan-line {
+    top: 0;
+    animation: scanline-pulse 2s ease-in-out infinite;
+  }
+  @keyframes scanline-pulse {
+    0%,
+    100% {
+      opacity: 0.3;
+    }
+    50% {
+      opacity: 0.85;
+    }
+  }
+}

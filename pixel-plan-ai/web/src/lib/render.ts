@@ -1,29 +1,89 @@
 import type { Door, Plan } from "./types";
 
-// Ported from the legacy frontend/app.ts renderer; colors adjusted to the
-// light drafting theme. Cells are always square — the canvas takes the
-// plan's aspect ratio, never the container's.
+// Ported from the legacy frontend/app.ts renderer. The plan sheet keeps the
+// light drafting palette; it now sits on a dark blueprint backdrop with a faint
+// cell grid so the full-bleed viewport reads as a drafting surface. Cells are
+// always square — the canvas takes the plan's aspect ratio, never the container's.
 const PAPER = "#f7f6f2";
-const OUTSIDE = "#e4e2db";
 const WALL = "rgba(31,36,42,.78)";
+const BACKDROP = "#101318";
+const GRID_MINOR = "rgba(120,150,200,0.06)";
+const GRID_MAJOR = "rgba(120,150,200,0.11)";
 
-export function planCellScale(plan: Plan): number {
-  return Math.max(6, Math.min(14, Math.floor(1280 / plan.width)));
+export function cellScale(width: number): number {
+  return Math.max(6, Math.min(14, Math.floor(1280 / width)));
 }
 
-export function renderPlanToCanvas(canvas: HTMLCanvasElement, plan: Plan): void {
-  const scale = planCellScale(plan);
+export function planCellScale(plan: Plan): number {
+  return cellScale(plan.width);
+}
+
+function prepareCanvas(
+  canvas: HTMLCanvasElement,
+  cols: number,
+  rows: number,
+  scale: number,
+): CanvasRenderingContext2D {
   const deviceScale = Math.min(2, window.devicePixelRatio || 1);
-  canvas.width = plan.width * scale * deviceScale;
-  canvas.height = plan.height * scale * deviceScale;
-  canvas.style.width = `${plan.width * scale}px`;
-  canvas.style.height = `${plan.height * scale}px`;
+  canvas.width = cols * scale * deviceScale;
+  canvas.height = rows * scale * deviceScale;
+  canvas.style.width = `${cols * scale}px`;
+  canvas.style.height = `${rows * scale}px`;
   const context = canvas.getContext("2d");
   if (!context) throw new Error("Canvas rendering is unavailable.");
   context.setTransform(1, 0, 0, 1, 0, 0);
   context.scale(deviceScale, deviceScale);
-  context.fillStyle = OUTSIDE;
-  context.fillRect(0, 0, plan.width * scale, plan.height * scale);
+  return context;
+}
+
+// Blueprint layer: dark backdrop + minor grid every cell + major grid every 8.
+function drawBlueprint(context: CanvasRenderingContext2D, cols: number, rows: number, scale: number): void {
+  const width = cols * scale;
+  const height = rows * scale;
+  context.fillStyle = BACKDROP;
+  context.fillRect(0, 0, width, height);
+
+  context.lineWidth = 1;
+  context.strokeStyle = GRID_MINOR;
+  context.beginPath();
+  for (let x = 0; x <= cols; x += 1) {
+    const px = Math.round(x * scale) + 0.5;
+    context.moveTo(px, 0);
+    context.lineTo(px, height);
+  }
+  for (let y = 0; y <= rows; y += 1) {
+    const py = Math.round(y * scale) + 0.5;
+    context.moveTo(0, py);
+    context.lineTo(width, py);
+  }
+  context.stroke();
+
+  context.strokeStyle = GRID_MAJOR;
+  context.beginPath();
+  for (let x = 0; x <= cols; x += 8) {
+    const px = Math.round(x * scale) + 0.5;
+    context.moveTo(px, 0);
+    context.lineTo(px, height);
+  }
+  for (let y = 0; y <= rows; y += 8) {
+    const py = Math.round(y * scale) + 0.5;
+    context.moveTo(0, py);
+    context.lineTo(width, py);
+  }
+  context.stroke();
+}
+
+// Empty viewport: just the blueprint grid, sized to a default plan footprint.
+export function renderEmptyGrid(canvas: HTMLCanvasElement, cols = 96, rows = 64): void {
+  const scale = cellScale(cols);
+  const context = prepareCanvas(canvas, cols, rows, scale);
+  drawBlueprint(context, cols, rows, scale);
+}
+
+export function renderPlanToCanvas(canvas: HTMLCanvasElement, plan: Plan): void {
+  const scale = planCellScale(plan);
+  const context = prepareCanvas(canvas, plan.width, plan.height, scale);
+  drawBlueprint(context, plan.width, plan.height, scale);
 
   for (let y = 0; y < plan.height; y += 1) {
     for (let x = 0; x < plan.width; x += 1) {

@@ -2,9 +2,12 @@
 
 import * as React from "react";
 
-import { planCellScale, renderPlanToCanvas } from "@/lib/render";
-import type { CandidateImage, Plan } from "@/lib/types";
-import { candidateDataUrl } from "@/lib/types";
+import { cellScale, planCellScale, renderEmptyGrid, renderPlanToCanvas } from "@/lib/render";
+import type { CandidateImage, Plan, PlanRoom } from "@/lib/types";
+import { candidateDataUrl, prettyType } from "@/lib/types";
+
+const DEFAULT_COLS = 96;
+const DEFAULT_ROWS = 64;
 
 interface Viewport2DProps {
   plan: Plan | null;
@@ -12,6 +15,7 @@ interface Viewport2DProps {
   showReference: boolean;
   referenceOpacity: number;
   onViewChange?: (zoom: number) => void;
+  onHoverCell?: (cell: { x: number; y: number } | null) => void;
 }
 
 export interface Viewport2DHandle {
@@ -20,8 +24,16 @@ export interface Viewport2DHandle {
   exportPng: () => string | null;
 }
 
+interface HoverState {
+  cx: number;
+  cy: number;
+  px: number;
+  py: number;
+  room: PlanRoom | null;
+}
+
 export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(function Viewport2D(
-  { plan, reference, showReference, referenceOpacity, onViewChange },
+  { plan, reference, showReference, referenceOpacity, onViewChange, onHoverCell },
   handleRef,
 ) {
   const containerRef = React.useRef<HTMLDivElement>(null);
@@ -31,12 +43,16 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
   viewRef.current = view;
   const planSizeRef = React.useRef<string>("");
   const dragRef = React.useRef<{ pointerId: number; startX: number; startY: number; originX: number; originY: number } | null>(null);
+  const [hover, setHover] = React.useState<HoverState | null>(null);
 
-  const contentSize = React.useMemo(() => {
-    if (!plan) return { width: 0, height: 0 };
-    const scale = planCellScale(plan);
-    return { width: plan.width * scale, height: plan.height * scale };
+  const dims = React.useMemo(() => {
+    const cols = plan?.width ?? DEFAULT_COLS;
+    const rows = plan?.height ?? DEFAULT_ROWS;
+    const scale = plan ? planCellScale(plan) : cellScale(cols);
+    return { cols, rows, scale };
   }, [plan]);
+
+  const contentSize = { width: dims.cols * dims.scale, height: dims.rows * dims.scale };
 
   const fit = React.useCallback(() => {
     const container = containerRef.current;
@@ -50,7 +66,7 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
     };
     setView(next);
     onViewChange?.(next.zoom);
-  }, [contentSize, onViewChange]);
+  }, [contentSize.width, contentSize.height, onViewChange]);
 
   const zoomAt = React.useCallback(
     (factor: number, clientX?: number, clientY?: number) => {
@@ -85,9 +101,11 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
   );
 
   React.useEffect(() => {
-    if (!plan || !canvasRef.current) return;
-    renderPlanToCanvas(canvasRef.current, plan);
-    const signature = `${plan.width}x${plan.height}`;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    if (plan) renderPlanToCanvas(canvas, plan);
+    else renderEmptyGrid(canvas, DEFAULT_COLS, DEFAULT_ROWS);
+    const signature = plan ? `${plan.width}x${plan.height}` : `empty-${DEFAULT_COLS}x${DEFAULT_ROWS}`;
     if (planSizeRef.current !== signature) {
       planSizeRef.current = signature;
       fit();
@@ -106,6 +124,29 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
     return () => container.removeEventListener("wheel", onWheel);
   }, [zoomAt]);
 
+  const updateHover = React.useCallback(
+    (clientX: number, clientY: number) => {
+      const container = containerRef.current;
+      if (!container) return;
+      const bounds = container.getBoundingClientRect();
+      const v = viewRef.current;
+      const localX = clientX - bounds.left;
+      const localY = clientY - bounds.top;
+      const cx = Math.floor((localX - v.x) / (dims.scale * v.zoom));
+      const cy = Math.floor((localY - v.y) / (dims.scale * v.zoom));
+      if (cx < 0 || cy < 0 || cx >= dims.cols || cy >= dims.rows) {
+        setHover(null);
+        onHoverCell?.(null);
+        return;
+      }
+      const roomIndex = plan ? plan.cells[cy * dims.cols + cx] : -1;
+      const room = plan && roomIndex !== undefined && roomIndex >= 0 ? plan.rooms[roomIndex] ?? null : null;
+      setHover({ cx, cy, px: localX, py: localY, room });
+      onHoverCell?.({ x: cx, y: cy });
+    },
+    [dims.scale, dims.cols, dims.rows, plan, onHoverCell],
+  );
+
   const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0 && event.button !== 1) return;
     const current = viewRef.current;
@@ -121,48 +162,64 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
 
   const onPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    setView((current) => ({
-      ...current,
-      x: drag.originX + event.clientX - drag.startX,
-      y: drag.originY + event.clientY - drag.startY,
-    }));
+    if (drag && drag.pointerId === event.pointerId) {
+      setView((current) => ({
+        ...current,
+        x: drag.originX + event.clientX - drag.startX,
+        y: drag.originY + event.clientY - drag.startY,
+      }));
+    }
+    updateHover(event.clientX, event.clientY);
   };
 
   const onPointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
     if (dragRef.current?.pointerId === event.pointerId) dragRef.current = null;
   };
 
+  const onPointerLeave = () => {
+    setHover(null);
+    onHoverCell?.(null);
+  };
+
   return (
     <div
       ref={containerRef}
-      className="relative h-full w-full cursor-grab touch-none overflow-hidden active:cursor-grabbing"
+      className="relative h-full w-full cursor-grab touch-none overflow-hidden bg-[#101318] active:cursor-grabbing"
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
+      onPointerLeave={onPointerLeave}
     >
-      {plan ? (
+      <div
+        className="absolute left-0 top-0"
+        style={{
+          width: contentSize.width,
+          height: contentSize.height,
+          transform: `translate(${view.x}px, ${view.y}px) scale(${view.zoom})`,
+          transformOrigin: "0 0",
+        }}
+      >
+        <canvas ref={canvasRef} className={plan ? "block shadow-[0_2px_28px_rgba(0,0,0,0.45)]" : "block"} />
+        {plan && reference && showReference ? (
+          /* Stretched to the grid box on purpose: this is the same mapping
+             the transcription uses, so rooms should land on themselves. */
+          <img
+            src={candidateDataUrl(reference)}
+            alt="Reference drawing overlay"
+            className="pointer-events-none absolute left-0 top-0 h-full w-full"
+            style={{ opacity: referenceOpacity / 100 }}
+          />
+        ) : null}
+      </div>
+
+      {hover?.room ? (
         <div
-          className="absolute left-0 top-0"
-          style={{
-            width: contentSize.width,
-            height: contentSize.height,
-            transform: `translate(${view.x}px, ${view.y}px) scale(${view.zoom})`,
-            transformOrigin: "0 0",
-          }}
+          className="pointer-events-none absolute z-20 rounded-md border border-border bg-popover/95 px-2 py-1 text-[11px] text-popover-foreground shadow-lg backdrop-blur-md"
+          style={{ left: hover.px + 14, top: hover.py + 14 }}
         >
-          <canvas ref={canvasRef} className="block shadow-[0_2px_18px_rgba(31,36,42,0.14)]" />
-          {reference && showReference ? (
-            /* Stretched to the grid box on purpose: this is the same mapping
-               the transcription uses, so rooms should land on themselves. */
-            <img
-              src={candidateDataUrl(reference)}
-              alt="Reference drawing overlay"
-              className="pointer-events-none absolute left-0 top-0 h-full w-full"
-              style={{ opacity: referenceOpacity / 100 }}
-            />
-          ) : null}
+          <span className="font-medium capitalize">{prettyType(hover.room.type)}</span>
+          <span className="ml-1.5 font-mono text-muted-foreground">{hover.room.id}</span>
         </div>
       ) : null}
     </div>

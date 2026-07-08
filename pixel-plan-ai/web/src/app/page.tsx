@@ -4,7 +4,6 @@ import { InspectorPanel } from "@/components/inspector-panel";
 import { ProgramPanel } from "@/components/program-panel";
 import { TopBar } from "@/components/top-bar";
 import { Viewport } from "@/components/viewport";
-import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { useStudio } from "@/hooks/use-studio";
 
 export default function StudioPage() {
@@ -13,19 +12,20 @@ export default function StudioPage() {
   return (
     <div className="flex h-dvh flex-col overflow-hidden bg-background text-foreground">
       <TopBar studio={studio} />
-      <ResizablePanelGroup orientation="horizontal" className="min-h-0 flex-1">
-        <ResizablePanel defaultSize="22%" minSize="280px" maxSize="34%" className="h-full">
+      <main className="relative min-h-0 flex-1">
+        {/* full-bleed blueprint viewport */}
+        <Viewport studio={studio} />
+
+        {/* floating left panel */}
+        <div className="absolute left-3 top-3 bottom-3 z-20 flex w-[300px] flex-col overflow-hidden rounded-xl border border-border bg-card/92 shadow-2xl backdrop-blur-md">
           <ProgramPanel studio={studio} />
-        </ResizablePanel>
-        <ResizableHandle />
-        <ResizablePanel defaultSize="56%" minSize="30%" className="h-full">
-          <Viewport studio={studio} />
-        </ResizablePanel>
-        <ResizableHandle />
-        <ResizablePanel defaultSize="22%" minSize="280px" maxSize="34%" className="h-full">
+        </div>
+
+        {/* floating right panel */}
+        <div className="absolute right-3 top-3 bottom-3 z-20 flex w-[320px] flex-col overflow-hidden rounded-xl border border-border bg-card/92 shadow-2xl backdrop-blur-md">
           <InspectorPanel studio={studio} />
-        </ResizablePanel>
-      </ResizablePanelGroup>
+        </div>
+      </main>
     </div>
   );
 }
