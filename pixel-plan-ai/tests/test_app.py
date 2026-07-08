@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "backend"))
 
 from code_policy import validate_generated_code, validate_program_contract
-from gemini import build_prompt, normalize_usage_metadata
+from gemini import SYSTEM_INSTRUCTION, build_prompt, normalize_usage_metadata
 from healthcare_rules import load_healthcare_rules
 from job_progress import publish_job_progress
 from program import calculate_scale, normalize_program
@@ -50,6 +50,10 @@ class CodePolicyTests(unittest.TestCase):
         self.assertIn("corridor count must match", prompt)
         self.assertIn("Precomputed pixel planning targets", prompt)
         self.assertIn("recommended_rectangle_cells", prompt)
+
+    def test_system_instruction_states_verdict_ownership_and_anti_thrashing(self) -> None:
+        self.assertIn("sole judge of correctness", SYSTEM_INSTRUCTION)
+        self.assertIn("minimal edit that fixes the named failures", SYSTEM_INSTRUCTION)
 
     def test_gemini_usage_metadata_includes_thinking_cost(self) -> None:
         usage = normalize_usage_metadata(
