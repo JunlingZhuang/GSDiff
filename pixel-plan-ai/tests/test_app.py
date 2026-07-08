@@ -618,6 +618,7 @@ class AgentGenerationTests(unittest.TestCase):
         self.assertIn("fixed: doors:Main entrance", delta)
         self.assertIn("still_failing: count:waiting (waiting: 0/1)", delta)
         self.assertIn("new_failures: none", delta)
+        self.assertIn("treat as ground truth", delta)
 
     def test_repair_context_prepends_validator_delta_after_first_candidate(self) -> None:
         model_outputs = [
@@ -672,7 +673,7 @@ class AgentGenerationTests(unittest.TestCase):
         third_context = generate_mock.call_args_list[2].args[5]
         # No prior executed candidate before the first repair, so no delta yet.
         self.assertNotIn("[validator delta", second_context)
-        self.assertIn("[validator delta vs previous candidate]", third_context)
+        self.assertIn("[validator delta vs previous candidate", third_context)
         self.assertIn("fixed: doors:Main entrance door", third_context)
 
     def test_code_agent_reports_failure_after_five_unexecutable_attempts_without_fallback(self) -> None:
@@ -781,6 +782,7 @@ class ImageModeTests(unittest.TestCase):
         self.assertNotIn("TRANSCRIBE", plain)
         self.assertIn("TRANSCRIBE that drawing onto the cell grid", with_image)
         self.assertIn("Do not mirror or rotate the layout", with_image)
+        self.assertIn("the program wins", with_image)
 
     def test_generate_passes_reference_image_to_every_gemini_attempt(self) -> None:
         model_output = {"code": "ok", "strategy": "s", "assumptions": [], "model": "quality-model"}
@@ -1035,7 +1037,7 @@ class SeedRefineTests(unittest.TestCase):
             )
         # The delta on the second repair is computed against the seed translation (attempt 0).
         second_repair_context = generate_mock.call_args_list[1].args[5]
-        self.assertIn("[validator delta vs previous candidate]", second_repair_context)
+        self.assertIn("[validator delta vs previous candidate", second_repair_context)
         self.assertIn("fixed: doors:Main entrance door", second_repair_context)
         self.assertTrue(outcome["accepted"])
 

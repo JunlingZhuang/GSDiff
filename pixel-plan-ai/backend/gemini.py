@@ -134,13 +134,15 @@ def output_schema() -> dict[str, Any]:
     }
 
 
+# Label-conflict precedence added 2026-07-08: a live candidate drawing duplicated exam_room_3 (docs/claude-code-lessons.md #13).
 REFERENCE_IMAGE_GUIDANCE = """A reference floor-plan DRAWING of this exact program is attached.
 Your program must TRANSCRIBE that drawing onto the cell grid, not invent a new design:
 - Orientation: grid row y=0 is the TOP edge of the drawing and y grows DOWNWARD; column x=0 is the LEFT edge. Do not mirror or rotate the layout.
 - Reproduce its building massing, wing arrangement, corridor topology and room placement; the grid is a rasterization of THIS drawing at the requested canvas size.
 - The text label inside each drawn room names its program instance; the quarter-circle swing arcs are the doors; place your doors on the same shared boundaries.
 - Keep every room's position and relative proportion close to the drawing. Deviate only where the drawing physically cannot satisfy a validation rule (for example an undersized room), and keep such deviations local.
-- Encode the layout you SEE as data (room rectangles read off the drawing) plus painting loops; do not substitute a generic packing algorithm."""
+- Encode the layout you SEE as data (room rectangles read off the drawing) plus painting loops; do not substitute a generic packing algorithm.
+- If the drawing's room labels conflict with the program JSON (duplicate or missing labels), the program wins: keep the program's exact room counts and map surplus or missing labels onto the closest sensible geometry."""
 
 
 # Escape hatch added 2026-07-08: the first trace-mode E2E hit a seed missing the waiting room entirely (docs/claude-code-lessons.md #9).

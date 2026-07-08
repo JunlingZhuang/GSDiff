@@ -129,7 +129,7 @@ def validation_delta(previous: dict[str, Any], current: dict[str, Any]) -> str:
     still_text = ", ".join(f"{key} ({current_keys[key]})" for key in still_failing) or "none"
     new_text = ", ".join(f"{key} ({current_keys[key]})" for key in new_failures) or "none"
     return (
-        "[validator delta vs previous candidate]\n"
+        "[validator delta vs previous candidate — computed by the harness from executing both candidates; treat as ground truth]\n"
         f"fixed: {fixed_text}\n"
         f"still_failing: {still_text}\n"
         f"new_failures: {new_text}"
