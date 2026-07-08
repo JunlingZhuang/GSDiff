@@ -212,7 +212,7 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
     <div
       ref={containerRef}
       className={cn(
-        "relative h-full w-full touch-none overflow-hidden bg-[#101318]",
+        "relative h-full w-full touch-none overflow-hidden bg-canvas",
         hover?.room ? "cursor-pointer" : "cursor-grab active:cursor-grabbing",
       )}
       onPointerDown={onPointerDown}
@@ -230,7 +230,7 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
           transformOrigin: "0 0",
         }}
       >
-        <canvas ref={canvasRef} className={plan ? "block shadow-[0_2px_28px_rgba(0,0,0,0.45)]" : "block"} />
+        <canvas ref={canvasRef} className={plan ? "block shadow-[0_4px_24px_rgba(16,24,40,0.10)]" : "block"} />
         {plan && reference && showReference ? (
           /* Stretched to the grid box on purpose: this is the same mapping
              the transcription uses, so rooms should land on themselves. */

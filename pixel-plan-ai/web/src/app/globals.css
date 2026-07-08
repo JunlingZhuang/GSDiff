@@ -28,6 +28,8 @@
   --color-ring: var(--ring);
   --color-input: var(--input);
   --color-border: var(--border);
+  --color-canvas: var(--canvas);
+  --color-low: var(--low);
   --color-destructive: var(--destructive);
   --color-accent-foreground: var(--accent-foreground);
   --color-accent: var(--accent);
@@ -50,41 +52,48 @@
   --radius-4xl: calc(var(--radius) * 2.6);
 }
 
+/* Light drafting-paper theme — a single drafting-blue accent (#2E7CEE) drives
+   every interactive surface; ink is near-black on white, semantics reserved for
+   score/status meaning only. The .dark block below is kept dormant for a future
+   toggle (the <html> "dark" class is removed in layout.tsx). */
 :root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
+  --background: #ffffff;
+  --foreground: #1a1d21;
+  --card: #ffffff;
+  --card-foreground: #1a1d21;
+  --popover: #ffffff;
+  --popover-foreground: #1a1d21;
+  --primary: #2e7cee;
+  --primary-foreground: #ffffff;
+  --secondary: #f2f4f7;
+  --secondary-foreground: #1a1d21;
+  --muted: #f2f4f7;
+  --muted-foreground: #667085;
+  --accent: #f2f4f7;
+  --accent-foreground: #1a1d21;
+  --destructive: #d92d20;
+  --border: #e5e7eb;
+  --input: #e5e7eb;
+  --ring: #2e7cee;
+  /* viewport drafting surface (cool paper) + a low ink tone for de-emphasis */
+  --canvas: #f7f8fa;
+  --low: #98a2b3;
+  --chart-1: #2e7cee;
+  --chart-2: #0e9f6e;
+  --chart-3: #b54708;
+  --chart-4: #667085;
+  --chart-5: #d92d20;
   --radius: 0.625rem;
-  --success: #57c08c;
-  --warning: #e0b356;
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  --success: #0e9f6e;
+  --warning: #b54708;
+  --sidebar: #ffffff;
+  --sidebar-foreground: #1a1d21;
+  --sidebar-primary: #2e7cee;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #f2f4f7;
+  --sidebar-accent-foreground: #1a1d21;
+  --sidebar-border: #e5e7eb;
+  --sidebar-ring: #2e7cee;
 }
 
 .dark {
@@ -108,6 +117,8 @@
   --border: #262b33;
   --input: #262b33;
   --ring: #5ca9ff;
+  --canvas: #101318;
+  --low: #6b7280;
   --chart-1: #5ca9ff;
   --chart-2: #57c08c;
   --chart-3: #e0b356;
@@ -137,23 +148,23 @@
   }
 }
 
-/* Dark-theme scrollbars + resizers: the native Windows chrome renders white on
-   the dark instrument theme, so recolor it everywhere (textareas, ScrollArea
-   fallbacks, any overflow container). */
+/* Native scrollbars + resizers: the raw Windows chrome is too heavy for the
+   paper theme, so recolor every overflow container to a thin light-grey thumb
+   (textareas, any native-scroll region). */
 * {
   scrollbar-width: thin;
-  scrollbar-color: #262b33 transparent;
+  scrollbar-color: #d0d5dd transparent;
 }
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 ::-webkit-scrollbar-thumb {
-  background: #262b33;
+  background: #d0d5dd;
   border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #333944;
+  background: #98a2b3;
 }
 ::-webkit-scrollbar-track,
 ::-webkit-scrollbar-corner {

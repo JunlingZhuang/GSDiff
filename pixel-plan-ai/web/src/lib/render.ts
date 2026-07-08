@@ -1,26 +1,26 @@
 import type { Door, Plan } from "./types";
 
 // CAD-grade 2D plan renderer. The plan reads as an architectural linework
-// drawing sitting on a dark drafting canvas: a merged footprint silhouette,
-// low-alpha room fills with a full-strength inner accent, crisp light wall
+// drawing inked on cool drafting paper: a merged footprint silhouette,
+// low-alpha room fills with a full-strength inner accent, crisp dark wall
 // strokes traced from the cell grid, proper door swing arcs, and a layered
 // two-line label lockup. Cells are always square — the canvas takes the plan's
 // aspect ratio, never the container's; pan/zoom is applied as a CSS transform
 // by the viewport wrapper, so this raster is drawn once per plan/hover change.
-const BACKDROP = "#101318";
-const GRID_MINOR = "rgba(120,150,200,0.06)";
-const GRID_MAJOR = "rgba(120,150,200,0.11)";
+const BACKDROP = "#f7f8fa";
+const GRID_MINOR = "rgba(46,90,180,0.045)";
+const GRID_MAJOR = "rgba(46,90,180,0.09)";
 
-// Linework palette (light ink on the dark canvas).
-const INK = "232,234,237"; // --foreground channels
-const FOOTPRINT_FILL = `rgba(${INK},0.05)`;
+// Linework palette (dark ink on the paper canvas).
+const INK = "26,29,33"; // --foreground channels
+const FOOTPRINT_FILL = `rgba(${INK},0.03)`;
 const HATCH = `rgba(${INK},0.10)`;
-const WALL_INTERIOR = `rgba(${INK},0.65)`;
-const WALL_EXTERIOR = `rgba(${INK},0.92)`;
-const DOOR_BLUE = "#5CA9FF";
-const DOOR_GREEN = "#57C08C";
-const LABEL_NAME = `rgba(${INK},0.92)`;
-const LABEL_AREA = "rgba(154,161,171,0.9)";
+const WALL_INTERIOR = `rgba(${INK},0.50)`;
+const WALL_EXTERIOR = `rgba(${INK},0.90)`;
+const DOOR_BLUE = "#2E7CEE";
+const DOOR_GREEN = "#0E9F6E";
+const LABEL_NAME = `rgba(${INK},0.88)`;
+const LABEL_AREA = "rgba(102,112,133,0.9)";
 
 const OUTSIDE = -2;
 const UNASSIGNED = -1;
@@ -108,7 +108,7 @@ function prepareCanvas(
   return context;
 }
 
-// Blueprint layer: dark backdrop + minor grid every cell + major grid every 8,
+// Blueprint layer: paper backdrop + minor grid every cell + major grid every 8,
 // spanning the full canvas so the plan floats on a continuous drafting surface.
 function drawBlueprint(context: CanvasRenderingContext2D, cols: number, rows: number, scale: number): void {
   const width = cols * scale;
@@ -284,7 +284,7 @@ export function renderPlanToCanvas(canvas: HTMLCanvasElement, plan: Plan, option
         }
       }
     }
-    const fillAlpha = hovered ? 0.26 : isCirculation(room.type) ? 0.1 : 0.16;
+    const fillAlpha = hovered ? 0.32 : isCirculation(room.type) ? 0.12 : 0.22;
     context.fillStyle = withAlpha(room.color, fillAlpha);
     context.fill(fillPath);
 
@@ -292,7 +292,7 @@ export function renderPlanToCanvas(canvas: HTMLCanvasElement, plan: Plan, option
     // so the visible band lands ~3px inside the wall line.
     context.save();
     context.clip(fillPath);
-    context.strokeStyle = withAlpha(room.color, hovered ? 0.8 : 0.45);
+    context.strokeStyle = withAlpha(room.color, hovered ? 0.85 : 0.5);
     context.lineWidth = 6;
     context.lineJoin = "round";
     context.stroke(boundaryPath);

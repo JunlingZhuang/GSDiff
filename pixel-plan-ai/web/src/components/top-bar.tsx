@@ -46,7 +46,12 @@ export function TopBar({ studio }: { studio: Studio }) {
     <header className="flex h-[46px] shrink-0 items-center gap-3 border-b border-border bg-background px-3">
       <div className="flex items-center gap-2">
         <span className="grid grid-cols-2 gap-px" aria-hidden>
-          {["#5ca9ff", "#57c08c", "#e0b356", "#9aa1ab"].map((color) => (
+          {[
+            "var(--primary)",
+            "var(--success)",
+            "var(--warning)",
+            "var(--muted-foreground)",
+          ].map((color) => (
             <i key={color} className="size-1.5 rounded-[1px]" style={{ background: color }} />
           ))}
         </span>

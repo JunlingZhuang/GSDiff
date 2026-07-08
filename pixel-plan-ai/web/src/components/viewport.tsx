@@ -49,7 +49,7 @@ export function Viewport({ studio }: { studio: Studio }) {
   const ftPerCell = plan ? (plan.meters_per_cell * 3.28084).toFixed(2) : null;
 
   return (
-    <div className="relative isolate h-full min-h-0 w-full overflow-hidden bg-[#101318]">
+    <div className="relative isolate h-full min-h-0 w-full overflow-hidden bg-canvas">
       {!is2d && plan ? (
         /* absolute cage: the R3F canvas must never drive layout height */
         <div className="absolute inset-0 overflow-hidden">
@@ -153,7 +153,7 @@ export function Viewport({ studio }: { studio: Studio }) {
 
       {/* generation chip */}
       {busy ? (
-        <div className="absolute bottom-6 left-1/2 z-40 flex -translate-x-1/2 items-center gap-3 rounded-xl border border-border bg-card/90 px-3 py-2 shadow-2xl backdrop-blur-md">
+        <div className="absolute bottom-6 left-1/2 z-40 flex -translate-x-1/2 items-center gap-3 rounded-xl border border-border bg-card/90 px-3 py-2 shadow-[0_12px_32px_rgba(16,24,40,0.10)] backdrop-blur-md">
           <span className="size-2 shrink-0 animate-pulse rounded-full bg-primary" aria-hidden />
           <p className="max-w-[360px] truncate text-[12px] text-foreground">{studio.phaseText || "Working…"}</p>
           <span className="shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground">{studio.elapsed}s</span>
