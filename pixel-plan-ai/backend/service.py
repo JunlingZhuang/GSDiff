@@ -308,6 +308,8 @@ def generate_plan(
     complex_model = os.environ.get("GEMINI_COMPLEX_MODEL", quality_model)
     complex_thinking = os.environ.get("GEMINI_COMPLEX_THINKING_LEVEL", "medium")
     max_attempts = max(1, min(5, int(os.environ.get("GEMINI_MAX_ATTEMPTS", "5"))))
+    max_total_tokens = max(0, int(os.environ.get("GEMINI_MAX_TOTAL_TOKENS", "0")))
+    max_budget_usd = max(0.0, float(os.environ.get("GEMINI_MAX_BUDGET_USD", "0")))
     requested_room_count = sum(room["count"] for room in program["rooms"])
     complex_program = "tower" in program["building_type"].lower() or requested_room_count >= 40
     iterations: list[dict[str, Any]] = list(preseeded_iterations or [])
@@ -342,6 +344,9 @@ def generate_plan(
     previous_validation: dict[str, Any] | None = initial_validation
     best_result: dict[str, Any] | None = None
     best_candidate: dict[str, Any] | None = None
+    spent_tokens = 0
+    spent_usd = 0.0
+    stop_reason = "attempts_exhausted"
 
     if action == "fix":
         if initial_error is not None:
@@ -359,6 +364,16 @@ def generate_plan(
         latest_error = f"User revision request: {design_request or 'Improve the current plan.'}"
 
     for attempt_number in range(1, max_attempts + 1):
+        if (max_total_tokens and spent_tokens >= max_total_tokens) or (
+            max_budget_usd and spent_usd >= max_budget_usd
+        ):
+            latest_error = (
+                f"Stopped before attempt {attempt_number}: spent {spent_tokens} tokens "
+                f"(~${spent_usd:.3f}) against limits {max_total_tokens or 'off'} tokens / "
+                f"${max_budget_usd or 'off'}."
+            )
+            stop_reason = "budget_exhausted"
+            break
         started = time.perf_counter()
         candidate: dict[str, Any] | None = None
         result: dict[str, Any] | None = None
@@ -421,6 +436,9 @@ def generate_plan(
                 reference_image=reference_image,
                 seed_repair=seed_repair,
             )
+            usage_row = candidate.get("usage") or {}
+            spent_tokens += int(usage_row.get("total_tokens") or 0)
+            spent_usd += float(usage_row.get("estimated_cost_usd") or 0.0)
             previous_code = candidate["code"]
             result = execute_and_validate(previous_code, program, enforce_ai_contract=True)
             latest_error = candidate_rejection_reason(result)
@@ -467,6 +485,8 @@ def generate_plan(
                     "strategy": candidate["strategy"],
                     "assumptions": candidate["assumptions"],
                     "usage": candidate.get("usage"),
+                    "usage_total": {"total_tokens": spent_tokens, "estimated_cost_usd": round(spent_usd, 6)},
+                    "stop_reason": "accepted",
                     "program": program,
                     "prompt": design_request,
                     "repair_note": first_error if attempt_number > 1 else None,
@@ -523,7 +543,10 @@ def generate_plan(
             message=iterations[-1]["message"],
         )
 
-    exhaustion = f"The floor-plan coding agent exhausted {max_attempts} attempts. Last failure: {latest_error}"
+    if stop_reason == "budget_exhausted":
+        exhaustion = latest_error
+    else:
+        exhaustion = f"The floor-plan coding agent exhausted {max_attempts} attempts. Last failure: {latest_error}"
     if best_result is None or best_candidate is None:
         raise ValueError(exhaustion)
     result_source = "gemini-unaccepted" if action == "generate" else f"gemini-{action}-unaccepted"
@@ -536,6 +559,8 @@ def generate_plan(
         "strategy": best_candidate["strategy"],
         "assumptions": best_candidate["assumptions"],
         "usage": best_candidate.get("usage"),
+        "usage_total": {"total_tokens": spent_tokens, "estimated_cost_usd": round(spent_usd, 6)},
+        "stop_reason": stop_reason,
         "program": program,
         "prompt": design_request,
         "ai_error": exhaustion,
@@ -611,6 +636,8 @@ def refine_plan(payload: dict[str, Any]) -> dict[str, Any]:
             "model": None,
             "strategy": "Deterministic translation of the traced seed plan; the validator passed without AI repair.",
             "assumptions": [],
+            "stop_reason": "accepted",
+            "usage_total": {"total_tokens": 0, "estimated_cost_usd": 0.0},
             "program": program,
             "prompt": str(payload.get("prompt", "")),
             "iterations": [seed_iteration],

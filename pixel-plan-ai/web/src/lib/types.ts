@@ -135,6 +135,8 @@ export interface GenerationResult {
   generated_at: string;
   iterations: GenerationIteration[];
   ai_error?: string;
+  stop_reason?: string;
+  usage_total?: { total_tokens: number; estimated_cost_usd: number | null };
   inspection?: {
     accepted: boolean;
     summary: string;

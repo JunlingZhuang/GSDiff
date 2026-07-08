@@ -439,6 +439,9 @@ class AgentGenerationTests(unittest.TestCase):
         self.assertEqual([item["status"] for item in result["iterations"]], ["rejected", "accepted"])
         self.assertEqual(result["iterations"][0]["score"], 40)
         self.assertEqual(result["iterations"][1]["score"], 91)
+        self.assertEqual(result["stop_reason"], "accepted")
+        self.assertIn("usage_total", result)
+        self.assertEqual(result["usage_total"]["total_tokens"], 0)
 
     def test_repair_reverts_to_best_executable_code_after_failed_edit(self) -> None:
         model_outputs = [
@@ -798,6 +801,44 @@ class AgentGenerationTests(unittest.TestCase):
         self.assertEqual(result["code"], "attempt-1")
         self.assertEqual(result["validation"]["score"], 55)
         self.assertEqual(len(result["iterations"]), 5)
+        self.assertEqual(result["stop_reason"], "attempts_exhausted")
+
+    def test_budget_guard_stops_before_next_attempt_with_typed_reason(self) -> None:
+        model_output = {
+            "code": "attempt-1",
+            "strategy": "s",
+            "assumptions": [],
+            "model": "quality-model",
+            "usage": {"total_tokens": 1000, "estimated_cost_usd": 0.02},
+        }
+        rejected = {
+            "code": "attempt-1",
+            "plan": {"rooms": []},
+            "validation": {
+                "score": 40,
+                "checks": [{"category": "doors", "label": "Main entrance door", "pass": False}],
+                "areas": [],
+                "issues": [],
+            },
+        }
+        with (
+            patch.dict(os.environ, {"GEMINI_API_KEY": "test-key", "GEMINI_MAX_BUDGET_USD": "0.01"}),
+            patch.object(service, "generate_gemini_code", return_value=model_output) as generate_mock,
+            patch.object(service, "execute_and_validate", return_value=rejected),
+        ):
+            result = service.generate_plan(
+                {
+                    "program": self.samples["clinic-small"],
+                    "mode": "auto",
+                    "options": {"width": 64, "height": 40},
+                }
+            )
+        # First attempt spends $0.02, exceeding the $0.01 ceiling, so attempt 2 never runs.
+        self.assertEqual(generate_mock.call_count, 1)
+        self.assertEqual(result["stop_reason"], "budget_exhausted")
+        self.assertFalse(result["accepted"])
+        self.assertEqual(len(result["iterations"]), 1)
+        self.assertEqual(result["usage_total"]["total_tokens"], 1000)
 
 
 class ImageModeTests(unittest.TestCase):
@@ -987,6 +1028,8 @@ class SeedRefineTests(unittest.TestCase):
         self.assertEqual(outcome["source"], "seed-translated")
         self.assertEqual(outcome["iterations"][0]["attempt"], 0)
         self.assertEqual(outcome["iterations"][0]["phase"], "seed")
+        self.assertEqual(outcome["stop_reason"], "accepted")
+        self.assertEqual(outcome["usage_total"]["total_tokens"], 0)
 
     def test_refine_repairs_failing_seed_with_seed_guidance(self) -> None:
         failing = {

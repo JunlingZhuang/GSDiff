@@ -268,7 +268,7 @@ function EmptyCopy({ children }: { children: React.ReactNode }) {
 function metadataRows(studio: Studio): [string, string][] {
   const result = studio.result;
   if (!result) return [];
-  return [
+  const rows: [string, string][] = [
     ["Source", result.source],
     ["Model", result.model ?? "None"],
     ["Score", `${result.validation.score}/100`],
@@ -280,6 +280,17 @@ function metadataRows(studio: Studio): [string, string][] {
     ["Rules", result.validation.summary.rule_profile ?? "generic-schematic"],
     ["Reference", studio.reference ? `candidate ${studio.reference.index + 1}` : "none"],
   ];
+  if (result.stop_reason) {
+    rows.push(["Stop reason", result.stop_reason.replaceAll("_", " ")]);
+  }
+  if (result.usage_total) {
+    const cost = result.usage_total.estimated_cost_usd;
+    rows.push([
+      "Run cost",
+      `${result.usage_total.total_tokens.toLocaleString()} tok · ${cost == null ? "$—" : `$${cost.toFixed(3)}`}`,
+    ]);
+  }
+  return rows;
 }
 
 function IterationCard({ iteration }: { iteration: GenerationIteration }) {
