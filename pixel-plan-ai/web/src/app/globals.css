@@ -148,30 +148,30 @@
   }
 }
 
-/* Native scrollbars + resizers: the raw Windows chrome is too heavy for the
-   paper theme, so recolor every overflow container to a thin light-grey thumb
-   (textareas, any native-scroll region). */
-* {
+/* Panel scroll regions use <ScrollArea>, whose viewport hides native
+   scrollbars and renders its own thin drafting-grey thumb. Native scrollbars
+   now survive only inside textareas (ScrollArea cannot wrap a textarea's
+   internal scroll), so scope the thin-thumb styling to them and keep the
+   code/JSON editors visually matched to the ScrollArea regions. */
+textarea {
+  resize: vertical;
   scrollbar-width: thin;
   scrollbar-color: #d0d5dd transparent;
 }
-::-webkit-scrollbar {
+textarea::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
-::-webkit-scrollbar-thumb {
+textarea::-webkit-scrollbar-thumb {
   background: #d0d5dd;
   border-radius: 4px;
 }
-::-webkit-scrollbar-thumb:hover {
+textarea::-webkit-scrollbar-thumb:hover {
   background: #98a2b3;
 }
-::-webkit-scrollbar-track,
-::-webkit-scrollbar-corner {
+textarea::-webkit-scrollbar-track,
+textarea::-webkit-scrollbar-corner {
   background: transparent;
-}
-textarea {
-  resize: vertical;
 }
 textarea::-webkit-resizer {
   background: transparent;
