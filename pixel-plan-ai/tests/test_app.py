@@ -62,6 +62,38 @@ class CodePolicyTests(unittest.TestCase):
         self.assertIn("Precomputed pixel planning targets", prompt)
         self.assertIn("recommended_rectangle_cells", prompt)
 
+    def test_prompt_layers_order_static_before_program_before_attempt(self) -> None:
+        samples = json.loads((ROOT / "data" / "samples.json").read_text(encoding="utf-8"))
+        program = normalize_program(samples["inpatient-ward"])
+        prompt = build_prompt(
+            program,
+            "",
+            {"width": 96, "height": 64, "meters_per_cell": 0.25},
+            "Attempt 2 of 5. Fix the named door failures.",
+        )
+        # "healthcare planning profile" also occurs in a layer-1 bullet, so the section
+        # header (with its trailing colon) is the unambiguous layer-3 anchor.
+        layout = prompt.index("Layout requirements")
+        guidance = prompt.index("Building-type layout guidance")
+        profile = prompt.index("U.S. healthcare planning profile:")
+        targets = prompt.index("Precomputed pixel planning targets")
+        program_section = prompt.index("Program:")
+        repair = prompt.index("Repair context:")
+        self.assertLess(layout, guidance)
+        self.assertLess(guidance, profile)
+        self.assertLess(profile, targets)
+        self.assertLess(targets, program_section)
+        self.assertLess(program_section, repair)
+
+    def test_prompt_static_prefix_is_shared_across_programs(self) -> None:
+        samples = json.loads((ROOT / "data" / "samples.json").read_text(encoding="utf-8"))
+        options = {"width": 96, "height": 64, "meters_per_cell": 0.25}
+        a = build_prompt(normalize_program(samples["clinic-small"]), "", options, None)
+        b = build_prompt(normalize_program(samples["inpatient-ward"]), "", options, None)
+        common = os.path.commonprefix([a, b])
+        # Everything before the mode-level layer (layer 2) must be byte-identical.
+        self.assertGreaterEqual(len(common), a.index("Building-type layout guidance"))
+
     def test_system_instruction_states_verdict_ownership_and_anti_thrashing(self) -> None:
         self.assertIn("sole judge of correctness", SYSTEM_INSTRUCTION)
         self.assertIn("minimal edit that fixes the named failures", SYSTEM_INSTRUCTION)

@@ -224,12 +224,12 @@ def build_prompt(
             )
     elif with_reference_image:
         family_guidance = REFERENCE_IMAGE_GUIDANCE
+    # Section order = variation frequency (static -> mode -> program -> attempt) so implicit prefix caching survives repair attempts (docs/claude-code-lessons.md #4).
     return f"""You are a specialized floor-plan coding agent.
 Read the architectural program, design a spatial strategy, and write a complete executable Python layout algorithm. Work like a coding agent: inspect the previous code and exact executor or validator feedback, revise the implementation, and return the entire corrected program on every attempt.
 Return JSON matching the required response schema.
 
 Layout requirements:
-- Use exactly {options['width']} by {options['height']} pixels.
 - Every requested room instance needs one unique id.
 - Include the requested number of corridor instances.
 - The corridor count must match the program exactly. Do not add an extra core, lobby, or connector with type corridor; merge such geometry into one of the requested corridor indexes.
@@ -249,16 +249,18 @@ Layout requirements:
 - Only a toilet may be planned as an attached room inside a patient-room module. Exam rooms, offices, storage rooms, nurse stations, and waiting rooms must be independent rooms with their own corridor access.
 - Treat the following U.S. healthcare planning profile as mandatory acceptance criteria. Convert physical feet to cells using meters_per_cell. The validator checks every room instance, not only one example of each type.
 
+Use the recommended rectangle dimensions or another rectangle within each acceptable cell-count range. Do not give all room types one shared module size.
+
+Building-type layout guidance:
+{family_guidance}
+
 U.S. healthcare planning profile:
 {json.dumps(healthcare_rules, indent=2)}
 
 Precomputed pixel planning targets for this exact canvas and scale:
 {json.dumps(pixel_targets, indent=2)}
 
-Use the recommended rectangle dimensions or another rectangle within each acceptable cell-count range. Do not give all room types one shared module size.
-
-Building-type layout guidance:
-{family_guidance}
+Canvas: use exactly {options['width']} by {options['height']} pixels.
 
 Suggested scale: {options['meters_per_cell']} meters per cell.
 
