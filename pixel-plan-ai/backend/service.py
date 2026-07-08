@@ -105,6 +105,37 @@ def compact_validation_feedback(validation: dict[str, Any]) -> str:
     return "\n".join(sections)
 
 
+def failed_check_keys(validation: dict[str, Any]) -> dict[str, str]:
+    keys: dict[str, str] = {}
+    for check in validation.get("checks", []):
+        if check.get("pass"):
+            continue
+        category = str(check.get("category", "general"))
+        label = str(check.get("label", "failed"))
+        # Drop tokens carrying a count or percentage so the key survives value churn.
+        stable_tokens = [token for token in label.split() if not any(char.isdigit() or char == "%" for char in token)]
+        stable_label = " ".join(stable_tokens).rstrip(":")
+        keys[f"{category}:{stable_label}"] = label
+    return keys
+
+
+def validation_delta(previous: dict[str, Any], current: dict[str, Any]) -> str:
+    previous_keys = failed_check_keys(previous)
+    current_keys = failed_check_keys(current)
+    fixed = sorted(key for key in previous_keys if key not in current_keys)
+    still_failing = sorted(key for key in current_keys if key in previous_keys)
+    new_failures = sorted(key for key in current_keys if key not in previous_keys)
+    fixed_text = ", ".join(fixed) or "none"
+    still_text = ", ".join(f"{key} ({current_keys[key]})" for key in still_failing) or "none"
+    new_text = ", ".join(f"{key} ({current_keys[key]})" for key in new_failures) or "none"
+    return (
+        "[validator delta vs previous candidate]\n"
+        f"fixed: {fixed_text}\n"
+        f"still_failing: {still_text}\n"
+        f"new_failures: {new_text}"
+    )
+
+
 def normalize_options(value: Any) -> dict[str, Any]:
     source = value if isinstance(value, dict) else {}
     width = max(32, min(160, round(float(source.get("width", 96)))))
@@ -247,6 +278,7 @@ def generate_plan(
     seed_repair: bool = False,
     preseeded_iterations: list[dict[str, Any]] | None = None,
     initial_error: str | None = None,
+    initial_validation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     program = normalize_program(payload.get("program"))
     action = str(payload.get("action", "generate"))
@@ -307,6 +339,7 @@ def generate_plan(
     previous_code = current_code
     latest_error = ""
     first_error = ""
+    previous_validation: dict[str, Any] | None = initial_validation
     best_result: dict[str, Any] | None = None
     best_candidate: dict[str, Any] | None = None
 
@@ -391,6 +424,10 @@ def generate_plan(
             previous_code = candidate["code"]
             result = execute_and_validate(previous_code, program, enforce_ai_contract=True)
             latest_error = candidate_rejection_reason(result)
+            prior_validation = previous_validation
+            previous_validation = result["validation"]
+            if latest_error and prior_validation is not None:
+                latest_error = validation_delta(prior_validation, result["validation"]) + "\n" + latest_error
             if best_result is None or result["validation"]["score"] > best_result["validation"]["score"]:
                 best_result = result
                 best_candidate = candidate
@@ -438,6 +475,8 @@ def generate_plan(
             if best_result is not result and best_result is not None and best_candidate is not None:
                 regressed_error = latest_error
                 previous_code = best_candidate["code"]
+                # Next delta must compare against the code the model is actually shown.
+                previous_validation = best_result["validation"]
                 latest_error = (
                     "The latest executable candidate regressed. Continue from the best executable program below. "
                     f"Latest candidate feedback: {regressed_error} "
@@ -448,6 +487,8 @@ def generate_plan(
             attempt_error = str(error)
             if best_result is not None and best_candidate is not None:
                 previous_code = best_candidate["code"]
+                # Next delta must compare against the code the model is actually shown.
+                previous_validation = best_result["validation"]
                 latest_error = (
                     "The latest attempted edit failed before validation. Continue from the best executable program below. "
                     f"Failed edit error: {attempt_error} "
@@ -590,6 +631,7 @@ def refine_plan(payload: dict[str, Any]) -> dict[str, Any]:
         seed_repair=True,
         preseeded_iterations=[seed_iteration],
         initial_error=rejection,
+        initial_validation=result["validation"] if result is not None else None,
     )
     source_map = {"gemini-fixed": "seed-repaired", "gemini-fix-unaccepted": "seed-repair-unaccepted"}
     outcome["source"] = source_map.get(outcome["source"], outcome["source"])

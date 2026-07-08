@@ -598,6 +598,79 @@ class AgentGenerationTests(unittest.TestCase):
         # The plan-level entrance issue matches no group marker, so it is not rendered as a tag.
         self.assertNotIn("No exterior entrance door was generated.", feedback)
 
+    def test_validation_delta_reports_fixed_still_failing_and_new(self) -> None:
+        previous = {
+            "checks": [
+                {"category": "count", "label": "waiting: 0/1", "pass": False},
+                {"category": "doors", "label": "Main entrance", "pass": False},
+            ]
+        }
+        current = {
+            "checks": [
+                {"category": "count", "label": "waiting: 0/1", "pass": False},
+            ]
+        }
+        delta = service.validation_delta(previous, current)
+        self.assertIn("fixed: doors:Main entrance", delta)
+        self.assertIn("still_failing: count:waiting (waiting: 0/1)", delta)
+        self.assertIn("new_failures: none", delta)
+
+    def test_repair_context_prepends_validator_delta_after_first_candidate(self) -> None:
+        model_outputs = [
+            {"code": f"code-{index}", "strategy": "repair", "assumptions": [], "model": "quality-model"}
+            for index in range(1, 4)
+        ]
+        rejected_a_b = {
+            "code": "code-1",
+            "plan": {"rooms": []},
+            "validation": {
+                "score": 40,
+                "checks": [
+                    {"category": "doors", "label": "Main entrance door", "pass": False},
+                    {"category": "count", "label": "waiting: 0/1", "pass": False},
+                ],
+                "issues": ["Main entrance door missing.", "waiting count is off."],
+                "areas": [],
+            },
+        }
+        rejected_b = {
+            "code": "code-2",
+            "plan": {"rooms": []},
+            "validation": {
+                "score": 50,
+                "checks": [
+                    {"category": "doors", "label": "Main entrance door", "pass": True},
+                    {"category": "count", "label": "waiting: 0/1", "pass": False},
+                ],
+                "issues": ["waiting count is off."],
+                "areas": [],
+            },
+        }
+        accepted = {
+            "code": "code-3",
+            "plan": {"rooms": []},
+            "validation": {"score": 95, "checks": [], "issues": [], "areas": []},
+        }
+        with (
+            patch.dict(os.environ, {"GEMINI_API_KEY": "test-key", "GEMINI_MODEL": "quality-model"}),
+            patch.object(service, "generate_gemini_code", side_effect=model_outputs) as generate_mock,
+            patch.object(service, "execute_and_validate", side_effect=[rejected_a_b, rejected_b, accepted]),
+        ):
+            service.generate_plan(
+                {
+                    "action": "generate",
+                    "program": self.samples["clinic-small"],
+                    "mode": "auto",
+                    "options": {"width": 64, "height": 40},
+                }
+            )
+        second_context = generate_mock.call_args_list[1].args[5]
+        third_context = generate_mock.call_args_list[2].args[5]
+        # No prior executed candidate before the first repair, so no delta yet.
+        self.assertNotIn("[validator delta", second_context)
+        self.assertIn("[validator delta vs previous candidate]", third_context)
+        self.assertIn("fixed: doors:Main entrance door", third_context)
+
     def test_code_agent_reports_failure_after_five_unexecutable_attempts_without_fallback(self) -> None:
         model_outputs = [
             {"code": f"attempt-{index}", "strategy": "repair", "assumptions": [], "model": "test-model"}
@@ -907,6 +980,60 @@ class SeedRefineTests(unittest.TestCase):
         # The repair loop must inherit the seed's physical scale, not re-derive it.
         options = generate_mock.call_args.args[4]
         self.assertEqual(options["meters_per_cell"], 0.5)
+
+    def test_refine_delta_uses_the_seed_validation_as_its_base(self) -> None:
+        failing_seed = {
+            "code": "seed-code",
+            "plan": {"rooms": []},
+            "validation": {
+                "score": 40,
+                "checks": [
+                    {"category": "doors", "label": "Main entrance door", "pass": False},
+                    {"category": "count", "label": "waiting: 0/1", "pass": False},
+                ],
+                "issues": ["waiting_0 has no door."],
+                "areas": [],
+            },
+        }
+        rejected_repair = {
+            "code": "repair-1",
+            "plan": {"rooms": []},
+            "validation": {
+                "score": 55,
+                "checks": [
+                    {"category": "doors", "label": "Main entrance door", "pass": True},
+                    {"category": "count", "label": "waiting: 0/1", "pass": False},
+                ],
+                "issues": ["waiting count is off."],
+                "areas": [],
+            },
+        }
+        passing_repair = {
+            "code": "repair-2",
+            "plan": {"rooms": []},
+            "validation": {"score": 92, "checks": [], "issues": [], "areas": []},
+        }
+        model_outputs = [
+            {"code": "repair-1", "strategy": "first repair", "assumptions": [], "model": "quality-model"},
+            {"code": "repair-2", "strategy": "second repair", "assumptions": [], "model": "quality-model"},
+        ]
+        with (
+            patch.dict(os.environ, {"GEMINI_API_KEY": "test-key", "GEMINI_MODEL": "quality-model"}),
+            patch.object(
+                service,
+                "execute_and_validate",
+                side_effect=[failing_seed, rejected_repair, passing_repair],
+            ),
+            patch.object(service, "generate_gemini_code", side_effect=model_outputs) as generate_mock,
+        ):
+            outcome = service.refine_plan(
+                {"program": self.samples["clinic-small"], "seed": make_test_seed()}
+            )
+        # The delta on the second repair is computed against the seed translation (attempt 0).
+        second_repair_context = generate_mock.call_args_list[1].args[5]
+        self.assertIn("[validator delta vs previous candidate]", second_repair_context)
+        self.assertIn("fixed: doors:Main entrance door", second_repair_context)
+        self.assertTrue(outcome["accepted"])
 
     def test_prompt_uses_seed_guidance_and_keeps_reference_note(self) -> None:
         program = normalize_program(self.samples["clinic-small"])
