@@ -1044,6 +1044,8 @@ class SeedRefineTests(unittest.TestCase):
         options = {"width": 40, "height": 24, "meters_per_cell": 0.5}
         seed_prompt = build_prompt(program, "", options, None, with_seed_repair=True)
         self.assertIn("Repair it; do not redesign it", seed_prompt)
+        self.assertIn("cannot be fixed by a local edit", seed_prompt)
+        self.assertIn("minimal new geometry", seed_prompt)
         self.assertNotIn("TRANSCRIBE that drawing", seed_prompt)
         both_prompt = build_prompt(
             program, "", options, None, with_reference_image=True, with_seed_repair=True

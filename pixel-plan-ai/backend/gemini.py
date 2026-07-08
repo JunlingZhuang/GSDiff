@@ -143,12 +143,14 @@ Your program must TRANSCRIBE that drawing onto the cell grid, not invent a new d
 - Encode the layout you SEE as data (room rectangles read off the drawing) plus painting loops; do not substitute a generic packing algorithm."""
 
 
+# Escape hatch added 2026-07-08: the first trace-mode E2E hit a seed missing the waiting room entirely (docs/claude-code-lessons.md #9).
 SEED_REPAIR_GUIDANCE = """The current program encodes an EXISTING traced floor plan as data literals
 (FOOTPRINT_RECTS / ROOM_DATA / DOORS) followed by a fixed rasterizing builder.
 Repair it; do not redesign it:
 - Fix validator failures by minimally adjusting the data literals: nudge rectangle bounds, resize or split one room's rectangles, move or add door entries on real shared boundaries.
 - Preserve the traced massing, corridor topology, and relative room placement. Do not reorder rooms, do not swap the builder for a generic packing or banding algorithm, and do not regenerate the layout from scratch.
-- Keep the ROOM_DATA/DOORS + builder structure in every revision so later repairs stay local. You may extend the builder with ownership audits or shared-boundary door scanners, but geometry always stays in the data literals."""
+- Keep the ROOM_DATA/DOORS + builder structure in every revision so later repairs stay local. You may extend the builder with ownership audits or shared-boundary door scanners, but geometry always stays in the data literals.
+- If a named failure cannot be fixed by a local edit (for example a required room is missing from the trace entirely), add the minimal new geometry required, placed consistently with the traced topology; this is the only case where new rooms may be introduced."""
 
 
 def build_prompt(
