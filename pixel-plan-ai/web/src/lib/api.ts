@@ -7,6 +7,8 @@ import type {
   Program,
   Samples,
   SeedPlan,
+  TraceResponse,
+  TracerHealth,
 } from "./types";
 
 async function readJson<T>(response: Response): Promise<T> {
@@ -76,6 +78,22 @@ export async function fetchProgress(requestId: string, signal: AbortSignal): Pro
 
 export async function cancelGeneration(requestId: string): Promise<void> {
   await fetch(`/api/generate/${encodeURIComponent(requestId)}`, { method: "DELETE" });
+}
+
+// The hfagent tracer is a separate localhost service reached through the
+// /trace-api rewrite; both calls stay best-effort so trace mode can degrade to
+// the paste/upload seed path whenever the service is offline.
+export async function fetchTracerHealth(signal?: AbortSignal): Promise<TracerHealth> {
+  return readJson(await fetch("/trace-api/health", { cache: "no-store", signal }));
+}
+
+export async function postTrace(image: CandidateImage, program: string): Promise<TraceResponse> {
+  const response = await fetch("/trace-api/trace", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ image, program }),
+  });
+  return readJson(await Promise.resolve(response));
 }
 
 export async function postDrawCandidates(program: Program, count: number): Promise<CandidateImage[]> {

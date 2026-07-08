@@ -8,8 +8,10 @@ import {
   fetchHealth,
   fetchProgress,
   fetchSamples,
+  fetchTracerHealth,
   postAgentAction,
   postDrawCandidates,
+  postTrace,
 } from "@/lib/api";
 import type {
   AgentAction,
@@ -22,9 +24,11 @@ import type {
   Samples,
   SeedPlan,
   StudioMode,
+  TraceResponse,
   Validation,
 } from "@/lib/types";
 import { candidateDataUrl } from "@/lib/types";
+import { seedToPreviewPlan } from "@/lib/type-colors";
 
 export type ViewportMode = "2d" | "3d";
 
@@ -56,6 +60,13 @@ export function useStudio() {
   const [selectedCandidate, setSelectedCandidate] = React.useState(-1);
   const [candidatesBusy, setCandidatesBusy] = React.useState(false);
   const [lightbox, setLightbox] = React.useState<number | null>(null);
+
+  // Trace pipeline: hfagent tracer service (separate localhost process reached
+  // through the /trace-api rewrite) turns a picked drawing into a seed grid.
+  const [tracerOnline, setTracerOnline] = React.useState<boolean | null>(null);
+  const [traceBusy, setTraceBusy] = React.useState(false);
+  const [traceResult, setTraceResult] = React.useState<TraceResponse | null>(null);
+  const [traceLightboxOpen, setTraceLightboxOpen] = React.useState(false);
 
   const [result, setResult] = React.useState<GenerationResult | null>(null);
   const [livePlan, setLivePlan] = React.useState<Plan | null>(null);
@@ -101,6 +112,19 @@ export function useStudio() {
   }, []);
 
   React.useEffect(() => {
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        const tracer = await fetchTracerHealth(controller.signal);
+        setTracerOnline(!!tracer.ok);
+      } catch {
+        setTracerOnline(false); // offline — trace mode falls back to paste/upload
+      }
+    })();
+    return () => controller.abort();
+  }, []);
+
+  React.useEffect(() => {
     if (!busyAction) return;
     const startedAt = performance.now();
     setElapsed(0);
@@ -132,8 +156,19 @@ export function useStudio() {
     [program],
   );
 
-  const activePlan = livePlan ?? result?.plan ?? null;
+  // The traced seed drives the raw preview and takes precedence over any pasted
+  // seed once a trace has run; the preview Plan renders through the same
+  // activePlan pathway as a live/result plan (see below).
+  const tracedSeed = traceResult?.seed ?? null;
+  const tracePreviewPlan = React.useMemo<Plan | null>(
+    () => (traceResult ? seedToPreviewPlan(traceResult.seed) : null),
+    [traceResult],
+  );
+
+  const activePlan = livePlan ?? result?.plan ?? tracePreviewPlan ?? null;
   const activeValidation = liveValidation ?? result?.validation ?? null;
+  // Raw trace preview is on screen only while nothing validated has replaced it.
+  const showingTracePreview = !livePlan && !result && !!tracePreviewPlan;
 
   const seed = React.useMemo<SeedPlan | null>(() => {
     if (!seedText.trim()) return null;
@@ -159,6 +194,9 @@ export function useStudio() {
       return error instanceof Error ? error.message : String(error);
     }
   }, [seedText]);
+
+  // Refine consumes the traced seed when present, else the pasted/uploaded one.
+  const effectiveSeed = tracedSeed ?? seed;
 
   const loadSample = React.useCallback(
     (key: string) => {
@@ -225,8 +263,8 @@ export function useStudio() {
         setStatus({ text: "Draw candidates and pick one drawing first.", error: true });
         return;
       }
-      if (action === "generate" && mode === "trace" && !seed) {
-        setStatus({ text: "Paste or upload a valid traced-plan seed JSON first.", error: true });
+      if (action === "generate" && mode === "trace" && !effectiveSeed) {
+        setStatus({ text: "Trace a drawing or paste a valid seed JSON first.", error: true });
         return;
       }
       const requestId = crypto.randomUUID();
@@ -234,8 +272,13 @@ export function useStudio() {
       abortRef.current = controller;
       requestIdRef.current = requestId;
       const isTranscription = action === "generate" && mode === "image" && selectedCandidate >= 0;
-      const isRefinement = action === "generate" && mode === "trace" && !!seed;
-      const referenceImage = isTranscription ? candidates[selectedCandidate] : null;
+      const isRefinement = action === "generate" && mode === "trace" && !!effectiveSeed;
+      // Anchor the refine on the picked drawing too (same reference infra as
+      // image mode): the traced seed sets geometry, the drawing sets intent.
+      const referenceImage =
+        isTranscription || (isRefinement && selectedCandidate >= 0)
+          ? candidates[selectedCandidate]
+          : null;
       if (referenceImage) setReference({ image: referenceImage, index: selectedCandidate });
       setBusyAction(action);
       setShowReference(false);
@@ -277,7 +320,7 @@ export function useStudio() {
           width: gridWidth,
           height: gridHeight,
           referenceImage,
-          seed: isRefinement ? seed : null,
+          seed: isRefinement ? effectiveSeed : null,
           signal: controller.signal,
         });
         setResult(payload);
@@ -310,7 +353,7 @@ export function useStudio() {
         }
       }
     },
-    [busyAction, program, code, revision, mode, selectedCandidate, candidates, seed, prompt, gridWidth, gridHeight, pollProgress],
+    [busyAction, program, code, revision, mode, selectedCandidate, candidates, effectiveSeed, prompt, gridWidth, gridHeight, pollProgress],
   );
 
   const stopGeneration = React.useCallback(async () => {
@@ -329,6 +372,7 @@ export function useStudio() {
     setCandidatesBusy(true);
     setCandidates([]);
     setSelectedCandidate(-1);
+    setTraceResult(null); // new drawings invalidate any prior trace
     try {
       const images = await postDrawCandidates(program, 3);
       setCandidates(images);
@@ -342,9 +386,51 @@ export function useStudio() {
     }
   }, [candidatesBusy, busyAction, program]);
 
+  const runTrace = React.useCallback(async () => {
+    if (traceBusy || busyAction) return;
+    const candidate = candidates[selectedCandidate];
+    if (!candidate) {
+      setStatus({ text: "Pick a drawing candidate before tracing.", error: true });
+      return;
+    }
+    if (!sampleKey) {
+      setStatus({ text: "Select a program before tracing.", error: true });
+      return;
+    }
+    setTraceBusy(true);
+    setStatus({ text: "Tracing the drawing into a seed grid...", error: false });
+    try {
+      const response = await postTrace(candidate, sampleKey);
+      setTraceResult(response);
+      // A fresh trace starts a fresh pipeline: drop any prior refine result so
+      // the raw preview (not a stale validated plan) shows on the canvas, and
+      // clear a prior reference overlay so it can't collide with the preview chip.
+      setResult(null);
+      setLivePlan(null);
+      setLiveValidation(null);
+      setReference(null);
+      setShowReference(false);
+      const d = response.diagnostics;
+      setStatus({
+        text: `Traced · ${d.rooms} rooms · ${d.doors} doors · typed ${d.typed}/${d.rooms}`,
+        error: false,
+      });
+      toast.success("Drawing traced", {
+        description: "Raw seed preview is on the canvas — confirm to refine.",
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setStatus({ text: message, error: true });
+      toast.error("Trace failed", { description: message });
+    } finally {
+      setTraceBusy(false);
+    }
+  }, [traceBusy, busyAction, candidates, selectedCandidate, sampleKey]);
+
   const selectCandidate = React.useCallback(
     (index: number) => {
       setSelectedCandidate(index);
+      setTraceResult(null); // a different drawing needs a fresh trace
       const candidate = candidates[index];
       if (!candidate) return;
       // Match the grid to the drawing's aspect ratio so transcription does
@@ -399,6 +485,14 @@ export function useStudio() {
     drawCandidates,
     lightbox,
     setLightbox,
+    tracerOnline,
+    traceBusy,
+    traceResult,
+    runTrace,
+    effectiveSeed,
+    showingTracePreview,
+    traceLightboxOpen,
+    setTraceLightboxOpen,
     result,
     activePlan,
     activeValidation,

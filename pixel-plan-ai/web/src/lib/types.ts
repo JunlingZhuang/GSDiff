@@ -181,6 +181,24 @@ export interface SeedPlan {
   }[];
 }
 
+export interface TraceDiagnostics {
+  rooms: number;
+  doors: number;
+  typed: number;
+  meters_per_pixel: number | null;
+}
+
+export interface TraceResponse {
+  seed: SeedPlan & { meta?: Record<string, unknown> };
+  diagnostics: TraceDiagnostics;
+  artifacts: { linework?: CandidateImage };
+}
+
+export interface TracerHealth {
+  ok: boolean;
+  programs: string[];
+}
+
 export function candidateDataUrl(candidate: CandidateImage): string {
   return `data:${candidate.mime};base64,${candidate.data}`;
 }

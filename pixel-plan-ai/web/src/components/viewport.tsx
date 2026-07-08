@@ -127,6 +127,15 @@ export function Viewport({ studio }: { studio: Studio }) {
         </div>
       ) : null}
 
+      {/* raw trace preview banner (2D only, before the seed is validated) */}
+      {is2d && plan && studio.showingTracePreview ? (
+        <div className={cn("absolute top-3 z-30 flex items-center gap-1.5 rounded-lg border border-warning/50 bg-card/90 px-2 py-1.5 shadow-lg backdrop-blur-md", CLEAR_LEFT)}>
+          <span className="size-1.5 shrink-0 rounded-full bg-warning" aria-hidden />
+          <span className="text-[11px] font-medium text-foreground">raw trace</span>
+          <span className="text-[11px] text-muted-foreground">· not yet validated</span>
+        </div>
+      ) : null}
+
       {/* readout (2D only, with a plan) */}
       {is2d && plan ? (
         <div className={cn("absolute bottom-3 z-30 rounded-lg border border-border bg-card/90 px-2.5 py-1.5 font-mono text-[11px] tabular-nums text-muted-foreground shadow-lg backdrop-blur-md", CLEAR_LEFT)}>

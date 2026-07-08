@@ -9,6 +9,8 @@ import {
   CircleCheck,
   Image as ImageIcon,
   ImagePlus,
+  Layers,
+  Loader2,
   Route,
   Sparkles,
 } from "lucide-react";
@@ -84,11 +86,145 @@ function Disclosure({
   );
 }
 
+// Draw + candidate grid — shared by image mode and trace step 1 (selection state
+// lives in the studio hook, so both surfaces pick the same drawing).
+function CandidateStrip({ studio }: { studio: Studio }) {
+  return (
+    <div className="flex flex-col gap-2">
+      <Button
+        size="sm"
+        variant="outline"
+        className="h-8 w-full gap-1.5 text-[12px]"
+        disabled={studio.candidatesBusy || !!studio.busyAction || !studio.program}
+        onClick={() => void studio.drawCandidates()}
+      >
+        <ImagePlus className="size-3.5" />
+        {studio.candidatesBusy ? "Drawing…" : "Draw 3 candidates"}
+      </Button>
+      {studio.candidates.length || studio.candidatesBusy ? (
+        <div className="flex flex-wrap gap-1.5">
+          {studio.candidatesBusy ? (
+            <Chip>drawing…</Chip>
+          ) : (
+            <Chip>
+              <Num>{studio.candidates.length}</Num> drawings
+            </Chip>
+          )}
+          {studio.selectedCandidate >= 0 ? (
+            <Chip tone="accent">
+              #<Num>{studio.selectedCandidate + 1}</Num> selected
+            </Chip>
+          ) : null}
+        </div>
+      ) : null}
+      <div className="grid grid-cols-3 gap-1.5">
+        {studio.candidatesBusy
+          ? [0, 1, 2].map((index) => <Skeleton key={index} className="aspect-video w-full rounded-md" />)
+          : studio.candidates.map((candidate, index) => (
+              <button
+                key={index}
+                type="button"
+                className={cn(
+                  "relative overflow-hidden rounded-md border-2 bg-white transition-shadow",
+                  index === studio.selectedCandidate
+                    ? "border-primary shadow-[0_0_0_1px_var(--primary)]"
+                    : "border-border hover:border-foreground/40",
+                )}
+                onClick={() =>
+                  index === studio.selectedCandidate
+                    ? studio.setLightbox(index)
+                    : studio.selectCandidate(index)
+                }
+              >
+                {/* contain, never crop: the user must see the whole drawing */}
+                <img
+                  src={candidateDataUrl(candidate)}
+                  alt={`Candidate plan ${index + 1}`}
+                  className="aspect-video w-full object-contain"
+                />
+                {index === studio.selectedCandidate ? (
+                  <span className="absolute right-0.5 top-0.5 rounded-full bg-primary p-0.5 text-primary-foreground">
+                    <Check className="size-2.5" />
+                  </span>
+                ) : null}
+              </button>
+            ))}
+      </div>
+    </div>
+  );
+}
+
+// One row of the trace pipeline stepper: a numbered chip-row header (a check when
+// complete) plus expandable content; a completed step collapses to a summary row.
+function Step({
+  index,
+  title,
+  state,
+  open,
+  onToggle,
+  summary,
+  children,
+}: {
+  index: number;
+  title: string;
+  state: "done" | "active" | "pending";
+  open: boolean;
+  onToggle: () => void;
+  summary?: React.ReactNode;
+  children?: React.ReactNode;
+}) {
+  return (
+    <div
+      className={cn(
+        "rounded-lg border",
+        state === "pending" ? "border-border/60 bg-secondary/20" : "border-border bg-secondary/30",
+      )}
+    >
+      <button
+        type="button"
+        onClick={onToggle}
+        disabled={state === "pending"}
+        className="flex w-full items-center gap-2 px-2 py-1.5 text-left outline-none disabled:cursor-not-allowed disabled:opacity-70"
+      >
+        <span
+          className={cn(
+            "flex size-4 shrink-0 items-center justify-center rounded-full font-mono text-[10px]",
+            state === "done"
+              ? "bg-primary text-primary-foreground"
+              : state === "active"
+                ? "border border-primary text-primary"
+                : "border border-border text-muted-foreground",
+          )}
+        >
+          {state === "done" ? <Check className="size-2.5" /> : index}
+        </span>
+        <span className="label-xs flex-1">{title}</span>
+        {!open ? summary : null}
+      </button>
+      {open && children ? <div className="border-t border-border/60 px-2 py-2">{children}</div> : null}
+    </div>
+  );
+}
+
 export function ProgramPanel({ studio }: { studio: Studio }) {
   const imageMode = studio.mode === "image";
   const traceMode = studio.mode === "trace";
   const [jsonOpen, setJsonOpen] = React.useState(false);
   const [canvasOpen, setCanvasOpen] = React.useState(false);
+  const [advancedOpen, setAdvancedOpen] = React.useState(false);
+  const [openStep, setOpenStep] = React.useState(1);
+
+  const trace = studio.traceResult;
+  const drawingPicked = studio.selectedCandidate >= 0;
+  const traced = !!trace;
+
+  // Advance the stepper as each stage completes; headers still let the user jump back.
+  React.useEffect(() => {
+    if (drawingPicked) setOpenStep((step) => (step === 1 ? 2 : step));
+  }, [drawingPicked]);
+  React.useEffect(() => {
+    if (traced) setOpenStep((step) => (step === 2 ? 3 : step));
+  }, [traced]);
 
   const corridors = React.useMemo(
     () =>
@@ -102,6 +238,12 @@ export function ProgramPanel({ studio }: { studio: Studio }) {
   const ftPerCell = studio.activePlan
     ? (studio.activePlan.meters_per_cell * 3.28084).toFixed(2)
     : null;
+
+  const refining = studio.busyAction === "generate";
+  const step1State = drawingPicked ? "done" : "active";
+  const step2State = traced ? "done" : drawingPicked ? "active" : "pending";
+  const step3State = studio.result && !studio.showingTracePreview ? "done" : studio.effectiveSeed ? "active" : "pending";
+  const toggleStep = (index: number) => setOpenStep((step) => (step === index ? 0 : index));
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -204,110 +346,192 @@ export function ProgramPanel({ studio }: { studio: Studio }) {
             </Tabs>
 
             {imageMode ? (
-              <div className="flex flex-col gap-2 rounded-lg border border-border bg-secondary/30 p-2">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-8 w-full gap-1.5 text-[12px]"
-                  disabled={studio.candidatesBusy || !!studio.busyAction || !studio.program}
-                  onClick={() => void studio.drawCandidates()}
-                >
-                  <ImagePlus className="size-3.5" />
-                  {studio.candidatesBusy ? "Drawing…" : "Draw 3 candidates"}
-                </Button>
-                {studio.candidates.length || studio.candidatesBusy ? (
-                  <div className="flex flex-wrap gap-1.5">
-                    {studio.candidatesBusy ? (
-                      <Chip>drawing…</Chip>
-                    ) : (
-                      <Chip>
-                        <Num>{studio.candidates.length}</Num> drawings
-                      </Chip>
-                    )}
-                    {studio.selectedCandidate >= 0 ? (
-                      <Chip tone="accent">
-                        #<Num>{studio.selectedCandidate + 1}</Num> selected
-                      </Chip>
-                    ) : null}
-                  </div>
-                ) : null}
-                <div className="grid grid-cols-3 gap-1.5">
-                  {studio.candidatesBusy
-                    ? [0, 1, 2].map((index) => <Skeleton key={index} className="aspect-video w-full rounded-md" />)
-                    : studio.candidates.map((candidate, index) => (
-                        <button
-                          key={index}
-                          type="button"
-                          className={cn(
-                            "relative overflow-hidden rounded-md border-2 bg-white transition-shadow",
-                            index === studio.selectedCandidate
-                              ? "border-primary shadow-[0_0_0_1px_var(--primary)]"
-                              : "border-border hover:border-foreground/40",
-                          )}
-                          onClick={() =>
-                            index === studio.selectedCandidate
-                              ? studio.setLightbox(index)
-                              : studio.selectCandidate(index)
-                          }
-                        >
-                          {/* contain, never crop: the user must see the whole drawing */}
-                          <img
-                            src={candidateDataUrl(candidate)}
-                            alt={`Candidate plan ${index + 1}`}
-                            className="aspect-video w-full object-contain"
-                          />
-                          {index === studio.selectedCandidate ? (
-                            <span className="absolute right-0.5 top-0.5 rounded-full bg-primary p-0.5 text-primary-foreground">
-                              <Check className="size-2.5" />
-                            </span>
-                          ) : null}
-                        </button>
-                      ))}
-                </div>
+              <div className="rounded-lg border border-border bg-secondary/30 p-2">
+                <CandidateStrip studio={studio} />
               </div>
             ) : null}
 
             {traceMode ? (
-              <div className="flex flex-col gap-2 rounded-lg border border-border bg-secondary/30 p-2">
-                <div className="flex items-center justify-between">
-                  <span className="label-xs">Seed</span>
-                  <label className="cursor-pointer text-[11px] font-medium text-primary hover:underline">
-                    Upload JSON
-                    <input
-                      type="file"
-                      accept=".json,application/json"
-                      className="hidden"
-                      onChange={(event) => {
-                        const file = event.target.files?.[0];
-                        if (!file) return;
-                        void file.text().then((text) => studio.setSeedText(text));
-                        event.target.value = "";
-                      }}
-                    />
-                  </label>
-                </div>
-                <Textarea
-                  value={studio.seedText}
-                  onChange={(event) => studio.setSeedText(event.target.value)}
-                  spellCheck={false}
-                  placeholder='Paste traced seed JSON: {"width":..,"height":..,"cells":[..],"rooms":[..],"doors":[..]}'
-                  className="h-28 resize-y font-mono text-[10px] leading-relaxed"
-                />
-                {studio.seedError ? (
-                  <p className="flex items-center gap-1 text-[11px] text-destructive">
-                    <CircleAlert className="size-3 shrink-0" />
-                    <span className="font-mono">{studio.seedError}</span>
-                  </p>
-                ) : studio.seed ? (
-                  <div className="flex flex-wrap gap-1.5">
-                    <Chip>
-                      <Num>{studio.seed.width}×{studio.seed.height}</Num> cells
-                    </Chip>
-                    <Chip>
-                      <Num>{studio.seed.rooms.length}</Num> rooms
-                    </Chip>
+              <div className="flex flex-col gap-2">
+                {/* Step 1 — pick a Gemini drawing */}
+                <Step
+                  index={1}
+                  title="Drawing"
+                  state={step1State}
+                  open={openStep === 1}
+                  onToggle={() => toggleStep(1)}
+                  summary={
+                    drawingPicked && studio.candidates[studio.selectedCandidate] ? (
+                      <span className="flex items-center gap-1.5">
+                        <img
+                          src={candidateDataUrl(studio.candidates[studio.selectedCandidate])}
+                          alt="Picked drawing"
+                          className="size-5 rounded border border-border bg-white object-contain"
+                        />
+                        <span className="text-[11px] text-muted-foreground">candidate {studio.selectedCandidate + 1}</span>
+                      </span>
+                    ) : null
+                  }
+                >
+                  <CandidateStrip studio={studio} />
+                </Step>
+
+                {/* Step 2 — trace the drawing into a seed grid */}
+                <Step
+                  index={2}
+                  title="Trace"
+                  state={step2State}
+                  open={openStep === 2}
+                  onToggle={() => toggleStep(2)}
+                  summary={
+                    traced ? (
+                      <span className="font-mono text-[11px] tabular-nums text-muted-foreground">
+                        {trace.diagnostics.rooms}r · {trace.diagnostics.doors}d
+                      </span>
+                    ) : null
+                  }
+                >
+                  {traced ? (
+                    <div className="flex flex-col gap-2">
+                      <div className="flex flex-wrap gap-1.5">
+                        <Chip>
+                          <Num>{trace.diagnostics.rooms}</Num> rooms
+                        </Chip>
+                        <Chip>
+                          <Num>{trace.diagnostics.doors}</Num> doors
+                        </Chip>
+                        <Chip>
+                          <Num>{trace.seed.meters_per_cell.toFixed(2)}</Num> m/cell
+                        </Chip>
+                        <Chip tone="accent">
+                          typed <Num>{trace.diagnostics.typed}</Num>/<Num>{trace.diagnostics.rooms}</Num>
+                        </Chip>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {trace.artifacts.linework ? (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-7 gap-1.5 text-[11px]"
+                            onClick={() => studio.setTraceLightboxOpen(true)}
+                          >
+                            <Layers className="size-3" /> View linework
+                          </Button>
+                        ) : null}
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-7 gap-1.5 text-[11px]"
+                          disabled={studio.traceBusy || !!studio.busyAction || !drawingPicked}
+                          onClick={() => void studio.runTrace()}
+                        >
+                          {studio.traceBusy ? <Loader2 className="size-3 animate-spin" /> : <Route className="size-3" />}
+                          Re-trace
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <Button
+                      size="sm"
+                      className="h-8 w-full gap-1.5 text-[12px]"
+                      disabled={studio.traceBusy || !!studio.busyAction || !drawingPicked || studio.tracerOnline === false}
+                      onClick={() => void studio.runTrace()}
+                    >
+                      {studio.traceBusy ? <Loader2 className="size-3.5 animate-spin" /> : <Route className="size-3.5" />}
+                      {studio.traceBusy ? "Tracing…" : "Trace drawing"}
+                    </Button>
+                  )}
+                </Step>
+
+                {/* Step 3 — confirm and refine the traced seed */}
+                <Step
+                  index={3}
+                  title="Refine"
+                  state={step3State}
+                  open={openStep === 3}
+                  onToggle={() => toggleStep(3)}
+                  summary={
+                    studio.result && !studio.showingTracePreview ? (
+                      <span className="text-[11px] text-muted-foreground">refined</span>
+                    ) : null
+                  }
+                >
+                  <div className="flex flex-col gap-1.5">
+                    {studio.showingTracePreview ? (
+                      <p className="text-[11px] text-muted-foreground">
+                        Raw trace is on the canvas. Confirm to translate + validate it as code.
+                      </p>
+                    ) : null}
+                    <Button
+                      className="h-9 w-full gap-2 text-[13px] font-medium"
+                      disabled={!!studio.busyAction || !studio.program || !studio.effectiveSeed}
+                      onClick={() => void studio.runAgentAction("generate")}
+                    >
+                      {refining ? <Loader2 className="size-3.5 animate-spin" /> : <Sparkles className="size-3.5" />}
+                      {refining ? "Refining…" : "Refine traced plan"}
+                    </Button>
                   </div>
+                </Step>
+
+                {studio.tracerOnline === false ? (
+                  <p className="px-1 text-[11px] text-muted-foreground">Tracer offline — paste a seed below.</p>
                 ) : null}
+
+                {/* Fallback: the direct seed paste/upload path stays available always */}
+                <Disclosure
+                  open={advancedOpen || studio.tracerOnline === false || !!studio.seedError}
+                  onOpenChange={setAdvancedOpen}
+                  label={<span className="label-xs">Advanced</span>}
+                  meta={
+                    studio.seedError ? (
+                      <span className="flex items-center gap-1 text-[10px] text-destructive">
+                        <CircleAlert className="size-3" /> invalid
+                      </span>
+                    ) : null
+                  }
+                >
+                  <div className="flex flex-col gap-2 rounded-lg border border-border bg-secondary/30 p-2">
+                    <div className="flex items-center justify-between">
+                      <span className="label-xs">Seed JSON</span>
+                      <label className="cursor-pointer text-[11px] font-medium text-primary hover:underline">
+                        Upload JSON
+                        <input
+                          type="file"
+                          accept=".json,application/json"
+                          className="hidden"
+                          onChange={(event) => {
+                            const file = event.target.files?.[0];
+                            if (!file) return;
+                            void file.text().then((text) => studio.setSeedText(text));
+                            event.target.value = "";
+                          }}
+                        />
+                      </label>
+                    </div>
+                    <Textarea
+                      value={studio.seedText}
+                      onChange={(event) => studio.setSeedText(event.target.value)}
+                      spellCheck={false}
+                      placeholder='Paste traced seed JSON: {"width":..,"height":..,"cells":[..],"rooms":[..],"doors":[..]}'
+                      className="h-28 resize-y font-mono text-[10px] leading-relaxed"
+                    />
+                    {studio.seedError ? (
+                      <p className="flex items-center gap-1 text-[11px] text-destructive">
+                        <CircleAlert className="size-3 shrink-0" />
+                        <span className="font-mono">{studio.seedError}</span>
+                      </p>
+                    ) : studio.seed ? (
+                      <div className="flex flex-wrap gap-1.5">
+                        <Chip>
+                          <Num>{studio.seed.width}×{studio.seed.height}</Num> cells
+                        </Chip>
+                        <Chip>
+                          <Num>{studio.seed.rooms.length}</Num> rooms
+                        </Chip>
+                      </div>
+                    ) : null}
+                  </div>
+                </Disclosure>
               </div>
             ) : null}
           </section>
@@ -373,32 +597,36 @@ export function ProgramPanel({ studio }: { studio: Studio }) {
       </ScrollArea>
 
       <div className="border-t border-border p-3">
-        <Button
-          className="h-9 w-full gap-2 text-[13px] font-medium"
-          disabled={
-            !!studio.busyAction ||
-            !studio.program ||
-            (imageMode && studio.selectedCandidate < 0) ||
-            (traceMode && !studio.seed)
-          }
-          onClick={() => void studio.runAgentAction("generate")}
-        >
-          <Sparkles className="size-3.5" />
-          {studio.busyAction === "generate"
-            ? traceMode
-              ? "Refining…"
-              : studio.transcribing
+        {/* Trace mode's primary action is the stepper's step 3 (Refine). */}
+        {traceMode ? null : (
+          <Button
+            className="h-9 w-full gap-2 text-[13px] font-medium"
+            disabled={
+              !!studio.busyAction ||
+              !studio.program ||
+              (imageMode && studio.selectedCandidate < 0)
+            }
+            onClick={() => void studio.runAgentAction("generate")}
+          >
+            <Sparkles className="size-3.5" />
+            {studio.busyAction === "generate"
+              ? studio.transcribing
                 ? "Transcribing…"
                 : "Generating…"
-            : traceMode
-              ? "Refine traced plan"
               : imageMode
                 ? "Transcribe drawing"
                 : studio.result
                   ? "Re-generate plan"
                   : "Generate plan"}
-        </Button>
-        <p className={cn("mt-2 truncate font-mono text-[11px] tabular-nums", studio.status.error ? "text-destructive" : "text-muted-foreground")}>
+          </Button>
+        )}
+        <p
+          className={cn(
+            "truncate font-mono text-[11px] tabular-nums",
+            traceMode ? "" : "mt-2",
+            studio.status.error ? "text-destructive" : "text-muted-foreground",
+          )}
+        >
           {studio.status.text}
         </p>
       </div>
@@ -442,6 +670,20 @@ export function ProgramPanel({ studio }: { studio: Studio }) {
                 </Button>
               </div>
             </>
+          ) : null}
+        </DialogContent>
+      </Dialog>
+
+      {/* traced linework artifact lightbox */}
+      <Dialog open={studio.traceLightboxOpen} onOpenChange={(open) => studio.setTraceLightboxOpen(open)}>
+        <DialogContent className="max-w-3xl p-3">
+          <DialogTitle className="text-[13px] font-medium">Traced linework</DialogTitle>
+          {trace?.artifacts.linework ? (
+            <img
+              src={candidateDataUrl(trace.artifacts.linework)}
+              alt="Traced linework artifact"
+              className="max-h-[72vh] w-full rounded-md border border-border bg-white object-contain"
+            />
           ) : null}
         </DialogContent>
       </Dialog>
