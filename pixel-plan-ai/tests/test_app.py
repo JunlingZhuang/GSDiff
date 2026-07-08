@@ -193,6 +193,60 @@ result = {"width": width, "height": height, "meters_per_cell": 0.5, "footprint":
         self.assertEqual(plan["doors"][0]["swing_side"], "north")
         self.assertEqual(plan["doors"][1]["swing_side"], "east")
 
+    def test_door_micro_example_survives_the_real_sandbox(self) -> None:
+        # Locks the SYSTEM_INSTRUCTION door-derivation micro-example (docs #11):
+        # a full 12x8 grid where grid[4][10] == 2 (exam_room_1) sits over
+        # grid[5][10] == 0 (corridor_1) must yield the example door dict verbatim
+        # once the real sandbox door validator runs. Keep example and test in sync.
+        code = "\n".join(
+            [
+                "width = 12",
+                "height = 8",
+                "footprint = [[True for _ in range(width)] for _ in range(height)]",
+                "grid = [[0 for _ in range(width)] for _ in range(height)]",
+                "for y in range(height):",
+                "    for x in range(width):",
+                "        if y < 5:",
+                "            grid[y][x] = 1 if x < 6 else 2",
+                "        else:",
+                "            grid[y][x] = 0",
+                "rooms = [",
+                '    {"id": "corridor_1", "type": "corridor"},',
+                '    {"id": "waiting_1", "type": "waiting"},',
+                '    {"id": "exam_room_1", "type": "exam_room"},',
+                "]",
+                "doors = [",
+                '    {"id": "d1", "from_room": "exam_room_1", "to_room": "corridor_1", "x": 10, "y": 5, "orientation": "horizontal", "width_cells": 1},',
+                "]",
+                'result = {"width": width, "height": height, "meters_per_cell": 0.5, "footprint": footprint, "grid": grid, "rooms": rooms, "doors": doors}',
+            ]
+        )
+        _, plan = execute_pixel_code(code)
+        # The grid realizes the example's exact claims.
+        self.assertEqual(plan["cells"][4 * 12 + 10], 2)  # exam_room_1
+        self.assertEqual(plan["cells"][5 * 12 + 10], 0)  # corridor_1
+        self.assertEqual(len(plan["doors"]), 1)
+        door = plan["doors"][0]
+        self.assertEqual(door["id"], "d1")
+        self.assertEqual(door["from_room"], "exam_room_1")
+        self.assertEqual(door["to_room"], "corridor_1")
+        self.assertEqual(door["orientation"], "horizontal")
+        self.assertEqual(door["swing_side"], "north")
+
+    def test_prompts_carry_the_locked_micro_examples(self) -> None:
+        self.assertIn("Example (door derivation)", SYSTEM_INSTRUCTION)
+        self.assertIn("unordered pair", SYSTEM_INSTRUCTION)
+        samples = json.loads((ROOT / "data" / "samples.json").read_text(encoding="utf-8"))
+        program = normalize_program(samples["clinic-small"])
+        seed_prompt = build_prompt(
+            program,
+            "",
+            {"width": 40, "height": 24, "meters_per_cell": 0.5},
+            None,
+            with_seed_repair=True,
+        )
+        self.assertIn("(40, 8, 11, 12)", seed_prompt)
+
     def test_executes_generated_functions_loops_variables_and_math(self) -> None:
         code = "\n".join(
             [

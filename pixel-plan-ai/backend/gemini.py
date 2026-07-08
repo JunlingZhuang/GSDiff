@@ -14,6 +14,7 @@ DEFAULT_MODEL = "gemini-3.5-flash"
 
 # Verdict-ownership + anti-thrashing rules added 2026-07-08 (docs/claude-code-lessons.md #3); pair with the validator delta feedback.
 # Durable coding contract (execution env, result/grid contracts) moved here 2026-07-08 for role separation + prefix caching (docs/claude-code-lessons.md #12).
+# Micro-examples added 2026-07-08; the door example is locked by a sandbox test (docs/claude-code-lessons.md #11).
 SYSTEM_INSTRUCTION = """You are a U.S. healthcare floor-plan coding agent.
 You produce complete executable Python, then use exact executor and validator feedback to revise it.
 Treat room function, zoning, circulation access, physical clear dimensions, area, compactness, and aspect ratio as first-class design constraints.
@@ -22,6 +23,7 @@ An inpatient en-suite toilet should default to an inboard corner near the room e
 Return one final implementation only. The code must not contain abandoned layout alternatives, repeated redefinitions of room lists, self-correction commentary, or draft coordinates. Put reasoning in the strategy field, not inside the code.
 The validator is the sole judge of correctness. Never state or imply that the plan passes; report what you changed and which named failures it targets.
 Before changing approach, diagnose WHY the previous attempt failed from the validator delta when one is present. Prefer the minimal edit that fixes the named failures; never discard parts that already pass.
+Example: if the delta reports fixed: doors:Rooms with doors and still_failing: area:U.S. room-area range, edit only the failing rooms' geometry; leave the door code untouched.
 The result is a schematic planning study, not construction documentation or a claim of code compliance.
 
 The code field must contain a standalone Python program. There is no custom floor-plan API. Write the geometry, allocation, rasterization, search, and optimization logic yourself.
@@ -69,7 +71,8 @@ Grid contract:
 - Never guess or hard-code door coordinates before the grid is complete. Generate doors only after every room has its final pixels.
 - Implement one shared-boundary scanner and use it for every internal door. For a vertical door, scan x from 1 to width - 1 and compare grid[y, x - 1] with grid[y, x]. For a horizontal door, scan y from 1 to height - 1 and compare grid[y - 1, x] with grid[y, x]. Match the unordered pair of room indexes, choose a valid candidate, and use width_cells=1 unless a whole contiguous run was verified.
 - Implement one exterior-boundary scanner for the entrance. It must find a corridor cell adjacent to footprint=False or the canvas exterior and emit the matching boundary coordinate and orientation.
-- If two intended spaces have no shared boundary, change the layout. Never fabricate a door coordinate."""
+- If two intended spaces have no shared boundary, change the layout. Never fabricate a door coordinate.
+Example (door derivation): if grid[4][10] == 2 (exam_room_1) and grid[5][10] == 0 (corridor_1), a horizontal door on that boundary is {"id": "d1", "from_room": "exam_room_1", "to_room": "corridor_1", "x": 10, "y": 5, "orientation": "horizontal", "width_cells": 1} — y names the row BELOW the boundary, and the unordered pair {grid[y-1][x], grid[y][x]} must equal the two rooms for every covered x."""
 
 FEET_PER_METER = 3.280839895
 SQUARE_FEET_PER_SQUARE_METER = 10.763910417
@@ -200,7 +203,8 @@ Repair it; do not redesign it:
 - Fix validator failures by minimally adjusting the data literals: nudge rectangle bounds, resize or split one room's rectangles, move or add door entries on real shared boundaries.
 - Preserve the traced massing, corridor topology, and relative room placement. Do not reorder rooms, do not swap the builder for a generic packing or banding algorithm, and do not regenerate the layout from scratch.
 - Keep the ROOM_DATA/DOORS + builder structure in every revision so later repairs stay local. You may extend the builder with ownership audits or shared-boundary door scanners, but geometry always stays in the data literals.
-- If a named failure cannot be fixed by a local edit (for example a required room is missing from the trace entirely), add the minimal new geometry required, placed consistently with the traced topology; this is the only case where new rooms may be introduced."""
+- If a named failure cannot be fixed by a local edit (for example a required room is missing from the trace entirely), add the minimal new geometry required, placed consistently with the traced topology; this is the only case where new rooms may be introduced.
+- Example of a minimal repair: to widen exam_room_2 by one cell, change its rectangle (40, 8, 10, 12) to (40, 8, 11, 12) inside ROOM_DATA and touch nothing else."""
 
 
 def build_prompt(
