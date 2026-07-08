@@ -1,9 +1,20 @@
 "use client";
 
 import * as React from "react";
-import { Check, ImagePlus, Sparkles } from "lucide-react";
+import {
+  Braces,
+  Check,
+  ChevronDown,
+  CircleAlert,
+  CircleCheck,
+  Image as ImageIcon,
+  ImagePlus,
+  Route,
+  Sparkles,
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -19,106 +30,207 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import type { Studio } from "@/hooks/use-studio";
+import type { StudioMode } from "@/lib/types";
 import { candidateDataUrl } from "@/lib/types";
+import { cn } from "@/lib/utils";
 
-function SectionLabel({ index, children }: { index: string; children: React.ReactNode }) {
+function Chip({
+  children,
+  tone = "default",
+}: {
+  children: React.ReactNode;
+  tone?: "default" | "accent";
+}) {
   return (
-    <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.14em] text-muted-foreground">
-      <span className="text-primary/70">{index}</span>
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 rounded-md border border-border bg-secondary/40 px-1.5 py-0.5 text-[11px]",
+        tone === "accent" ? "text-foreground" : "text-muted-foreground",
+      )}
+    >
       {children}
-    </div>
+    </span>
+  );
+}
+
+function Num({ children }: { children: React.ReactNode }) {
+  return <span className="font-mono text-foreground">{children}</span>;
+}
+
+function Disclosure({
+  open,
+  onOpenChange,
+  label,
+  meta,
+  children,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  label: React.ReactNode;
+  meta?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <Collapsible open={open} onOpenChange={onOpenChange}>
+      <CollapsibleTrigger className="group flex w-full items-center justify-between gap-2 py-1 text-left outline-none">
+        <span className="flex items-center gap-2">{label}</span>
+        <span className="flex items-center gap-1.5">
+          {meta}
+          <ChevronDown className="size-3.5 text-muted-foreground transition-transform group-data-[panel-open]:rotate-180" />
+        </span>
+      </CollapsibleTrigger>
+      <CollapsibleContent>{children}</CollapsibleContent>
+    </Collapsible>
   );
 }
 
 export function ProgramPanel({ studio }: { studio: Studio }) {
   const imageMode = studio.mode === "image";
+  const traceMode = studio.mode === "trace";
+  const [jsonOpen, setJsonOpen] = React.useState(false);
+  const [canvasOpen, setCanvasOpen] = React.useState(false);
+
+  const corridors = React.useMemo(
+    () =>
+      studio.program?.rooms?.reduce(
+        (total, room) => total + (room.type.toLowerCase().includes("corridor") ? Number(room.count || 1) : 0),
+        0,
+      ) ?? 0,
+    [studio.program],
+  );
+
+  const ftPerCell = studio.activePlan
+    ? (studio.activePlan.meters_per_cell * 3.28084).toFixed(2)
+    : null;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="border-b px-4 py-3">
-        <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-muted-foreground">Input / Program</p>
-        <h1 className="mt-1 text-sm font-semibold leading-tight">Program to pixel plan</h1>
+      <div className="flex flex-col gap-1.5 border-b border-border px-3 py-2.5">
+        <span className="label-xs">Program</span>
+        <Select value={studio.sampleKey} onValueChange={(value) => value && studio.loadSample(value)}>
+          <SelectTrigger className="h-8 w-full text-[13px]">
+            <SelectValue placeholder="Pick a sample" />
+          </SelectTrigger>
+          <SelectContent>
+            {Object.keys(studio.samples).map((key) => (
+              <SelectItem key={key} value={key} className="text-[13px]">
+                {key}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
 
       <ScrollArea className="min-h-0 flex-1">
-        <div className="flex flex-col gap-5 p-4">
+        <div className="flex flex-col gap-4 p-3">
+          {/* summary chips + JSON disclosure */}
           <section className="flex flex-col gap-2">
-            <SectionLabel index="01">Sample program</SectionLabel>
-            <Select value={studio.sampleKey} onValueChange={(value) => value && studio.loadSample(value)}>
-              <SelectTrigger className="h-8 text-xs">
-                <SelectValue placeholder="Pick a sample" />
-              </SelectTrigger>
-              <SelectContent>
-                {Object.keys(studio.samples).map((key) => (
-                  <SelectItem key={key} value={key} className="text-xs">
-                    {key}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            {studio.program ? (
+              <div className="flex flex-wrap gap-1.5">
+                <Chip>
+                  <Num>{studio.requestedSpaces}</Num> spaces
+                </Chip>
+                {corridors > 0 ? (
+                  <Chip>
+                    <Num>{corridors}</Num> corridor
+                  </Chip>
+                ) : null}
+                {studio.program.building_type ? (
+                  <Chip tone="accent">
+                    <span className="capitalize">{studio.program.building_type.replaceAll("_", " ")}</span>
+                  </Chip>
+                ) : null}
+              </div>
+            ) : null}
+
+            <Disclosure
+              open={jsonOpen || !!studio.programError}
+              onOpenChange={setJsonOpen}
+              label={<span className="label-xs">JSON</span>}
+              meta={
+                studio.programError ? (
+                  <span className="flex items-center gap-1 text-[10px] text-destructive">
+                    <CircleAlert className="size-3" /> invalid
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-1 text-[10px] text-success">
+                    <CircleCheck className="size-3" /> valid
+                  </span>
+                )
+              }
+            >
+              <div className="flex flex-col gap-1.5 pt-2">
+                <div className="flex justify-end">
+                  <button
+                    type="button"
+                    className="text-[11px] text-muted-foreground hover:text-foreground"
+                    onClick={() => {
+                      if (studio.program) studio.setProgramText(JSON.stringify(studio.program, null, 2));
+                    }}
+                  >
+                    Format
+                  </button>
+                </div>
+                <Textarea
+                  value={studio.programText}
+                  onChange={(event) => studio.setProgramText(event.target.value)}
+                  spellCheck={false}
+                  className="h-44 resize-y font-mono text-[11px] leading-relaxed"
+                />
+                {studio.programError ? (
+                  <p className="text-[11px] text-destructive">
+                    <span className="font-mono">{studio.programError}</span>
+                  </p>
+                ) : null}
+              </div>
+            </Disclosure>
           </section>
 
+          {/* mode */}
           <section className="flex flex-col gap-2">
-            <div className="flex items-center justify-between">
-              <SectionLabel index="02">Program JSON</SectionLabel>
-              <button
-                type="button"
-                className="text-[10px] font-bold tracking-wide text-muted-foreground hover:text-foreground"
-                onClick={() => {
-                  if (studio.program) studio.setProgramText(JSON.stringify(studio.program, null, 2));
-                }}
-              >
-                FORMAT
-              </button>
-            </div>
-            <Textarea
-              value={studio.programText}
-              onChange={(event) => studio.setProgramText(event.target.value)}
-              spellCheck={false}
-              className="h-44 resize-y font-mono text-[11px] leading-relaxed"
-            />
-            <p className={`text-[11px] ${studio.programError ? "text-destructive" : "text-emerald-700"}`}>
-              {studio.programError
-                ? `Invalid JSON · ${studio.programError}`
-                : `Valid JSON · ${studio.requestedSpaces} requested spaces`}
-            </p>
-          </section>
-
-          <section className="flex flex-col gap-2">
-            <SectionLabel index="03">Generation mode</SectionLabel>
-            <Tabs value={studio.mode} onValueChange={(value) => studio.setMode(value as "program" | "image" | "trace")}>
+            <span className="label-xs">Mode</span>
+            <Tabs value={studio.mode} onValueChange={(value) => studio.setMode(value as StudioMode)}>
               <TabsList className="grid h-8 w-full grid-cols-3">
-                <TabsTrigger value="program" className="text-[10px] font-bold tracking-wide">
-                  PROGRAM
+                <TabsTrigger value="program" className="gap-1.5 text-[11px] font-medium">
+                  <Braces className="size-3.5" /> Program
                 </TabsTrigger>
-                <TabsTrigger value="image" className="text-[10px] font-bold tracking-wide">
-                  FROM IMAGE
+                <TabsTrigger value="image" className="gap-1.5 text-[11px] font-medium">
+                  <ImageIcon className="size-3.5" /> Image
                 </TabsTrigger>
-                <TabsTrigger value="trace" className="text-[10px] font-bold tracking-wide">
-                  FROM TRACE
+                <TabsTrigger value="trace" className="gap-1.5 text-[11px] font-medium">
+                  <Route className="size-3.5" /> Trace
                 </TabsTrigger>
               </TabsList>
             </Tabs>
 
             {imageMode ? (
-              <div className="flex flex-col gap-2 rounded-lg border bg-muted/40 p-2.5">
+              <div className="flex flex-col gap-2 rounded-lg border border-border bg-secondary/30 p-2">
                 <Button
                   size="sm"
                   variant="outline"
-                  className="h-8 gap-1.5 text-[11px] font-bold tracking-wide"
+                  className="h-8 w-full gap-1.5 text-[12px]"
                   disabled={studio.candidatesBusy || !!studio.busyAction || !studio.program}
                   onClick={() => void studio.drawCandidates()}
                 >
                   <ImagePlus className="size-3.5" />
-                  {studio.candidatesBusy ? "DRAWING…" : "DRAW 3 CANDIDATE PLANS"}
+                  {studio.candidatesBusy ? "Drawing…" : "Draw 3 candidates"}
                 </Button>
-                <p className="text-[11px] leading-snug text-muted-foreground">
-                  {studio.candidates.length
-                    ? studio.selectedCandidate >= 0
-                      ? `Candidate ${studio.selectedCandidate + 1} selected · Generate transcribes it.`
-                      : "Click a drawing to select it; click again to zoom."
-                    : "Gemini draws three schematic plans; pick the one to transcribe."}
-                </p>
+                {studio.candidates.length || studio.candidatesBusy ? (
+                  <div className="flex flex-wrap gap-1.5">
+                    {studio.candidatesBusy ? (
+                      <Chip>drawing…</Chip>
+                    ) : (
+                      <Chip>
+                        <Num>{studio.candidates.length}</Num> drawings
+                      </Chip>
+                    )}
+                    {studio.selectedCandidate >= 0 ? (
+                      <Chip tone="accent">
+                        #<Num>{studio.selectedCandidate + 1}</Num> selected
+                      </Chip>
+                    ) : null}
+                  </div>
+                ) : null}
                 <div className="grid grid-cols-3 gap-1.5">
                   {studio.candidatesBusy
                     ? [0, 1, 2].map((index) => <Skeleton key={index} className="aspect-video w-full rounded-md" />)
@@ -126,11 +238,12 @@ export function ProgramPanel({ studio }: { studio: Studio }) {
                         <button
                           key={index}
                           type="button"
-                          className={`relative overflow-hidden rounded-md border-2 bg-white transition-shadow ${
+                          className={cn(
+                            "relative overflow-hidden rounded-md border-2 bg-white transition-shadow",
                             index === studio.selectedCandidate
                               ? "border-primary shadow-[0_0_0_1px_var(--primary)]"
-                              : "border-border hover:border-foreground/40"
-                          }`}
+                              : "border-border hover:border-foreground/40",
+                          )}
                           onClick={() =>
                             index === studio.selectedCandidate
                               ? studio.setLightbox(index)
@@ -154,12 +267,12 @@ export function ProgramPanel({ studio }: { studio: Studio }) {
               </div>
             ) : null}
 
-            {studio.mode === "trace" ? (
-              <div className="flex flex-col gap-2 rounded-lg border bg-muted/40 p-2.5">
+            {traceMode ? (
+              <div className="flex flex-col gap-2 rounded-lg border border-border bg-secondary/30 p-2">
                 <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-bold tracking-wide text-muted-foreground">TRACED PLAN SEED</span>
-                  <label className="cursor-pointer text-[10px] font-bold tracking-wide text-primary hover:underline">
-                    UPLOAD JSON
+                  <span className="label-xs">Seed</span>
+                  <label className="cursor-pointer text-[11px] font-medium text-primary hover:underline">
+                    Upload JSON
                     <input
                       type="file"
                       accept=".json,application/json"
@@ -177,88 +290,113 @@ export function ProgramPanel({ studio }: { studio: Studio }) {
                   value={studio.seedText}
                   onChange={(event) => studio.setSeedText(event.target.value)}
                   spellCheck={false}
-                  placeholder='Paste the traced seed JSON: {"width":..,"height":..,"meters_per_cell":..,"cells":[..],"rooms":[..],"doors":[..]}'
-                  className="h-32 resize-y font-mono text-[10px] leading-relaxed"
+                  placeholder='Paste traced seed JSON: {"width":..,"height":..,"cells":[..],"rooms":[..],"doors":[..]}'
+                  className="h-28 resize-y font-mono text-[10px] leading-relaxed"
                 />
-                <p className={`text-[11px] leading-snug ${studio.seedError ? "text-destructive" : "text-muted-foreground"}`}>
-                  {studio.seedError
-                    ? `Invalid seed · ${studio.seedError}`
-                    : studio.seed
-                      ? `Seed ready · ${studio.seed.width}×${studio.seed.height} cells · ${studio.seed.rooms.length} rooms — the plan is executed as-is and repaired only if validation fails.`
-                      : "Export a traced plan from hfagent (or any tool) as grid JSON and refine it here."}
-                </p>
+                {studio.seedError ? (
+                  <p className="flex items-center gap-1 text-[11px] text-destructive">
+                    <CircleAlert className="size-3 shrink-0" />
+                    <span className="font-mono">{studio.seedError}</span>
+                  </p>
+                ) : studio.seed ? (
+                  <div className="flex flex-wrap gap-1.5">
+                    <Chip>
+                      <Num>{studio.seed.width}×{studio.seed.height}</Num> cells
+                    </Chip>
+                    <Chip>
+                      <Num>{studio.seed.rooms.length}</Num> rooms
+                    </Chip>
+                  </div>
+                ) : null}
               </div>
             ) : null}
           </section>
 
+          {/* brief */}
           <section className="flex flex-col gap-2">
-            <SectionLabel index="04">Design brief</SectionLabel>
+            <span className="label-xs">Brief</span>
             <Textarea
               value={studio.prompt}
               onChange={(event) => studio.setPrompt(event.target.value)}
-              placeholder="Example: entrance on the west, waiting near entry, patient rooms along the perimeter."
-              className="h-20 resize-y text-[11px] leading-relaxed"
+              placeholder="Entrance on the west, waiting near entry, patient rooms along the perimeter."
+              className="h-20 resize-y text-[12px] leading-relaxed"
             />
           </section>
 
-          <section className="flex flex-col gap-2">
-            <SectionLabel index="05">Canvas</SectionLabel>
-            <div className="grid grid-cols-2 gap-2">
-              <div className="flex items-center gap-1.5">
-                <Label className="text-[10px] font-bold text-muted-foreground">W</Label>
-                <Input
-                  type="number"
-                  min={32}
-                  max={160}
-                  value={studio.gridWidth}
-                  onChange={(event) => studio.setGridWidth(Number(event.target.value) || 96)}
-                  className="h-8 font-mono text-xs"
-                />
+          {/* canvas */}
+          <section>
+            <Disclosure
+              open={canvasOpen}
+              onOpenChange={setCanvasOpen}
+              label={<span className="label-xs">Canvas</span>}
+              meta={
+                <span className="font-mono text-[11px] tabular-nums text-muted-foreground">
+                  {studio.gridWidth} × {studio.gridHeight}
+                  {ftPerCell ? ` · ${ftPerCell} ft/cell` : ""}
+                </span>
+              }
+            >
+              <div className="flex flex-col gap-2 pt-2">
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="flex items-center gap-1.5">
+                    <Label className="text-[11px] text-muted-foreground">W</Label>
+                    <Input
+                      type="number"
+                      min={32}
+                      max={160}
+                      value={studio.gridWidth}
+                      onChange={(event) => studio.setGridWidth(Number(event.target.value) || 96)}
+                      className="h-8 font-mono text-xs"
+                    />
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <Label className="text-[11px] text-muted-foreground">H</Label>
+                    <Input
+                      type="number"
+                      min={24}
+                      max={120}
+                      value={studio.gridHeight}
+                      onChange={(event) => studio.setGridHeight(Number(event.target.value) || 64)}
+                      className="h-8 font-mono text-xs"
+                    />
+                  </div>
+                </div>
+                <p className="text-[11px] text-muted-foreground">
+                  Cells stay square; the grid ratio follows a selected drawing.
+                </p>
               </div>
-              <div className="flex items-center gap-1.5">
-                <Label className="text-[10px] font-bold text-muted-foreground">H</Label>
-                <Input
-                  type="number"
-                  min={24}
-                  max={120}
-                  value={studio.gridHeight}
-                  onChange={(event) => studio.setGridHeight(Number(event.target.value) || 64)}
-                  className="h-8 font-mono text-xs"
-                />
-              </div>
-            </div>
-            <p className="text-[11px] text-muted-foreground">Cells stay square; the grid ratio follows a selected drawing.</p>
+            </Disclosure>
           </section>
         </div>
       </ScrollArea>
 
-      <div className="border-t p-3">
+      <div className="border-t border-border p-3">
         <Button
-          className="h-10 w-full gap-2 text-xs font-bold tracking-wide"
+          className="h-9 w-full gap-2 text-[13px] font-medium"
           disabled={
             !!studio.busyAction ||
             !studio.program ||
             (imageMode && studio.selectedCandidate < 0) ||
-            (studio.mode === "trace" && !studio.seed)
+            (traceMode && !studio.seed)
           }
           onClick={() => void studio.runAgentAction("generate")}
         >
           <Sparkles className="size-3.5" />
           {studio.busyAction === "generate"
-            ? studio.mode === "trace"
-              ? "REFINING…"
+            ? traceMode
+              ? "Refining…"
               : studio.transcribing
-                ? "TRANSCRIBING…"
-                : "GENERATING…"
-            : studio.mode === "trace"
-              ? "REFINE TRACED PLAN"
+                ? "Transcribing…"
+                : "Generating…"
+            : traceMode
+              ? "Refine traced plan"
               : imageMode
-                ? "TRANSCRIBE DRAWING"
+                ? "Transcribe drawing"
                 : studio.result
-                  ? "RE-GENERATE PLAN"
-                  : "GENERATE PLAN"}
+                  ? "Re-generate plan"
+                  : "Generate plan"}
         </Button>
-        <p className={`mt-2 truncate text-[11px] ${studio.status.error ? "text-destructive" : "text-muted-foreground"}`}>
+        <p className={cn("mt-2 truncate font-mono text-[11px] tabular-nums", studio.status.error ? "text-destructive" : "text-muted-foreground")}>
           {studio.status.text}
         </p>
       </div>
@@ -266,15 +404,15 @@ export function ProgramPanel({ studio }: { studio: Studio }) {
       {/* candidate lightbox */}
       <Dialog open={studio.lightbox !== null} onOpenChange={(open) => !open && studio.setLightbox(null)}>
         <DialogContent className="max-w-4xl p-3">
-          <DialogTitle className="text-xs font-bold tracking-wide">
-            CANDIDATE {studio.lightbox === null ? "" : studio.lightbox + 1} / DRAWING PREVIEW
+          <DialogTitle className="text-[13px] font-medium">
+            Candidate {studio.lightbox === null ? "" : studio.lightbox + 1}
           </DialogTitle>
           {studio.lightbox !== null && studio.candidates[studio.lightbox] ? (
             <>
               <img
                 src={candidateDataUrl(studio.candidates[studio.lightbox])}
                 alt={`Candidate plan ${studio.lightbox + 1} full preview`}
-                className="max-h-[72vh] w-full rounded-md border bg-white object-contain"
+                className="max-h-[72vh] w-full rounded-md border border-border bg-white object-contain"
               />
               <div className="flex justify-between gap-2">
                 <div className="flex gap-1">
@@ -283,7 +421,7 @@ export function ProgramPanel({ studio }: { studio: Studio }) {
                       key={index}
                       size="sm"
                       variant={index === studio.lightbox ? "default" : "outline"}
-                      className="h-7 w-8 text-[11px]"
+                      className="h-7 w-8 font-mono text-[11px]"
                       onClick={() => studio.setLightbox(index)}
                     >
                       {index + 1}
@@ -292,13 +430,13 @@ export function ProgramPanel({ studio }: { studio: Studio }) {
                 </div>
                 <Button
                   size="sm"
-                  className="h-7 gap-1.5 text-[11px] font-bold"
+                  className="h-7 gap-1.5 text-[11px] font-medium"
                   onClick={() => {
                     if (studio.lightbox !== null) studio.selectCandidate(studio.lightbox);
                     studio.setLightbox(null);
                   }}
                 >
-                  <Check className="size-3" /> USE THIS DRAWING
+                  <Check className="size-3" /> Use this drawing
                 </Button>
               </div>
             </>
