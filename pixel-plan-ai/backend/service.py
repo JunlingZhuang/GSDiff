@@ -40,6 +40,12 @@ def room_type_from_issue(issue: str) -> str:
     return head if separator and tail.isdigit() else room_id
 
 
+def issue_room_id(issue: str) -> str:
+    token = issue.split(" ", 1)[0]
+    head, separator, tail = token.rpartition("_")
+    return token if separator and tail.isdigit() else "plan"
+
+
 def compact_validation_feedback(validation: dict[str, Any]) -> str:
     failed_checks = [check for check in validation.get("checks", []) if not check.get("pass")]
     sections = [f"Validation score: {validation.get('score', 0)}."]
@@ -72,14 +78,14 @@ def compact_validation_feedback(validation: dict[str, Any]) -> str:
         sections.append("Area failures by type:\n- " + "\n- ".join(area_lines))
 
     issues = [str(issue) for issue in validation.get("issues", [])]
-    representative_groups: list[tuple[str, tuple[str, ...]]] = [
-        ("Door/access examples", (" has no door.", " requires direct corridor access", " requires access from")),
-        ("Proportion examples", (" proportion fails ",)),
-        ("Zoning examples", (" is embedded in ",)),
-        ("Other geometry examples", ("Tower ", "Too few patient rooms", "circulation does not")),
+    representative_groups: list[tuple[str, tuple[str, ...], str]] = [
+        ("Door/access examples", (" has no door.", " requires direct corridor access", " requires access from"), "doors"),
+        ("Proportion examples", (" proportion fails ",), "proportion"),
+        ("Zoning examples", (" is embedded in ",), "zoning"),
+        ("Other geometry examples", ("Tower ", "Too few patient rooms", "circulation does not"), "geometry"),
     ]
     consumed: set[str] = set()
-    for heading, markers in representative_groups:
+    for heading, markers, slug in representative_groups:
         by_type: dict[str, str] = {}
         for issue in issues:
             if issue in consumed or not any(marker in issue for marker in markers):
@@ -88,7 +94,13 @@ def compact_validation_feedback(validation: dict[str, Any]) -> str:
             by_type.setdefault(room_type, issue)
             consumed.add(issue)
         if by_type:
-            sections.append(f"{heading}:\n- " + "\n- ".join(list(by_type.values())[:8]))
+            # Stable rule/room tags let the model pattern-match the same failure
+            # across repair attempts (docs/claude-code-lessons.md #2).
+            tagged = [
+                f'<validator_error rule="{slug}" room="{issue_room_id(issue)}">{issue}</validator_error>'
+                for issue in list(by_type.values())[:8]
+            ]
+            sections.append(f"{heading}:\n- " + "\n- ".join(tagged))
 
     return "\n".join(sections)
 

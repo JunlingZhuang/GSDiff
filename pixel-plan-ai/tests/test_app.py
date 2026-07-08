@@ -581,6 +581,23 @@ class AgentGenerationTests(unittest.TestCase):
         self.assertIn("actual 35 sf / 16-16 cells, target 172 sf / about 78.5 cells", feedback)
         self.assertNotIn("patient_room_5 area", feedback)
 
+    def test_validator_issue_feedback_carries_stable_rule_and_room_tags(self) -> None:
+        validation = {
+            "score": 45,
+            "checks": [],
+            "areas": [],
+            "issues": [
+                "waiting_0 has no door.",
+                "exam_room_2 proportion fails 5.0 > 4.0.",
+                "No exterior entrance door was generated.",
+            ],
+        }
+        feedback = service.compact_validation_feedback(validation)
+        self.assertIn('<validator_error rule="doors" room="waiting_0">', feedback)
+        self.assertIn('<validator_error rule="proportion" room="exam_room_2">', feedback)
+        # The plan-level entrance issue matches no group marker, so it is not rendered as a tag.
+        self.assertNotIn("No exterior entrance door was generated.", feedback)
+
     def test_code_agent_reports_failure_after_five_unexecutable_attempts_without_fallback(self) -> None:
         model_outputs = [
             {"code": f"attempt-{index}", "strategy": "repair", "assumptions": [], "model": "test-model"}
