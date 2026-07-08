@@ -5,8 +5,10 @@ Status: Batch A implemented 2026-07-08 (#2 b2d25db, #1 18830d8, #3 d06ca76,
 score 98 in 2 attempts, mode 3 seed 65 -> 99 in 1 repair). Batch B
 implemented 2026-07-08 (#12 d2283a8, #4 2a6221e, #5 0166089; live
 regression: mode 1 score 98 in 2 attempts with stop_reason/usage_total
-populated, mode 3 seed 65 -> 93 in 1 repair). Batch C and experiment #8
-remain proposals.
+populated, mode 3 seed 65 -> 93 in 1 repair). Batch C implemented
+2026-07-08 (#6 c1ba5db, #10 3b37fb7, #11 9825502; live regression: mode 1
+score 97 in 1 attempt with the full event timeline served by the progress
+API, mode 3 seed 65 -> 98 in 1 repair). Experiment #8 remains a proposal.
 
 Source of the lessons: a firsthand read of the leaked Claude Code TypeScript
 source (`yasasbanukaofficial/claude-code`, ~1,900 files, recovered from npm
