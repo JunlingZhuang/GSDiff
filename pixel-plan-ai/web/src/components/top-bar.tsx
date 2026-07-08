@@ -1,13 +1,28 @@
 "use client";
 
 import * as React from "react";
-import { Download, FileJson } from "lucide-react";
+import { ClipboardCopy, Download, FileJson, ImageDown } from "lucide-react";
 
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { buttonVariants } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import type { Studio } from "@/hooks/use-studio";
+import { cn } from "@/lib/utils";
+
+function scoreTone(score: number): string {
+  if (score >= 90) return "border-success/40 bg-success/10 text-success";
+  if (score >= 72) return "border-warning/40 bg-warning/10 text-warning";
+  return "border-destructive/40 bg-destructive/10 text-destructive";
+}
 
 export function TopBar({ studio }: { studio: Studio }) {
+  const busy = !!studio.busyAction;
+
   const downloadJson = React.useCallback(() => {
     if (!studio.result) return;
     const blob = new Blob([JSON.stringify(studio.result, null, 2)], { type: "application/json" });
@@ -19,66 +34,88 @@ export function TopBar({ studio }: { studio: Studio }) {
     URL.revokeObjectURL(url);
   }, [studio.result]);
 
+  const exportPng = React.useCallback(() => {
+    (window as unknown as { __pixelPlanExportPng?: () => void }).__pixelPlanExportPng?.();
+  }, []);
+
+  const title =
+    studio.result?.program.building_type ?? studio.program?.building_type ?? "Untitled program";
+  const score = studio.result?.validation.score ?? null;
+
   return (
-    <header className="flex h-11 shrink-0 items-center gap-3 border-b bg-background px-3">
+    <header className="flex h-[46px] shrink-0 items-center gap-3 border-b border-border bg-background px-3">
       <div className="flex items-center gap-2">
         <span className="grid grid-cols-2 gap-px" aria-hidden>
-          {["#7fb5a8", "#e3b04b", "#8d9fb8", "#1f242a"].map((color) => (
+          {["#5ca9ff", "#57c08c", "#e0b356", "#9aa1ab"].map((color) => (
             <i key={color} className="size-1.5 rounded-[1px]" style={{ background: color }} />
           ))}
         </span>
-        <span className="text-xs font-bold tracking-wide">
-          PIXEL<span className="text-muted-foreground">/</span>PLAN
-        </span>
-        <Badge variant="secondary" className="text-[9px] font-bold tracking-wider">
-          STUDIO
-        </Badge>
-      </div>
-
-      <div className="min-w-0 flex-1 text-center">
-        <span className="truncate text-xs font-medium text-muted-foreground">
-          {studio.result?.program.building_type ?? studio.program?.building_type ?? "Untitled program"}
-          {studio.activePlan
-            ? ` · ${studio.activePlan.width}×${studio.activePlan.height} cells · ${(studio.activePlan.meters_per_cell * 3.28084).toFixed(2)} ft/cell`
-            : ""}
+        <span className="text-[13px] font-semibold text-foreground">Pixel Plan</span>
+        <span className="rounded-md border border-border px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+          Studio
         </span>
       </div>
 
-      <div className="flex items-center gap-1.5">
-        {studio.activeValidation ? (
-          <Badge
-            variant={studio.result?.accepted === false ? "destructive" : "default"}
-            className={`font-mono text-[11px] tabular-nums ${studio.result?.accepted === false ? "" : "bg-emerald-600 hover:bg-emerald-600"}`}
-          >
-            {studio.activeValidation.score}
-          </Badge>
-        ) : null}
-        <Button
-          size="sm"
-          variant="ghost"
-          className="h-7 gap-1 px-2 text-[10px] font-bold"
-          disabled={!studio.result}
-          onClick={() => (window as unknown as { __pixelPlanExportPng?: () => void }).__pixelPlanExportPng?.()}
-        >
-          <Download className="size-3" /> PNG
-        </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          className="h-7 gap-1 px-2 text-[10px] font-bold"
-          disabled={!studio.result}
-          onClick={downloadJson}
-        >
-          <FileJson className="size-3" /> JSON
-        </Button>
+      <div className="flex min-w-0 flex-1 items-center justify-center gap-2">
         <span
-          className={`ml-1 flex items-center gap-1.5 text-[10px] font-medium ${
-            studio.health?.gemini_configured ? "text-emerald-700" : "text-destructive"
-          }`}
+          className={cn(
+            "size-1.5 shrink-0 rounded-full",
+            busy ? "animate-pulse bg-primary" : "bg-muted-foreground/50",
+          )}
+          aria-hidden
+        />
+        <span className="truncate text-[13px] text-muted-foreground">{title}</span>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <span
+          className={cn(
+            "rounded-md border px-2 py-0.5 font-mono text-[11px] whitespace-nowrap",
+            studio.health?.gemini_configured
+              ? "border-border text-muted-foreground"
+              : "border-destructive/40 text-destructive",
+          )}
         >
-          <i className="size-1.5 rounded-full bg-current" />
-          {studio.health ? (studio.health.gemini_configured ? studio.health.model : "No API key") : "Checking…"}
+          {studio.health ? (studio.health.gemini_configured ? studio.health.model : "no api key") : "checking…"}
         </span>
+
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            className={cn(buttonVariants({ variant: "outline", size: "sm" }), "h-7 gap-1.5 px-2.5 text-[12px]")}
+          >
+            <Download className="size-3.5" />
+            Export
+          </DropdownMenuTrigger>
+          <DropdownMenuContent>
+            <DropdownMenuItem disabled={!studio.result} onClick={exportPng}>
+              <ImageDown />
+              PNG image
+            </DropdownMenuItem>
+            <DropdownMenuItem disabled={!studio.result} onClick={downloadJson}>
+              <FileJson />
+              JSON result
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              disabled={!studio.code.trim()}
+              onClick={() => void navigator.clipboard.writeText(studio.code)}
+            >
+              <ClipboardCopy />
+              Copy code
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+
+        {studio.result && score !== null ? (
+          <span
+            className={cn(
+              "rounded-md border px-2 py-0.5 font-mono text-[11px] tabular-nums",
+              scoreTone(score),
+            )}
+          >
+            {score}
+          </span>
+        ) : null}
       </div>
     </header>
   );
