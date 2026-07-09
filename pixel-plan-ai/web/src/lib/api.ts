@@ -12,7 +12,18 @@ import type {
 } from "./types";
 
 async function readJson<T>(response: Response): Promise<T> {
-  const payload = (await response.json()) as T & { error?: string };
+  // Read the body once as text so a non-JSON transport error (e.g. a proxy
+  // returning plain-text "Internal Server Error" when a long generation
+  // exceeds the proxy timeout) can be reported verbatim instead of leaking a
+  // JSON parser's "Unexpected token 'I'..." message.
+  const body = await response.text();
+  let payload: (T & { error?: string }) | undefined;
+  try {
+    payload = JSON.parse(body) as T & { error?: string };
+  } catch {
+    const reason = body.trim().slice(0, 120) || response.statusText || "no response body";
+    throw new Error(`Backend request failed (${response.status}): ${reason}`);
+  }
   if (!response.ok || payload.error) {
     throw new Error(payload.error ?? `Request failed with ${response.status}.`);
   }
