@@ -10,15 +10,23 @@ export interface Box3D {
   color: string;
 }
 
-// A door leaf is a box hinged at one jamb and swung open into a room, so it
-// carries a Y rotation on top of the box fields.
-export interface DoorLeaf3D extends Box3D {
-  rotationY: number;
+// A door leaf rendered as a CHILD of a hinge group: `offset` is the leaf box
+// centre in the group's LOCAL frame (local +X = unit vector from jamb A to
+// jamb B before the swing), so rotating the group about world Y swings the
+// whole panel around the hinge jamb like a real door.
+export interface DoorLeaf3D {
+  offset: [number, number, number];
+  size: [number, number, number];
+  color: string;
 }
 
 export interface Door3D {
+  // World position of the hinge group — jamb A, on the floor plane (y = 0).
+  hinge: [number, number, number];
+  // Total group Y rotation: wall-alignment base + the signed 80° open swing.
+  rotationY: number;
   leaf: DoorLeaf3D;
-  // The two slim jamb posts framing the opening ends.
+  // The two slim jamb posts capping the opening ends (world-positioned).
   posts: Box3D[];
 }
 
@@ -38,11 +46,12 @@ const FLOOR_THICKNESS = 0.1;
 const BASE_THICKNESS = 0.18;
 const WALL_COLOR = "#f1efe9";
 
-// Door components (Finch-scale, no textures). The leaf is a thin panel hinged at
-// a jamb and swung 30° into the swing room; jamb posts frame the opening ends.
-const DOOR_LEAF_HEIGHT = WALL_HEIGHT * 0.8;
-const DOOR_LEAF_THICKNESS = WALL_THICKNESS / 3;
-const DOOR_OPEN_RAD = (30 * Math.PI) / 180;
+// Door components (Finch-scale, no textures). The leaf is a floor-standing thin
+// panel hinged at jamb A and swung 80° into the swing room — wide open, so it
+// reads unmistakably as a door from the orbit camera. Jamb posts cap the ends.
+const DOOR_LEAF_HEIGHT = WALL_HEIGHT * 0.85;
+const DOOR_LEAF_THICKNESS = WALL_THICKNESS * 0.35;
+const DOOR_OPEN_RAD = (80 * Math.PI) / 180;
 const DOOR_LEAF_COLOR = "#F7F5F1"; // white-ish interior leaf
 const DOOR_ENTRANCE_COLOR = "#8FBAF0"; // accent-tinted entry leaf (to_room null)
 const DOOR_FRAME_COLOR = "#d8d3c9"; // jamb posts, slightly darker than walls
@@ -119,46 +128,78 @@ export function buildPlanModel(plan: Plan): PlanModel {
     }
   }
 
-  // Door components sit in the wall gaps carved above: a swung leaf plus two jamb
-  // posts. All in world meters, centered on origin like the rest of the model.
+  // Door components sit in the wall gaps carved above: a hinged leaf swung 80°
+  // open plus two jamb posts. Same endpoint convention as the gap carving: the
+  // opening runs A=(x, y) → B=(x+width_cells, y) for a horizontal door (wall
+  // along +X at z=y) and A=(x, y) → B=(x, y+width_cells) for a vertical one
+  // (wall along +Z at x=x). All world coords in meters, centered on origin.
   const doors: Door3D[] = [];
   for (const door of plan.doors) {
     const horizontal = door.orientation === "horizontal";
     const cells = Math.max(1, door.width_cells);
     const len = cells * m;
-    // Jamb A is the hinge; jamb B is the far opening end.
-    const aX = door.x;
-    const aY = door.y;
-    const bX = horizontal ? door.x + cells : door.x;
-    const bY = horizontal ? door.y : door.y + cells;
     const worldX = (cx: number): number => cx * m - offsetX;
     const worldZ = (cy: number): number => cy * m - offsetZ;
-    const hingeX = worldX(aX);
-    const hingeZ = worldZ(aY);
+    // Jamb A carries the hinge; jamb B is the far opening end.
+    const bX = horizontal ? door.x + cells : door.x;
+    const bY = horizontal ? door.y : door.y + cells;
+    const hingeX = worldX(door.x);
+    const hingeZ = worldZ(door.y);
 
-    // Closed leaf runs hinge → far jamb; the swing normal points into the room.
-    // Rotating the (orthonormal) closed direction 30° toward the normal opens it.
-    const dir: [number, number] = horizontal ? [1, 0] : [0, 1];
-    const normal: [number, number] = horizontal
+    // Wall direction (unit, A→B) and the swing normal pointing into the room.
+    const [wx, wz]: [number, number] = horizontal ? [1, 0] : [0, 1];
+    const [nx, nz]: [number, number] = horizontal
       ? door.swing_side === "north"
         ? [0, -1]
         : [0, 1]
       : door.swing_side === "west"
         ? [-1, 0]
         : [1, 0];
-    const c = Math.cos(DOOR_OPEN_RAD);
-    const s = Math.sin(DOOR_OPEN_RAD);
-    const openX = dir[0] * c + normal[0] * s;
-    const openZ = dir[1] * c + normal[1] * s;
+
+    // Hinge group rotation. Base angle aligns the group's local +X with the
+    // wall direction (three.js Y-rotation by θ maps local +X to world
+    // (cosθ, 0, −sinθ), so wallDir +Z needs θ = −π/2). The swing then adds a
+    // SIGNED 80° about world Y: rotating wallDir by +δ lands at
+    // (wx·cosδ + wz·sinδ, −wx·sinδ + wz·cosδ), whose dot with the swing normal
+    // has the sign of cross(wallDir, swingNormal).y = wz·nx − wx·nz — so that
+    // cross sign IS the swing sign (verified per side by the dev check below).
+    const base = horizontal ? 0 : -Math.PI / 2;
+    const sign = Math.sign(wz * nx - wx * nz) || 1;
+    const rotationY = base + sign * DOOR_OPEN_RAD;
+
+    // Clear opening between the two jamb posts (each T wide, centred on A / B).
+    const leafWidth = Math.max(len - WALL_THICKNESS, WALL_THICKNESS);
+
+    // Dev-time sanity lock: the leaf's far corner (local x = T/2 + leafWidth on
+    // the floor plane) must land inside the swing room. Local (L, ·, 0) maps to
+    // a world offset of (L·cos rotationY, ·, −L·sin rotationY) from the hinge.
+    if (process.env.NODE_ENV !== "production") {
+      const farL = WALL_THICKNESS / 2 + leafWidth;
+      const farX = hingeX + farL * Math.cos(rotationY);
+      const farZ = hingeZ + -farL * Math.sin(rotationY);
+      const swingOk = horizontal
+        ? door.swing_side === "south"
+          ? farZ > hingeZ // south room lies at z > wall z
+          : farZ < hingeZ // north room lies at z < wall z
+        : door.swing_side === "east"
+          ? farX > hingeX // east room lies at x > wall x
+          : farX < hingeX; // west room lies at x < wall x
+      if (!swingOk) {
+        console.warn(
+          `plan3d: door ${door.id} leaf swings away from its ${door.swing_side} room`,
+        );
+      }
+    }
 
     const entrance = door.to_room === null;
     doors.push({
+      hinge: [hingeX, 0, hingeZ],
+      rotationY,
       leaf: {
-        // Hinge + half-length along the open direction places the leaf centre; a
-        // Y rotation aligns the box's long (local +X) axis with that direction.
-        center: [hingeX + openX * (len / 2), DOOR_LEAF_HEIGHT / 2, hingeZ + openZ * (len / 2)],
-        size: [len, DOOR_LEAF_HEIGHT, DOOR_LEAF_THICKNESS],
-        rotationY: Math.atan2(-openZ, openX),
+        // In the group's local frame: past the hinge post (T/2), reaching the
+        // near face of the far post, standing on the floor (bottom at y = 0).
+        offset: [leafWidth / 2 + WALL_THICKNESS / 2, DOOR_LEAF_HEIGHT / 2, 0],
+        size: [leafWidth, DOOR_LEAF_HEIGHT, DOOR_LEAF_THICKNESS],
         color: entrance ? DOOR_ENTRANCE_COLOR : DOOR_LEAF_COLOR,
       },
       posts: [

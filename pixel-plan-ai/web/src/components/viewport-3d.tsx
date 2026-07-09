@@ -49,13 +49,17 @@ export function Viewport3D({ plan }: Viewport3DProps) {
 
       {model.doors.map((door, index) => (
         <React.Fragment key={`door-${index}`}>
-          {/* Leaf: a thin panel swung 30° open, with a subtle edge outline. */}
-          <mesh position={door.leaf.center} rotation={[0, door.leaf.rotationY, 0]}>
-            <boxGeometry args={door.leaf.size} />
-            <meshStandardMaterial color={door.leaf.color} roughness={0.6} />
-            <Edges color="#b9b4a8" />
-          </mesh>
-          {/* Jamb posts framing the opening ends. */}
+          {/* Hinge group at jamb A: the leaf is a child offset along the local
+              wall axis, so the group's Y rotation swings it 80° into the room
+              around the hinge — like a real door standing open. */}
+          <group position={door.hinge} rotation={[0, door.rotationY, 0]}>
+            <mesh position={door.leaf.offset}>
+              <boxGeometry args={door.leaf.size} />
+              <meshStandardMaterial color={door.leaf.color} roughness={0.6} />
+              <Edges color="#b9b4a8" />
+            </mesh>
+          </group>
+          {/* Jamb posts capping the opening ends. */}
           {door.posts.map((post, postIndex) => (
             <mesh key={postIndex} position={post.center}>
               <boxGeometry args={post.size} />
