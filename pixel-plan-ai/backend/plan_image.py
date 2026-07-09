@@ -40,6 +40,10 @@ DOORS (required — they are read back from this drawing)
 LABELS
 - One label per room, centred, small plain black text, the EXACT instance name from the program below.
 - No other text anywhere.
+- Draw ONLY the room instances listed below — nothing extra. Every enclosed space in the drawing
+  must carry exactly one label from the list; do not add unlabeled closets, voids, shafts, or
+  leftover enclosed pockets. If geometry does not fill the massing, enlarge listed rooms or the
+  corridor instead of inventing space.
 
 EXCLUDE — keep it a clean SCHEMATIC plan, NOT a construction / working drawing. Do NOT draw any of:
 - furniture, fixtures, equipment, sanitary ware, beds, sinks, desks;
@@ -93,7 +97,9 @@ def request_plan_image(api_key: str, model: str, prompt: str, timeout_seconds: f
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {
             "responseModalities": ["TEXT", "IMAGE"],
-            "imageConfig": {"aspectRatio": "16:9", "imageSize": "1K"},
+            # 2K since 2026-07-09: 1K candidates looked soft in the fullscreen lightbox;
+            # b64 payloads stay well under the 8 MB reference-image / 10 MB request caps.
+            "imageConfig": {"aspectRatio": "16:9", "imageSize": "2K"},
         },
     }
     request = urllib.request.Request(
