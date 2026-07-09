@@ -21,6 +21,14 @@ const FOOTPRINT_FILL = `rgba(${INK},0.03)`;
 const HATCH = `rgba(${INK},0.10)`;
 const WALL_INTERIOR = `rgba(${INK},0.50)`;
 const WALL_EXTERIOR = `rgba(${INK},0.90)`;
+
+// Double-line (hollow poché) wall rendering. Each wall becomes two parallel ink
+// lines with a backdrop gap between them, like real drafting. Below MIN_CELL_PX
+// a single stroke reads better (the two lines would smear into one).
+const DOUBLE_LINE_MIN_CELL_PX = 4;
+const WALL_TOTAL = { exterior: 6, interior: 3.5 } as const;
+const WALL_LINE = { exterior: 1.6, interior: 1.1 } as const;
+
 const DOOR_BLUE = "#2E7CEE";
 const DOOR_GREEN = "#0E9F6E";
 const LABEL_NAME = `rgba(${INK},0.88)`;
@@ -297,26 +305,37 @@ function drawPlanBody(
     context.restore();
   });
 
-  // 5. Walls — merged region-transition segments carried by the scene.
+  // 5. Walls — merged region-transition segments carried by the scene, drawn as
+  //    double lines (hollow poché) so they read like real drafting. The backdrop
+  //    band carves the hollow through the room fills laid down in step 4.
   const align = (v: number): number => Math.round(v) + 0.5;
-  const interiorPath = new Path2D();
-  const exteriorPath = new Path2D();
-  for (const wall of scene.walls) {
-    const path = wall.kind === "exterior" ? exteriorPath : interiorPath;
-    path.moveTo(align(wall.x1 * scale), align(wall.y1 * scale));
-    path.lineTo(align(wall.x2 * scale), align(wall.y2 * scale));
+  const extBand = wallBand("exterior", scale);
+  const intBand = wallBand("interior", scale);
+  if (extBand && intBand) {
+    drawDoubleWalls(context, scene.walls, scale, { exterior: extBand, interior: intBand }, align);
+  } else {
+    // Fallback (tiny zoom): single butt-capped strokes, as before.
+    const interiorPath = new Path2D();
+    const exteriorPath = new Path2D();
+    for (const wall of scene.walls) {
+      const path = wall.kind === "exterior" ? exteriorPath : interiorPath;
+      path.moveTo(align(wall.x1 * scale), align(wall.y1 * scale));
+      path.lineTo(align(wall.x2 * scale), align(wall.y2 * scale));
+    }
+    context.lineCap = "butt";
+    context.lineJoin = "miter";
+    context.strokeStyle = WALL_INTERIOR;
+    context.lineWidth = 1.25;
+    context.stroke(interiorPath);
+    context.strokeStyle = WALL_EXTERIOR;
+    context.lineWidth = 2.5;
+    context.stroke(exteriorPath);
   }
-  context.lineCap = "butt";
-  context.lineJoin = "miter";
-  context.strokeStyle = WALL_INTERIOR;
-  context.lineWidth = 1.25;
-  context.stroke(interiorPath);
-  context.strokeStyle = WALL_EXTERIOR;
-  context.lineWidth = 2.5;
-  context.stroke(exteriorPath);
 
-  // 6. Doors — carve an opening, then draw the swing arc + leaf.
-  scene.doors.forEach((door) => drawDoor(context, door, scale));
+  // 6. Doors — carve an opening through the wall band, then draw the swing arc +
+  //    leaf. Entrance doors sit on the exterior band, interior doors on the thin
+  //    interior band; the band drives the erase width and the jamb caps.
+  scene.doors.forEach((door) => drawDoor(context, door, scale, door.isEntrance ? extBand : intBand));
 
   // 7. Labels — two-line lockup in each room's largest inscribed rectangle.
   const { sans, mono } = fontFamilies();
@@ -342,7 +361,89 @@ function drawPlanBody(
   context.restore();
 }
 
-function drawDoor(context: CanvasRenderingContext2D, sceneDoor: SceneDoor, scale: number): void {
+interface WallBand {
+  total: number; // full band thickness (outer edge to outer edge), CSS px
+  line: number; // each ink line's stroke width, CSS px
+  offset: number; // centreline → each ink line's centre, CSS px
+  half: number; // total / 2 — the junction extension along the segment axis
+}
+
+// Double-line dimensions for a wall kind at the current effective px/cell, or
+// null below the smear threshold (caller falls back to a single stroke).
+function wallBand(kind: "exterior" | "interior", cellPx: number): WallBand | null {
+  if (cellPx < DOUBLE_LINE_MIN_CELL_PX) return null;
+  // Cap the band at 0.6·cellPx so a tight zoom never floods the cell.
+  const total = Math.min(WALL_TOTAL[kind], cellPx * 0.6);
+  // Keep both lines inside the (possibly capped) band with a visible gap.
+  const line = Math.max(0.75, Math.min(WALL_LINE[kind], (total - 0.5) / 2));
+  return { total, line, offset: (total - line) / 2, half: total / 2 };
+}
+
+// Walls as hollow double lines: a backdrop band carves the gap through the room
+// fill, then two ink lines ride its edges. Endpoints extend by half the band
+// thickness so L/T junctions close into continuous wall mass. ALL bands are
+// stroked before ANY line, so a band never erases a neighbouring wall's ink.
+function drawDoubleWalls(
+  context: CanvasRenderingContext2D,
+  walls: SceneWall[],
+  scale: number,
+  bands: { exterior: WallBand; interior: WallBand },
+  align: (v: number) => number,
+): void {
+  const bandPaths = { exterior: new Path2D(), interior: new Path2D() };
+  const linePaths = { exterior: new Path2D(), interior: new Path2D() };
+
+  for (const wall of walls) {
+    const band = bands[wall.kind];
+    const bandPath = bandPaths[wall.kind];
+    const linePath = linePaths[wall.kind];
+    const horizontal = wall.y1 === wall.y2;
+    if (horizontal) {
+      const y = align(wall.y1 * scale);
+      const xa = Math.min(wall.x1, wall.x2) * scale - band.half;
+      const xb = Math.max(wall.x1, wall.x2) * scale + band.half;
+      bandPath.moveTo(xa, y);
+      bandPath.lineTo(xb, y);
+      linePath.moveTo(xa, y - band.offset);
+      linePath.lineTo(xb, y - band.offset);
+      linePath.moveTo(xa, y + band.offset);
+      linePath.lineTo(xb, y + band.offset);
+    } else {
+      const x = align(wall.x1 * scale);
+      const ya = Math.min(wall.y1, wall.y2) * scale - band.half;
+      const yb = Math.max(wall.y1, wall.y2) * scale + band.half;
+      bandPath.moveTo(x, ya);
+      bandPath.lineTo(x, yb);
+      linePath.moveTo(x - band.offset, ya);
+      linePath.lineTo(x - band.offset, yb);
+      linePath.moveTo(x + band.offset, ya);
+      linePath.lineTo(x + band.offset, yb);
+    }
+  }
+
+  context.lineCap = "butt";
+  context.lineJoin = "miter";
+  // Pass 1 — backdrop bands (all before any line).
+  context.strokeStyle = BACKDROP;
+  context.lineWidth = bands.interior.total;
+  context.stroke(bandPaths.interior);
+  context.lineWidth = bands.exterior.total;
+  context.stroke(bandPaths.exterior);
+  // Pass 2 — the two ink lines on each band's edges.
+  context.strokeStyle = WALL_INTERIOR;
+  context.lineWidth = bands.interior.line;
+  context.stroke(linePaths.interior);
+  context.strokeStyle = WALL_EXTERIOR;
+  context.lineWidth = bands.exterior.line;
+  context.stroke(linePaths.exterior);
+}
+
+function drawDoor(
+  context: CanvasRenderingContext2D,
+  sceneDoor: SceneDoor,
+  scale: number,
+  band: WallBand | null,
+): void {
   const span = sceneDoor.span * scale;
   const x0 = sceneDoor.hinge.x * scale;
   const y0 = sceneDoor.hinge.y * scale;
@@ -351,15 +452,38 @@ function drawDoor(context: CanvasRenderingContext2D, sceneDoor: SceneDoor, scale
 
   context.save();
 
-  // (a) Erase the wall stroke across the opening span, in the backdrop color.
+  // (a) Erase across the opening span, in the backdrop color. With double-line
+  //     walls this clears the FULL band (total + 1px) so the opening reads as a
+  //     clean gap; the fallback keeps the old single-stroke width.
+  const eraseWidth = band ? band.total + 1 : Math.max(3.5, scale * 0.34);
   context.lineCap = "butt";
   context.strokeStyle = BACKDROP;
-  context.lineWidth = Math.max(3.5, scale * 0.34);
+  context.lineWidth = eraseWidth;
   context.beginPath();
   context.moveTo(x0, y0);
   if (horizontal) context.lineTo(x0 + span, y0);
   else context.lineTo(x0, y0 + span);
   context.stroke();
+
+  // (a2) Jamb caps: a short ink line across the band at each opening end, so the
+  //      double-wall ends look finished (closed) rather than open-ended.
+  if (band) {
+    context.strokeStyle = sceneDoor.isEntrance ? WALL_EXTERIOR : WALL_INTERIOR;
+    context.lineWidth = band.line;
+    context.beginPath();
+    if (horizontal) {
+      context.moveTo(x0, y0 - band.half);
+      context.lineTo(x0, y0 + band.half);
+      context.moveTo(x0 + span, y0 - band.half);
+      context.lineTo(x0 + span, y0 + band.half);
+    } else {
+      context.moveTo(x0 - band.half, y0);
+      context.lineTo(x0 + band.half, y0);
+      context.moveTo(x0 - band.half, y0 + span);
+      context.lineTo(x0 + band.half, y0 + span);
+    }
+    context.stroke();
+  }
 
   // Closed leaf points along the wall; open leaf swings perpendicular.
   const closedAngle = sceneDoor.closedAngle;
