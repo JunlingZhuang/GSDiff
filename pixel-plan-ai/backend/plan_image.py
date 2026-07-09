@@ -74,16 +74,24 @@ def room_instance_names(program: dict[str, Any]) -> list[str]:
 
 
 def build_plan_image_prompt(program: dict[str, Any], variant_hint: str) -> str:
-    rooms_block = "\n".join(f"- {name}" for name in room_instance_names(program))
+    names = room_instance_names(program)
+    rooms_block = "\n".join(f"- {name}" for name in names)
     adjacency_block = "\n".join(
         f"- {pair[0]} <-> {pair[1]}" for pair in program.get("adjacency", [])
     ) or "- (none specified)"
+    # Explicit count check added 2026-07-09: a live clinic-mixed candidate grew three
+    # unlabeled filler closets around the waiting room despite the LABELS rules.
     return f"""Draw a schematic architectural floor plan of a {program.get('building_type', 'building')} as a clean black-and-white line drawing.
 
 {PLAN_DRAWING_RULES}
 
 ROOMS (draw and label every instance exactly once):
 {rooms_block}
+
+COUNT CHECK — the finished drawing must contain EXACTLY {len(names)} enclosed spaces, one per listed room.
+Before finishing, count every enclosed space: if any space has no label from the list above, merge it into
+a neighbouring listed room. Symmetric filler closets, unlabeled slots beside the entrance, and leftover
+pockets are all errors.
 
 REQUIRED ADJACENCIES (these pairs share a door):
 {adjacency_block}
