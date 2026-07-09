@@ -21,14 +21,16 @@ export default function StudioPage() {
         {/* full-bleed blueprint viewport */}
         <Viewport studio={studio} />
 
-        {/* floating left panel — a tool card that hugs its content, not full-height */}
-        <div className="absolute left-3 top-3 z-20 flex h-auto max-h-[calc(100vh-70px)] w-[300px] flex-col overflow-hidden rounded-xl border border-border bg-card/90 shadow-[0_12px_32px_rgba(16,24,40,0.08)] backdrop-blur-md">
+        {/* floating left panel — fixed full-height tool card: header + scrolling
+            body + footer never collapse or grow past the viewport */}
+        <div className="absolute left-3 top-3 z-20 flex h-[calc(100vh-70px)] w-[300px] flex-col overflow-hidden rounded-xl border border-border bg-card/90 shadow-[0_12px_32px_rgba(16,24,40,0.08)] backdrop-blur-md">
           <ProgramPanel studio={studio} />
         </div>
 
-        {/* floating right panel — hidden until there is something to inspect */}
+        {/* floating right panel — same fixed full-height treatment; hidden until
+            there is something to inspect */}
         {showInspector ? (
-          <div className="absolute right-3 top-3 bottom-3 z-20 flex w-[320px] flex-col overflow-hidden rounded-xl border border-border bg-card/90 shadow-[0_12px_32px_rgba(16,24,40,0.08)] backdrop-blur-md animate-in fade-in slide-in-from-right-4 duration-300">
+          <div className="absolute right-3 top-3 z-20 flex h-[calc(100vh-70px)] w-[320px] flex-col overflow-hidden rounded-xl border border-border bg-card/90 shadow-[0_12px_32px_rgba(16,24,40,0.08)] backdrop-blur-md animate-in fade-in slide-in-from-right-4 duration-300">
             <InspectorPanel studio={studio} />
           </div>
         ) : null}

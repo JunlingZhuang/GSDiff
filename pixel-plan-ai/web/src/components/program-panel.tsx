@@ -214,12 +214,32 @@ function Step({
   );
 }
 
-// The human-facing program editor: a small scrollable rooms table (type / count
-// / ft²) plus an adjacency chip editor and a building-type field. `programText`
-// (the JSON string on the studio hook) stays the single source of truth — every
-// edit here clones it, applies one immutable mutation, and writes it back. When
-// the JSON has been hand-edited into an invalid state the editor disables itself
-// and points at the Advanced disclosure.
+// The building-type field lives in the fixed panel header (it names what you're
+// editing), so it is split out of the scrolling ProgramEditor body. It writes
+// through the same programText single-source-of-truth as every other edit.
+function BuildingInput({ studio }: { studio: Studio }) {
+  const program = studio.program;
+  return (
+    <Input
+      value={program?.building_type ?? ""}
+      disabled={!program}
+      onChange={(event) => {
+        if (!program) return;
+        const next = JSON.parse(JSON.stringify(program)) as Program;
+        next.building_type = event.target.value;
+        studio.setProgramText(JSON.stringify(next, null, 2));
+      }}
+      placeholder="e.g. outpatient clinic"
+      className="h-8 text-[13px]"
+    />
+  );
+}
+
+// The human-facing program editor: a rooms table (type / count / ft²) plus an
+// adjacency chip editor. `programText` (the JSON string on the studio hook) stays
+// the single source of truth — every edit here clones it, applies one immutable
+// mutation, and writes it back. When the JSON has been hand-edited into an
+// invalid state the editor disables itself and points at the Advanced disclosure.
 function ProgramEditor({ studio }: { studio: Studio }) {
   const program = studio.program;
   const [adjA, setAdjA] = React.useState("");
@@ -316,18 +336,8 @@ function ProgramEditor({ studio }: { studio: Studio }) {
 
   return (
     <div className="flex flex-col gap-3">
-      {/* Building type */}
-      <div className="flex flex-col gap-1.5">
-        <span className="label-xs">Building</span>
-        <Input
-          value={program.building_type ?? ""}
-          onChange={(event) => editProgram((draft) => ({ ...draft, building_type: event.target.value }))}
-          placeholder="e.g. outpatient clinic"
-          className="h-8 text-[13px]"
-        />
-      </div>
-
-      {/* Rooms table — inline-editable, scrolls past a handful of rows */}
+      {/* Rooms table — inline-editable, renders full-height inside the panel's
+          single scroll context (no nested scrollbar of its own) */}
       <div className="flex flex-col gap-1.5">
         <div className="overflow-hidden rounded-lg border border-border">
           <div className={cn(ROOM_GRID, "border-b border-border bg-secondary/30 px-2 py-1.5")}>
@@ -336,44 +346,42 @@ function ProgramEditor({ studio }: { studio: Studio }) {
             <span className="label-xs text-right">ft²</span>
             <span />
           </div>
-          <ScrollArea className="max-h-44">
-            <div className="flex flex-col">
-              {rooms.length === 0 ? (
-                <p className="px-2 py-3 text-center text-[11px] text-muted-foreground">No rooms yet.</p>
-              ) : (
-                rooms.map((room, index) => (
-                  <div key={index} className={cn(ROOM_GRID, "group px-2 py-1 hover:bg-secondary/30")}>
-                    <Input
-                      value={room.type ?? ""}
-                      onChange={(event) => updateRoomType(index, event.target.value)}
-                      className="h-7 px-2 text-[13px]"
-                    />
-                    <Input
-                      inputMode="numeric"
-                      value={room.count == null ? "" : String(room.count)}
-                      onChange={(event) => updateRoomCount(index, event.target.value)}
-                      className="h-7 px-1.5 text-right font-mono text-[12px] tabular-nums"
-                    />
-                    <Input
-                      inputMode="numeric"
-                      value={room.approx_area_ft2 == null ? "" : String(room.approx_area_ft2)}
-                      onChange={(event) => updateRoomArea(index, event.target.value)}
-                      placeholder="—"
-                      className="h-7 px-1.5 text-right font-mono text-[12px] tabular-nums"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => removeRoom(index)}
-                      aria-label="Remove room"
-                      className="flex size-5 items-center justify-center rounded-sm text-muted-foreground opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100"
-                    >
-                      <X className="size-3" />
-                    </button>
-                  </div>
-                ))
-              )}
-            </div>
-          </ScrollArea>
+          <div className="flex flex-col">
+            {rooms.length === 0 ? (
+              <p className="px-2 py-3 text-center text-[11px] text-muted-foreground">No rooms yet.</p>
+            ) : (
+              rooms.map((room, index) => (
+                <div key={index} className={cn(ROOM_GRID, "group px-2 py-1 hover:bg-secondary/30")}>
+                  <Input
+                    value={room.type ?? ""}
+                    onChange={(event) => updateRoomType(index, event.target.value)}
+                    className="h-7 px-2 text-[13px]"
+                  />
+                  <Input
+                    inputMode="numeric"
+                    value={room.count == null ? "" : String(room.count)}
+                    onChange={(event) => updateRoomCount(index, event.target.value)}
+                    className="h-7 px-1.5 text-right font-mono text-[12px] tabular-nums"
+                  />
+                  <Input
+                    inputMode="numeric"
+                    value={room.approx_area_ft2 == null ? "" : String(room.approx_area_ft2)}
+                    onChange={(event) => updateRoomArea(index, event.target.value)}
+                    placeholder="—"
+                    className="h-7 px-1.5 text-right font-mono text-[12px] tabular-nums"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => removeRoom(index)}
+                    aria-label="Remove room"
+                    className="flex size-5 items-center justify-center rounded-sm text-muted-foreground opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100"
+                  >
+                    <X className="size-3" />
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
           <div className="border-t border-border px-2 py-1">
             <button
               type="button"
@@ -516,22 +524,31 @@ export function ProgramPanel({ studio }: { studio: Studio }) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex flex-col gap-1.5 border-b border-border px-3 py-2.5">
-        <span className="label-xs">Program</span>
-        <Select value={studio.sampleKey} onValueChange={(value) => value && studio.loadSample(value)}>
-          <SelectTrigger className="h-8 w-full text-[13px]">
-            <SelectValue placeholder="Pick a sample" />
-          </SelectTrigger>
-          <SelectContent>
-            {Object.keys(studio.samples).map((key) => (
-              <SelectItem key={key} value={key} className="text-[13px]">
-                {key}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+      {/* HEADER — fixed: preset picker + the building name that identifies what
+          you're editing. Never scrolls. */}
+      <div className="flex shrink-0 flex-col gap-2 border-b border-border px-3 py-2.5">
+        <div className="flex flex-col gap-1.5">
+          <span className="label-xs">Program</span>
+          <Select value={studio.sampleKey} onValueChange={(value) => value && studio.loadSample(value)}>
+            <SelectTrigger className="h-8 w-full text-[13px]">
+              <SelectValue placeholder="Pick a sample" />
+            </SelectTrigger>
+            <SelectContent>
+              {Object.keys(studio.samples).map((key) => (
+                <SelectItem key={key} value={key} className="text-[13px]">
+                  {key}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <span className="label-xs">Building</span>
+          <BuildingInput studio={studio} />
+        </div>
       </div>
 
+      {/* BODY — the single scroll context for the whole editor. */}
       <ScrollArea className="min-h-0 flex-1">
         <div className="flex flex-col gap-4 p-3">
           {/* Human-facing program editor — rooms table + adjacency chips. The raw
@@ -871,7 +888,8 @@ export function ProgramPanel({ studio }: { studio: Studio }) {
         </div>
       </ScrollArea>
 
-      <div className="border-t border-border p-3">
+      {/* FOOTER — fixed: primary action + status line, always visible. */}
+      <div className="shrink-0 border-t border-border p-3">
         {/* Trace mode's primary action is the stepper's step 3 (Refine). */}
         {traceMode ? null : (
           <Button
