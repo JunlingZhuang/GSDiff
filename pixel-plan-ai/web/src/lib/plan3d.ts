@@ -1,8 +1,11 @@
 import type { Plan } from "./types";
+import { buildScene } from "./scene";
 
-// Derives a schematic 3D model (Finch-style massing) purely from the plan
-// grid: floor slabs per room, walls along cell boundaries, door openings
-// left as gaps. All dimensions in meters; the model is centered on origin.
+// Derives a schematic 3D model (Finch-style massing) from the plan grid:
+// floor slabs per room, walls reused from the shared 2D scene graph's UNIQUE
+// merged boundary runs, door-height openings with lintel headers above them,
+// and hinged leaves with jamb frames. All dimensions in meters; the model is
+// centered on origin.
 
 export interface Box3D {
   center: [number, number, number];
@@ -60,11 +63,6 @@ export function buildPlanModel(plan: Plan): PlanModel {
   const m = plan.meters_per_cell || 0.3;
   const offsetX = (plan.width * m) / 2;
   const offsetZ = (plan.height * m) / 2;
-  const cell = (x: number, y: number): number => {
-    if (x < 0 || y < 0 || x >= plan.width || y >= plan.height) return -2;
-    const value = plan.cells[y * plan.width + x];
-    return value === undefined ? -2 : value;
-  };
 
   const floors: Box3D[] = [];
   for (const [roomIndex, room] of plan.rooms.entries()) {
@@ -81,50 +79,128 @@ export function buildPlanModel(plan: Plan): PlanModel {
     }
   }
 
-  // Boundary units covered by a door become wall gaps.
-  const doorUnits = new Set<string>();
-  for (const door of plan.doors) {
-    for (let i = 0; i < door.width_cells; i += 1) {
-      if (door.orientation === "horizontal") doorUnits.add(`h:${door.x + i},${door.y}`);
-      else doorUnits.add(`v:${door.x},${door.y + i}`);
+  // Walls from UNIQUE boundary runs. The shared 2D scene graph (scene.ts)
+  // already derives exactly one merged wall run per region-transition edge, so
+  // reusing its walls array guarantees the 3D massing can never emit two
+  // co-located boxes for the same boundary — previously a twin wall could span
+  // a door opening that had only been carved out of its double. Scene runs
+  // split where the flanking region pair or kind changes; 3D renders interior
+  // and exterior walls identically (same thickness/height, as before), so
+  // collapse touching collinear runs into maximal intervals per boundary line
+  // first — otherwise the corner-closure elongation below would make touching
+  // pieces overlap.
+  const lineKey = (horizontal: boolean, fixed: number): string => (horizontal ? `h:${fixed}` : `v:${fixed}`);
+  const lineRuns = new Map<string, [number, number][]>();
+  for (const w of buildScene(plan).walls) {
+    const horizontal = w.y1 === w.y2;
+    const key = lineKey(horizontal, horizontal ? w.y1 : w.x1);
+    const span: [number, number] = horizontal
+      ? [Math.min(w.x1, w.x2), Math.max(w.x1, w.x2)]
+      : [Math.min(w.y1, w.y2), Math.max(w.y1, w.y2)];
+    const runs = lineRuns.get(key);
+    if (runs) runs.push(span);
+    else lineRuns.set(key, [span]);
+  }
+  for (const runs of lineRuns.values()) {
+    runs.sort((p, q) => p[0] - q[0]);
+    let write = 0;
+    for (let i = 1; i < runs.length; i += 1) {
+      if (runs[i][0] <= runs[write][1]) runs[write][1] = Math.max(runs[write][1], runs[i][1]);
+      else runs[(write += 1)] = runs[i];
     }
+    runs.length = write + 1;
   }
 
-  const walls: Box3D[] = [];
-  // Vertical boundaries (constant x, spanning rows): between (x-1,y) and (x,y).
-  for (let x = 0; x <= plan.width; x += 1) {
-    let runStart = -1;
-    for (let y = 0; y <= plan.height; y += 1) {
-      const left = cell(x - 1, y);
-      const right = cell(x, y);
-      const isWall = y < plan.height && left !== right && (left >= 0 || right >= 0) && !doorUnits.has(`v:${x},${y}`);
-      if (isWall && runStart < 0) runStart = y;
-      if (!isWall && runStart >= 0) {
-        walls.push({
-          center: [x * m - offsetX, WALL_HEIGHT / 2, ((runStart + y) / 2) * m - offsetZ],
-          size: [WALL_THICKNESS, WALL_HEIGHT, (y - runStart) * m + WALL_THICKNESS],
-          color: WALL_COLOR,
-        });
-        runStart = -1;
-      }
-    }
+  // Door openings per boundary line, in cell units along the line. A
+  // horizontal door sits in the wall running along +X at z = y (opening
+  // A=(x,y) → B=(x+width,y)); a vertical door in the wall along +Z at x = x.
+  const doorSpans = new Map<string, [number, number][]>();
+  for (const door of plan.doors) {
+    const horizontal = door.orientation === "horizontal";
+    const key = lineKey(horizontal, horizontal ? door.y : door.x);
+    const start = horizontal ? door.x : door.y;
+    const span: [number, number] = [start, start + Math.max(1, door.width_cells)];
+    const spans = doorSpans.get(key);
+    if (spans) spans.push(span);
+    else doorSpans.set(key, [span]);
   }
-  // Horizontal boundaries (constant y, spanning columns): between (x,y-1) and (x,y).
-  for (let y = 0; y <= plan.height; y += 1) {
-    let runStart = -1;
-    for (let x = 0; x <= plan.width; x += 1) {
-      const above = cell(x, y - 1);
-      const below = cell(x, y);
-      const isWall = x < plan.width && above !== below && (above >= 0 || below >= 0) && !doorUnits.has(`h:${x},${y}`);
-      if (isWall && runStart < 0) runStart = x;
-      if (!isWall && runStart >= 0) {
-        walls.push({
-          center: [((runStart + x) / 2) * m - offsetX, WALL_HEIGHT / 2, y * m - offsetZ],
-          size: [(x - runStart) * m + WALL_THICKNESS, WALL_HEIGHT, WALL_THICKNESS],
-          color: WALL_COLOR,
-        });
-        runStart = -1;
+  for (const spans of doorSpans.values()) spans.sort((p, q) => p[0] - q[0]);
+
+  // Emit wall boxes by subtracting each line's door spans from its runs:
+  // full-height pieces between cuts, and a lintel header over every opening
+  // (door height → wall top, full wall thickness, wall color) so the wall
+  // reads continuous above the door. Ends created by a door cut stop exactly
+  // at the jamb (the frame post caps them); original run ends keep the T/2
+  // corner-closure elongation so L/T junctions stay filled.
+  const walls: Box3D[] = [];
+  const DOOR_HEIGHT = DOOR_LEAF_HEIGHT; // the opening clears exactly the leaf
+  const pushWallBox = (
+    horizontal: boolean,
+    fixed: number,
+    from: number,
+    to: number,
+    doorCutStart: boolean,
+    doorCutEnd: boolean,
+  ): void => {
+    const min = from * m - (doorCutStart ? 0 : WALL_THICKNESS / 2);
+    const max = to * m + (doorCutEnd ? 0 : WALL_THICKNESS / 2);
+    if (max - min <= 0) return;
+    const mid = (min + max) / 2;
+    const length = max - min;
+    walls.push(
+      horizontal
+        ? {
+            center: [mid - offsetX, WALL_HEIGHT / 2, fixed * m - offsetZ],
+            size: [length, WALL_HEIGHT, WALL_THICKNESS],
+            color: WALL_COLOR,
+          }
+        : {
+            center: [fixed * m - offsetX, WALL_HEIGHT / 2, mid - offsetZ],
+            size: [WALL_THICKNESS, WALL_HEIGHT, length],
+            color: WALL_COLOR,
+          },
+    );
+  };
+  const pushLintel = (horizontal: boolean, fixed: number, from: number, to: number): void => {
+    // Inset to the jamb posts' inner faces so the header never overlaps (and
+    // z-fights) the full-height posts that frame the opening.
+    const min = from * m + WALL_THICKNESS / 2;
+    const max = to * m - WALL_THICKNESS / 2;
+    if (max - min <= 0) return;
+    const mid = (min + max) / 2;
+    const yMid = (DOOR_HEIGHT + WALL_HEIGHT) / 2;
+    const yLen = WALL_HEIGHT - DOOR_HEIGHT;
+    walls.push(
+      horizontal
+        ? {
+            center: [mid - offsetX, yMid, fixed * m - offsetZ],
+            size: [max - min, yLen, WALL_THICKNESS],
+            color: WALL_COLOR,
+          }
+        : {
+            center: [fixed * m - offsetX, yMid, mid - offsetZ],
+            size: [WALL_THICKNESS, yLen, max - min],
+            color: WALL_COLOR,
+          },
+    );
+  };
+  for (const [key, runs] of lineRuns) {
+    const horizontal = key.startsWith("h:");
+    const fixed = Number(key.slice(2));
+    const spans = doorSpans.get(key) ?? [];
+    for (const [runStart, runEnd] of runs) {
+      let cursor = runStart;
+      let cursorFromDoor = false;
+      for (const [doorStart, doorEnd] of spans) {
+        if (doorEnd <= cursor || doorStart >= runEnd) continue;
+        const cutStart = Math.max(doorStart, cursor);
+        const cutEnd = Math.min(doorEnd, runEnd);
+        if (cutStart > cursor) pushWallBox(horizontal, fixed, cursor, cutStart, cursorFromDoor, true);
+        pushLintel(horizontal, fixed, cutStart, cutEnd);
+        cursor = cutEnd;
+        cursorFromDoor = true;
       }
+      if (cursor < runEnd) pushWallBox(horizontal, fixed, cursor, runEnd, cursorFromDoor, false);
     }
   }
 
@@ -188,6 +264,36 @@ export function buildPlanModel(plan: Plan): PlanModel {
         console.warn(
           `plan3d: door ${door.id} leaf swings away from its ${door.swing_side} room`,
         );
+      }
+
+      // Opening-clear lock: no wall box may put mass inside the door opening
+      // BELOW the lintel. Checked volume = the clear opening between the jamb
+      // posts' inner faces (posts legitimately cap the raw gap ends, and
+      // perpendicular walls' corner elongation at a jamb hides inside a post)
+      // × the wall band thickness × height up to the door head. Lintels pass
+      // because their underside sits exactly at DOOR_LEAF_HEIGHT.
+      const eps = 1e-3;
+      const alongMin = (horizontal ? door.x : door.y) * m + WALL_THICKNESS / 2 + eps;
+      const alongMax = (horizontal ? door.x + cells : door.y + cells) * m - WALL_THICKNESS / 2 - eps;
+      const openXMin = horizontal ? alongMin - offsetX : hingeX - WALL_THICKNESS / 2 + eps;
+      const openXMax = horizontal ? alongMax - offsetX : hingeX + WALL_THICKNESS / 2 - eps;
+      const openZMin = horizontal ? hingeZ - WALL_THICKNESS / 2 + eps : alongMin - offsetZ;
+      const openZMax = horizontal ? hingeZ + WALL_THICKNESS / 2 - eps : alongMax - offsetZ;
+      const openYMax = DOOR_LEAF_HEIGHT - eps;
+      for (const box of walls) {
+        const [cx, cy, cz] = box.center;
+        const [sx, sy, sz] = box.size;
+        const blocks =
+          cx + sx / 2 > openXMin &&
+          cx - sx / 2 < openXMax &&
+          cz + sz / 2 > openZMin &&
+          cz - sz / 2 < openZMax &&
+          cy - sy / 2 < openYMax &&
+          cy + sy / 2 > eps;
+        if (blocks) {
+          console.warn(`plan3d: wall box crosses the door opening of ${door.id}`);
+          break;
+        }
       }
     }
 
