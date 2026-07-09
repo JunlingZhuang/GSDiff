@@ -15,9 +15,9 @@ import {
   Sparkles,
 } from "lucide-react";
 
+import { LightboxViewer } from "@/components/lightbox-viewer";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -631,62 +631,29 @@ export function ProgramPanel({ studio }: { studio: Studio }) {
         </p>
       </div>
 
-      {/* candidate lightbox */}
-      <Dialog open={studio.lightbox !== null} onOpenChange={(open) => !open && studio.setLightbox(null)}>
-        <DialogContent className="max-w-4xl p-3">
-          <DialogTitle className="text-[13px] font-medium">
-            Candidate {studio.lightbox === null ? "" : studio.lightbox + 1}
-          </DialogTitle>
-          {studio.lightbox !== null && studio.candidates[studio.lightbox] ? (
-            <>
-              <img
-                src={candidateDataUrl(studio.candidates[studio.lightbox])}
-                alt={`Candidate plan ${studio.lightbox + 1} full preview`}
-                className="max-h-[72vh] w-full rounded-md border border-border bg-white object-contain"
-              />
-              <div className="flex justify-between gap-2">
-                <div className="flex gap-1">
-                  {studio.candidates.map((_, index) => (
-                    <Button
-                      key={index}
-                      size="sm"
-                      variant={index === studio.lightbox ? "default" : "outline"}
-                      className="h-7 w-8 font-mono text-[11px]"
-                      onClick={() => studio.setLightbox(index)}
-                    >
-                      {index + 1}
-                    </Button>
-                  ))}
-                </div>
-                <Button
-                  size="sm"
-                  className="h-7 gap-1.5 text-[11px] font-medium"
-                  onClick={() => {
-                    if (studio.lightbox !== null) studio.selectCandidate(studio.lightbox);
-                    studio.setLightbox(null);
-                  }}
-                >
-                  <Check className="size-3" /> Use this drawing
-                </Button>
-              </div>
-            </>
-          ) : null}
-        </DialogContent>
-      </Dialog>
+      {/* candidate lightbox — large, zoomable, with candidate flipping */}
+      <LightboxViewer
+        open={studio.lightbox !== null}
+        onOpenChange={(open) => !open && studio.setLightbox(null)}
+        title={`Candidate ${studio.lightbox === null ? "" : studio.lightbox + 1}`}
+        image={studio.lightbox === null ? null : studio.candidates[studio.lightbox] ?? null}
+        index={studio.lightbox ?? undefined}
+        count={studio.candidates.length}
+        selectedIndex={studio.selectedCandidate}
+        onIndex={(index) => studio.setLightbox(index)}
+        onSelect={(index) => {
+          studio.selectCandidate(index);
+          studio.setLightbox(null);
+        }}
+      />
 
-      {/* traced linework artifact lightbox */}
-      <Dialog open={studio.traceLightboxOpen} onOpenChange={(open) => studio.setTraceLightboxOpen(open)}>
-        <DialogContent className="max-w-3xl p-3">
-          <DialogTitle className="text-[13px] font-medium">Traced linework</DialogTitle>
-          {trace?.artifacts.linework ? (
-            <img
-              src={candidateDataUrl(trace.artifacts.linework)}
-              alt="Traced linework artifact"
-              className="max-h-[72vh] w-full rounded-md border border-border bg-white object-contain"
-            />
-          ) : null}
-        </DialogContent>
-      </Dialog>
+      {/* traced linework artifact — same zoomable viewer, single image */}
+      <LightboxViewer
+        open={studio.traceLightboxOpen}
+        onOpenChange={(open) => studio.setTraceLightboxOpen(open)}
+        title="Trace linework"
+        image={trace?.artifacts.linework ?? null}
+      />
     </div>
   );
 }
