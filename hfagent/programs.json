@@ -1,146 +1,448 @@
 {
-  "clinic-small": {
-    "building_type": "small community clinic",
-    "rooms": [
-      { "type": "waiting", "count": 1 },
-      { "type": "exam_room", "count": 3 },
-      { "type": "toilet", "count": 1 },
-      { "type": "corridor", "count": 1 }
-    ],
-    "adjacency": [
-      ["waiting", "corridor"],
-      ["exam_room", "corridor"],
-      ["toilet", "corridor"]
-    ]
-  },
-  "ward-wing": {
-    "building_type": "hospital ward wing",
-    "rooms": [
-      { "type": "patient_room", "count": 5 },
-      { "type": "nurse_station", "count": 1 },
-      { "type": "storage", "count": 1 },
-      { "type": "corridor", "count": 1 }
-    ],
-    "adjacency": [
-      ["patient_room", "corridor"],
-      ["nurse_station", "corridor"]
-    ]
-  },
-  "health-center-large": {
-    "building_type": "large community health center",
-    "rooms": [
-      { "type": "waiting", "count": 1, "approx_area_ft2": 650 },
-      { "type": "exam_room", "count": 4, "approx_area_ft2": 170 },
-      { "type": "patient_room", "count": 3, "approx_area_ft2": 215 },
-      { "type": "nurse_station", "count": 1, "approx_area_ft2": 150 },
-      { "type": "office", "count": 2, "approx_area_ft2": 130 },
-      { "type": "toilet", "count": 2, "approx_area_ft2": 65 },
-      { "type": "storage", "count": 1, "approx_area_ft2": 85 },
-      { "type": "corridor", "count": 1 }
-    ],
-    "adjacency": [
-      ["waiting", "corridor"],
-      ["exam_room", "corridor"],
-      ["patient_room", "corridor"],
-      ["nurse_station", "corridor"],
-      ["toilet", "corridor"]
-    ]
-  },
-  "hospital-floor": {
-    "building_type": "hospital outpatient department floor with two wings",
-    "rooms": [
-      { "type": "waiting", "count": 2, "approx_area_ft2": 430 },
-      { "type": "exam_room", "count": 6, "approx_area_ft2": 170 },
-      { "type": "patient_room", "count": 6, "approx_area_ft2": 215 },
-      { "type": "nurse_station", "count": 2, "approx_area_ft2": 150 },
-      { "type": "office", "count": 3, "approx_area_ft2": 130 },
-      { "type": "toilet", "count": 3, "approx_area_ft2": 65 },
-      { "type": "storage", "count": 2, "approx_area_ft2": 85 },
-      { "type": "corridor", "count": 2 }
-    ],
-    "adjacency": [
-      ["waiting", "corridor"],
-      ["exam_room", "corridor"],
-      ["patient_room", "corridor"],
-      ["nurse_station", "corridor"],
-      ["toilet", "corridor"]
-    ]
-  },
-  "outpatient-dept": {
-    "building_type": "large hospital outpatient department",
-    "rooms": [
-      { "type": "exam_room",      "count": 6, "approx_area_ft2": 195 },
-      { "type": "waiting",        "count": 3, "approx_area_ft2": 430 },
-      { "type": "nurse_station",  "count": 2, "approx_area_ft2": 270 },
-      { "type": "office",         "count": 1, "approx_area_ft2": 150 },
-      { "type": "storage",        "count": 1, "approx_area_ft2": 130 },
-      { "type": "corridor",       "count": 2 },
-      { "type": "toilet",         "count": 3, "approx_area_ft2": 65 }
-    ],
-    "adjacency": [
-      ["waiting",       "corridor"],
-      ["exam_room",     "corridor"],
-      ["nurse_station", "corridor"],
-      ["nurse_station", "exam_room"],
-      ["toilet",        "corridor"]
-    ]
-  },
-  "inpatient-ward": {
-    "building_type": "24-bed acute inpatient ward floor (NHS HBN 04-01)",
-    "rooms": [
-      { "type": "patient_room",  "count": 12, "approx_area_ft2": 130 },
-      { "type": "toilet",        "count": 8,  "approx_area_ft2": 55  },
-      { "type": "waiting",       "count": 1,  "approx_area_ft2": 195 },
-      { "type": "nurse_station", "count": 3,  "approx_area_ft2": 320 },
-      { "type": "exam_room",     "count": 2,  "approx_area_ft2": 185 },
-      { "type": "storage",       "count": 3,  "approx_area_ft2": 215 },
-      { "type": "corridor",      "count": 2   },
-      { "type": "office",        "count": 2,  "approx_area_ft2": 185 }
-    ],
-    "adjacency": [
-      ["patient_room",  "corridor"],
-      ["nurse_station", "corridor"],
-      ["nurse_station", "exam_room"],
-      ["nurse_station", "storage"],
-      ["waiting",       "corridor"],
-      ["office",        "corridor"]
-    ]
-  },
-  "clinic-mixed": {
-    "building_type": "outpatient clinic",
-    "rooms": [
-      { "type": "waiting", "count": 1 },
-      { "type": "exam_room", "count": 2 },
-      { "type": "office", "count": 2 },
-      { "type": "toilet", "count": 2 },
-      { "type": "corridor", "count": 1 }
-    ],
-    "adjacency": [
-      ["waiting", "corridor"],
-      ["exam_room", "corridor"],
-      ["office", "corridor"]
-    ]
-  },
-  "hospital-tower-floor": {
-    "building_type": "very large hospital inpatient tower floor, multiple wings around a central core (~80 rooms)",
-    "rooms": [
-      { "type": "patient_room",  "count": 40, "approx_area_ft2": 170 },
-      { "type": "toilet",        "count": 16, "approx_area_ft2": 45  },
-      { "type": "exam_room",     "count": 6,  "approx_area_ft2": 195 },
-      { "type": "office",        "count": 6,  "approx_area_ft2": 130 },
-      { "type": "nurse_station", "count": 4,  "approx_area_ft2": 260 },
-      { "type": "storage",       "count": 4,  "approx_area_ft2": 110 },
-      { "type": "corridor",      "count": 4   },
-      { "type": "waiting",       "count": 2,  "approx_area_ft2": 320 }
-    ],
-    "adjacency": [
-      ["patient_room",  "corridor"],
-      ["toilet",        "patient_room"],
-      ["nurse_station", "corridor"],
-      ["exam_room",     "corridor"],
-      ["office",        "corridor"],
-      ["storage",       "corridor"],
-      ["waiting",       "corridor"]
-    ]
-  }
+ "clinic-small": {
+  "building_type": "small community clinic",
+  "rooms": [
+   {
+    "type": "waiting",
+    "count": 1
+   },
+   {
+    "type": "exam_room",
+    "count": 3
+   },
+   {
+    "type": "toilet",
+    "count": 1
+   },
+   {
+    "type": "corridor",
+    "count": 1
+   }
+  ],
+  "adjacency": [
+   [
+    "waiting",
+    "corridor"
+   ],
+   [
+    "exam_room",
+    "corridor"
+   ],
+   [
+    "toilet",
+    "corridor"
+   ]
+  ]
+ },
+ "ward-wing": {
+  "building_type": "hospital ward wing",
+  "rooms": [
+   {
+    "type": "patient_room",
+    "count": 5
+   },
+   {
+    "type": "nurse_station",
+    "count": 1
+   },
+   {
+    "type": "storage",
+    "count": 1
+   },
+   {
+    "type": "corridor",
+    "count": 1
+   }
+  ],
+  "adjacency": [
+   [
+    "patient_room",
+    "corridor"
+   ],
+   [
+    "nurse_station",
+    "corridor"
+   ]
+  ]
+ },
+ "health-center-large": {
+  "building_type": "large community health center",
+  "rooms": [
+   {
+    "type": "waiting",
+    "count": 1,
+    "approx_area_ft2": 650
+   },
+   {
+    "type": "exam_room",
+    "count": 4,
+    "approx_area_ft2": 170
+   },
+   {
+    "type": "patient_room",
+    "count": 3,
+    "approx_area_ft2": 215
+   },
+   {
+    "type": "nurse_station",
+    "count": 1,
+    "approx_area_ft2": 150
+   },
+   {
+    "type": "office",
+    "count": 2,
+    "approx_area_ft2": 130
+   },
+   {
+    "type": "toilet",
+    "count": 2,
+    "approx_area_ft2": 65
+   },
+   {
+    "type": "storage",
+    "count": 1,
+    "approx_area_ft2": 85
+   },
+   {
+    "type": "corridor",
+    "count": 1
+   }
+  ],
+  "adjacency": [
+   [
+    "waiting",
+    "corridor"
+   ],
+   [
+    "exam_room",
+    "corridor"
+   ],
+   [
+    "patient_room",
+    "corridor"
+   ],
+   [
+    "nurse_station",
+    "corridor"
+   ],
+   [
+    "toilet",
+    "corridor"
+   ]
+  ]
+ },
+ "hospital-floor": {
+  "building_type": "hospital outpatient department floor with two wings",
+  "rooms": [
+   {
+    "type": "waiting",
+    "count": 2,
+    "approx_area_ft2": 430
+   },
+   {
+    "type": "exam_room",
+    "count": 6,
+    "approx_area_ft2": 170
+   },
+   {
+    "type": "patient_room",
+    "count": 6,
+    "approx_area_ft2": 215
+   },
+   {
+    "type": "nurse_station",
+    "count": 2,
+    "approx_area_ft2": 150
+   },
+   {
+    "type": "office",
+    "count": 3,
+    "approx_area_ft2": 130
+   },
+   {
+    "type": "toilet",
+    "count": 3,
+    "approx_area_ft2": 65
+   },
+   {
+    "type": "storage",
+    "count": 2,
+    "approx_area_ft2": 85
+   },
+   {
+    "type": "corridor",
+    "count": 2
+   }
+  ],
+  "adjacency": [
+   [
+    "waiting",
+    "corridor"
+   ],
+   [
+    "exam_room",
+    "corridor"
+   ],
+   [
+    "patient_room",
+    "corridor"
+   ],
+   [
+    "nurse_station",
+    "corridor"
+   ],
+   [
+    "toilet",
+    "corridor"
+   ]
+  ]
+ },
+ "outpatient-dept": {
+  "building_type": "large hospital outpatient department",
+  "rooms": [
+   {
+    "type": "exam_room",
+    "count": 6,
+    "approx_area_ft2": 195
+   },
+   {
+    "type": "waiting",
+    "count": 3,
+    "approx_area_ft2": 430
+   },
+   {
+    "type": "nurse_station",
+    "count": 2,
+    "approx_area_ft2": 270
+   },
+   {
+    "type": "office",
+    "count": 1,
+    "approx_area_ft2": 150
+   },
+   {
+    "type": "storage",
+    "count": 1,
+    "approx_area_ft2": 130
+   },
+   {
+    "type": "corridor",
+    "count": 2
+   },
+   {
+    "type": "toilet",
+    "count": 3,
+    "approx_area_ft2": 65
+   }
+  ],
+  "adjacency": [
+   [
+    "waiting",
+    "corridor"
+   ],
+   [
+    "exam_room",
+    "corridor"
+   ],
+   [
+    "nurse_station",
+    "corridor"
+   ],
+   [
+    "nurse_station",
+    "exam_room"
+   ],
+   [
+    "toilet",
+    "corridor"
+   ]
+  ]
+ },
+ "inpatient-ward": {
+  "building_type": "24-bed acute inpatient ward floor (NHS HBN 04-01)",
+  "rooms": [
+   {
+    "type": "patient_room",
+    "count": 12,
+    "approx_area_ft2": 130
+   },
+   {
+    "type": "toilet",
+    "count": 8,
+    "approx_area_ft2": 55
+   },
+   {
+    "type": "waiting",
+    "count": 1,
+    "approx_area_ft2": 195
+   },
+   {
+    "type": "nurse_station",
+    "count": 3,
+    "approx_area_ft2": 320
+   },
+   {
+    "type": "exam_room",
+    "count": 2,
+    "approx_area_ft2": 185
+   },
+   {
+    "type": "storage",
+    "count": 3,
+    "approx_area_ft2": 215
+   },
+   {
+    "type": "corridor",
+    "count": 2
+   },
+   {
+    "type": "office",
+    "count": 2,
+    "approx_area_ft2": 185
+   }
+  ],
+  "adjacency": [
+   [
+    "patient_room",
+    "corridor"
+   ],
+   [
+    "nurse_station",
+    "corridor"
+   ],
+   [
+    "nurse_station",
+    "exam_room"
+   ],
+   [
+    "nurse_station",
+    "storage"
+   ],
+   [
+    "waiting",
+    "corridor"
+   ],
+   [
+    "office",
+    "corridor"
+   ]
+  ]
+ },
+ "clinic-mixed": {
+  "building_type": "outpatient clinic",
+  "rooms": [
+   {
+    "type": "waiting",
+    "count": 1,
+    "approx_area_ft2": 300
+   },
+   {
+    "type": "exam_room",
+    "count": 2,
+    "approx_area_ft2": 150
+   },
+   {
+    "type": "office",
+    "count": 2,
+    "approx_area_ft2": 120
+   },
+   {
+    "type": "toilet",
+    "count": 2,
+    "approx_area_ft2": 60
+   },
+   {
+    "type": "corridor",
+    "count": 1
+   }
+  ],
+  "adjacency": [
+   [
+    "waiting",
+    "corridor"
+   ],
+   [
+    "exam_room",
+    "corridor"
+   ],
+   [
+    "office",
+    "corridor"
+   ]
+  ]
+ },
+ "hospital-tower-floor": {
+  "building_type": "very large hospital inpatient tower floor, multiple wings around a central core (~80 rooms)",
+  "rooms": [
+   {
+    "type": "patient_room",
+    "count": 40,
+    "approx_area_ft2": 170
+   },
+   {
+    "type": "toilet",
+    "count": 16,
+    "approx_area_ft2": 45
+   },
+   {
+    "type": "exam_room",
+    "count": 6,
+    "approx_area_ft2": 195
+   },
+   {
+    "type": "office",
+    "count": 6,
+    "approx_area_ft2": 130
+   },
+   {
+    "type": "nurse_station",
+    "count": 4,
+    "approx_area_ft2": 260
+   },
+   {
+    "type": "storage",
+    "count": 4,
+    "approx_area_ft2": 110
+   },
+   {
+    "type": "corridor",
+    "count": 4
+   },
+   {
+    "type": "waiting",
+    "count": 2,
+    "approx_area_ft2": 320
+   }
+  ],
+  "adjacency": [
+   [
+    "patient_room",
+    "corridor"
+   ],
+   [
+    "toilet",
+    "patient_room"
+   ],
+   [
+    "nurse_station",
+    "corridor"
+   ],
+   [
+    "exam_room",
+    "corridor"
+   ],
+   [
+    "office",
+    "corridor"
+   ],
+   [
+    "storage",
+    "corridor"
+   ],
+   [
+    "waiting",
+    "corridor"
+   ]
+  ]
+ }
 }
