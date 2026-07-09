@@ -2,8 +2,9 @@
 
 import * as React from "react";
 import dynamic from "next/dynamic";
-import { Box, Eye, Grid2x2, Maximize, Minus, Plus, Square, StopCircle } from "lucide-react";
+import { Box, Eye, Grid2x2, Maximize, Minus, Plus, Square } from "lucide-react";
 
+import { RunLogDrawer } from "@/components/run-log-drawer";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
 import { Viewport2D, type Viewport2DHandle } from "@/components/viewport-2d";
@@ -165,22 +166,8 @@ export function Viewport({ studio }: { studio: Studio }) {
         </div>
       ) : null}
 
-      {/* generation chip */}
-      {busy ? (
-        <div className="absolute bottom-6 left-1/2 z-40 flex -translate-x-1/2 items-center gap-3 rounded-xl border border-border bg-card/90 px-3 py-2 shadow-[0_12px_32px_rgba(16,24,40,0.10)] backdrop-blur-md">
-          <span className="size-2 shrink-0 animate-pulse rounded-full bg-primary" aria-hidden />
-          <p className="max-w-[360px] truncate text-[12px] text-foreground">{studio.phaseText || "Working…"}</p>
-          <span className="shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground">{studio.elapsed}s</span>
-          <Button
-            size="sm"
-            variant="destructive"
-            className="h-7 shrink-0 gap-1.5 px-2.5 text-[11px] font-medium"
-            onClick={() => void studio.stopGeneration()}
-          >
-            <StopCircle className="size-3.5" /> Stop
-          </Button>
-        </div>
-      ) : null}
+      {/* generation ticker + live per-attempt run-log drawer */}
+      <RunLogDrawer studio={studio} />
     </div>
   );
 }

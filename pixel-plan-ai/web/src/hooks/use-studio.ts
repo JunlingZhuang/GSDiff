@@ -72,6 +72,10 @@ export function useStudio() {
   const [livePlan, setLivePlan] = React.useState<Plan | null>(null);
   const [liveValidation, setLiveValidation] = React.useState<Validation | null>(null);
   const [iterations, setIterations] = React.useState<GenerationIteration[]>([]);
+  // Per-attempt checkpoints polled during a run, surfaced live in the run-log
+  // drawer. Kept after completion (the LOG tab still reads result.iterations).
+  const [liveIterations, setLiveIterations] = React.useState<GenerationIteration[]>([]);
+  const [runLogOpen, setRunLogOpen] = React.useState(false);
   const [code, setCode] = React.useState("");
   const [codeSource, setCodeSource] = React.useState("—");
   const [revision, setRevision] = React.useState("");
@@ -231,7 +235,10 @@ export function useStudio() {
         if (signal.aborted || isFinished()) return;
         try {
           const progress = await fetchProgress(requestId, signal);
-          if (progress.iterations.length) setIterations(progress.iterations);
+          if (progress.iterations.length) {
+            setIterations(progress.iterations);
+            setLiveIterations(progress.iterations);
+          }
           const latest = progress.iterations[progress.iterations.length - 1];
           if (latest) {
             const score =
@@ -295,6 +302,9 @@ export function useStudio() {
       if (referenceImage) setReference({ image: referenceImage, index: selectedCandidate });
       setBusyAction(action);
       setShowReference(false);
+      // A fresh run clears the live log and collapses the drawer to its default.
+      setLiveIterations([]);
+      setRunLogOpen(false);
       setPhaseText(
         isRefinement
           ? "Executing the seed translation, then repairing only if validation fails"
@@ -317,6 +327,7 @@ export function useStudio() {
         error: false,
       });
       let finished = false;
+      let finalIterations: GenerationIteration[] | null = null;
       const progressTask =
         action === "run" || action === "inspect"
           ? Promise.resolve()
@@ -340,6 +351,7 @@ export function useStudio() {
         setLivePlan(null);
         setLiveValidation(null);
         setIterations(payload.iterations);
+        finalIterations = payload.iterations;
         setCode(payload.code);
         setCodeSource(payload.model ? `${payload.source} · ${payload.model}` : payload.source);
         const seconds = ((performance.now() - startedAt) / 1000).toFixed(1);
@@ -360,6 +372,9 @@ export function useStudio() {
         finished = true;
         await progressTask;
         if (requestIdRef.current === requestId) {
+          // Reconcile after any in-flight poll settles so the final authoritative
+          // set (no lingering "generating" placeholder) drives the drawer.
+          if (finalIterations) setLiveIterations(finalIterations);
           abortRef.current = null;
           requestIdRef.current = null;
           setBusyAction(null);
@@ -510,6 +525,9 @@ export function useStudio() {
     activePlan,
     activeValidation,
     iterations,
+    liveIterations,
+    runLogOpen,
+    setRunLogOpen,
     code,
     setCode,
     codeSource,
