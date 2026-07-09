@@ -306,8 +306,9 @@ function drawPlanBody(
   });
 
   // 5. Walls — merged region-transition segments carried by the scene, drawn as
-  //    double lines (hollow poché) so they read like real drafting. The backdrop
-  //    band carves the hollow through the room fills laid down in step 4.
+  //    double lines (hollow poché) via a two-pass boolean: union of ink bands
+  //    minus union of backdrop cores. Junctions fuse into one merged outline,
+  //    and the hollow cores also carve through the room fills from step 4.
   const align = (v: number): number => Math.round(v) + 0.5;
   const extBand = wallBand("exterior", scale);
   const intBand = wallBand("interior", scale);
@@ -363,8 +364,7 @@ function drawPlanBody(
 
 interface WallBand {
   total: number; // full band thickness (outer edge to outer edge), CSS px
-  line: number; // each ink line's stroke width, CSS px
-  offset: number; // centreline → each ink line's centre, CSS px
+  line: number; // each ink line's width, CSS px
   half: number; // total / 2 — the junction extension along the segment axis
 }
 
@@ -376,13 +376,22 @@ function wallBand(kind: "exterior" | "interior", cellPx: number): WallBand | nul
   const total = Math.min(WALL_TOTAL[kind], cellPx * 0.6);
   // Keep both lines inside the (possibly capped) band with a visible gap.
   const line = Math.max(0.75, Math.min(WALL_LINE[kind], (total - 0.5) / 2));
-  return { total, line, offset: (total - line) / 2, half: total / 2 };
+  return { total, line, half: total / 2 };
 }
 
-// Walls as hollow double lines: a backdrop band carves the gap through the room
-// fill, then two ink lines ride its edges. Endpoints extend by half the band
-// thickness so L/T junctions close into continuous wall mass. ALL bands are
-// stroked before ANY line, so a band never erases a neighbouring wall's ink.
+// Walls as hollow double lines via a two-pass painter boolean:
+//   PASS 1 (ink)    — every wall fills its FULL band rect (segment length
+//                     extended by halfThickness at both ends) with wall ink.
+//   PASS 2 (hollow) — every wall fills the same rect inset by its line width
+//                     on ALL sides with the backdrop color.
+// The union of hollows is carved out of the union of ink, so what survives is
+// the merged outline of the whole wall network: L/T junctions fuse with zero
+// crossing lines (a hollow may legitimately open a neighbour's inner line to
+// connect cavities), collinear splits stay seamless (inset ends still overlap
+// because half > line), and every free wall end comes out capped with a
+// line-width ink face. Per-segment parallel strokes cannot do this — their
+// ink lines cross other walls' gaps at junctions, reading as stacked
+// double-lines (the defect this replaces).
 function drawDoubleWalls(
   context: CanvasRenderingContext2D,
   walls: SceneWall[],
@@ -390,52 +399,46 @@ function drawDoubleWalls(
   bands: { exterior: WallBand; interior: WallBand },
   align: (v: number) => number,
 ): void {
-  const bandPaths = { exterior: new Path2D(), interior: new Path2D() };
-  const linePaths = { exterior: new Path2D(), interior: new Path2D() };
+  const inkPaths = { exterior: new Path2D(), interior: new Path2D() };
+  const hollow = new Path2D();
 
   for (const wall of walls) {
     const band = bands[wall.kind];
-    const bandPath = bandPaths[wall.kind];
-    const linePath = linePaths[wall.kind];
+    const ink = inkPaths[wall.kind];
     const horizontal = wall.y1 === wall.y2;
     if (horizontal) {
       const y = align(wall.y1 * scale);
       const xa = Math.min(wall.x1, wall.x2) * scale - band.half;
       const xb = Math.max(wall.x1, wall.x2) * scale + band.half;
-      bandPath.moveTo(xa, y);
-      bandPath.lineTo(xb, y);
-      linePath.moveTo(xa, y - band.offset);
-      linePath.lineTo(xb, y - band.offset);
-      linePath.moveTo(xa, y + band.offset);
-      linePath.lineTo(xb, y + band.offset);
+      ink.rect(xa, y - band.half, xb - xa, band.total);
+      hollow.rect(
+        xa + band.line,
+        y - band.half + band.line,
+        xb - xa - 2 * band.line,
+        band.total - 2 * band.line,
+      );
     } else {
       const x = align(wall.x1 * scale);
       const ya = Math.min(wall.y1, wall.y2) * scale - band.half;
       const yb = Math.max(wall.y1, wall.y2) * scale + band.half;
-      bandPath.moveTo(x, ya);
-      bandPath.lineTo(x, yb);
-      linePath.moveTo(x - band.offset, ya);
-      linePath.lineTo(x - band.offset, yb);
-      linePath.moveTo(x + band.offset, ya);
-      linePath.lineTo(x + band.offset, yb);
+      ink.rect(x - band.half, ya, band.total, yb - ya);
+      hollow.rect(
+        x - band.half + band.line,
+        ya + band.line,
+        band.total - 2 * band.line,
+        yb - ya - 2 * band.line,
+      );
     }
   }
 
-  context.lineCap = "butt";
-  context.lineJoin = "miter";
-  // Pass 1 — backdrop bands (all before any line).
-  context.strokeStyle = BACKDROP;
-  context.lineWidth = bands.interior.total;
-  context.stroke(bandPaths.interior);
-  context.lineWidth = bands.exterior.total;
-  context.stroke(bandPaths.exterior);
-  // Pass 2 — the two ink lines on each band's edges.
-  context.strokeStyle = WALL_INTERIOR;
-  context.lineWidth = bands.interior.line;
-  context.stroke(linePaths.interior);
-  context.strokeStyle = WALL_EXTERIOR;
-  context.lineWidth = bands.exterior.line;
-  context.stroke(linePaths.exterior);
+  // ALL ink first, THEN all hollows — the boolean only works in this order.
+  // (Each kind is one fill call, so overlaps within a kind never stack alpha.)
+  context.fillStyle = WALL_INTERIOR;
+  context.fill(inkPaths.interior);
+  context.fillStyle = WALL_EXTERIOR;
+  context.fill(inkPaths.exterior);
+  context.fillStyle = BACKDROP;
+  context.fill(hollow);
 }
 
 function drawDoor(
