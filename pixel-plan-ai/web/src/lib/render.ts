@@ -1,4 +1,5 @@
-import type { Door, Plan } from "./types";
+import type { Plan } from "./types";
+import type { Scene, SceneDoor } from "./scene";
 
 // CAD-grade 2D plan renderer. The plan reads as an architectural linework
 // drawing inked on cool drafting paper: a merged footprint silhouette,
@@ -25,7 +26,6 @@ const DOOR_GREEN = "#0E9F6E";
 const LABEL_NAME = `rgba(${INK},0.88)`;
 const LABEL_AREA = "rgba(102,112,133,0.9)";
 
-const OUTSIDE = -2;
 const UNASSIGNED = -1;
 
 interface RenderOptions {
@@ -167,43 +167,12 @@ export function renderEmptyGrid(
   drawBlueprint(context, cols, rows, cellPx);
 }
 
-// Largest inscribed axis-aligned rectangle of a room's cells, in cell coords.
-// Runs a histogram maximal-rectangle sweep restricted to the room's bounds.
-function largestInnerRect(
-  cells: number[],
-  planWidth: number,
-  roomIndex: number,
-  bounds: { x: number; y: number; width: number; height: number },
-): { x: number; y: number; w: number; h: number } | null {
-  const bw = bounds.width;
-  const bh = bounds.height;
-  if (bw <= 0 || bh <= 0) return null;
-  const heights = new Array<number>(bw).fill(0);
-  let best = { area: 0, x: 0, y: 0, w: 0, h: 0 };
-  for (let r = 0; r < bh; r += 1) {
-    for (let c = 0; c < bw; c += 1) {
-      const occupied = cells[(bounds.y + r) * planWidth + (bounds.x + c)] === roomIndex;
-      heights[c] = occupied ? heights[c] + 1 : 0;
-    }
-    const stack: number[] = [];
-    for (let c = 0; c <= bw; c += 1) {
-      const cur = c === bw ? 0 : heights[c];
-      while (stack.length && heights[stack[stack.length - 1]] > cur) {
-        const height = heights[stack.pop() as number];
-        const left = stack.length ? stack[stack.length - 1] + 1 : 0;
-        const width = c - left;
-        const area = height * width;
-        if (area > best.area) {
-          best = { area, x: bounds.x + left, y: bounds.y + (r - height + 1), w: width, h: height };
-        }
-      }
-      stack.push(c);
-    }
-  }
-  return best.area > 0 ? best : null;
-}
-
-export function renderPlanToCanvas(canvas: HTMLCanvasElement, plan: Plan, options: RenderOptions): void {
+export function renderPlanToCanvas(
+  canvas: HTMLCanvasElement,
+  plan: Plan,
+  scene: Scene,
+  options: RenderOptions,
+): void {
   const { cellPx, dpr, hoveredRoomIndex = -1, preview = false } = options;
   // `cellPx` is the effective px/cell (fitBaseCellPx × zoom); every coordinate
   // below derives from it at draw time, so zooming re-rasterizes rather than
@@ -211,7 +180,21 @@ export function renderPlanToCanvas(canvas: HTMLCanvasElement, plan: Plan, option
   const scale = cellPx;
   const context = prepareCanvas(canvas, plan.width * cellPx, plan.height * cellPx, dpr);
   drawBlueprint(context, plan.width, plan.height, scale);
+  drawPlanBody(context, plan, scene, scale, { hoveredRoomIndex, preview });
+}
 
+// Everything above the blueprint grid: footprint silhouette + hatch, room fills
+// with inner accents, walls, doors, and labels. All geometry is read from the
+// retained scene; only per-cell fills (footprint + room bodies) are rebuilt at
+// draw time because they depend on the effective scale. Kept as a standalone
+// pass so it can be composited onto its own layer without redrawing the grid.
+function drawPlanBody(
+  context: CanvasRenderingContext2D,
+  plan: Plan,
+  scene: Scene,
+  scale: number,
+  { hoveredRoomIndex = -1, preview = false }: { hoveredRoomIndex?: number; preview?: boolean },
+): void {
   const W = plan.width;
   const H = plan.height;
   const hasFootprint = Array.isArray(plan.footprint) && plan.footprint.length === W * H;
@@ -221,17 +204,6 @@ export function renderPlanToCanvas(canvas: HTMLCanvasElement, plan: Plan, option
     if (x < 0 || y < 0 || x >= W || y >= H) return UNASSIGNED;
     const v = plan.cells[y * W + x];
     return v === undefined || v < 0 ? UNASSIGNED : v;
-  };
-
-  // Region id used for wall classification: a specific room, an unassigned but
-  // in-footprint cell, or OUTSIDE (past the building envelope / off-grid).
-  const regionAt = (x: number, y: number): number => {
-    if (x < 0 || y < 0 || x >= W || y >= H) return OUTSIDE;
-    const off = y * W + x;
-    const v = plan.cells[off];
-    if (v !== undefined && v >= 0) return v;
-    const inside = hasFootprint ? !!plan.footprint[off] : false;
-    return inside ? UNASSIGNED : OUTSIDE;
   };
 
   context.save();
@@ -274,32 +246,23 @@ export function renderPlanToCanvas(canvas: HTMLCanvasElement, plan: Plan, option
   }
 
   // 4. Room fills at low alpha + a full-strength inner accent hugging the walls.
-  plan.rooms.forEach((room, roomIndex) => {
+  //    Fill bodies are rebuilt from the cell grid; the accent outline comes from
+  //    the scene's per-room boundary edge scan.
+  scene.rooms.forEach((room) => {
     const bounds = room.bounds;
+    const roomIndex = room.index;
     const hovered = roomIndex === hoveredRoomIndex;
     const fillPath = new Path2D();
-    const boundaryPath = new Path2D();
     for (let y = bounds.y; y < bounds.y + bounds.height; y += 1) {
       for (let x = bounds.x; x < bounds.x + bounds.width; x += 1) {
         if (cellRoom(x, y) !== roomIndex) continue;
         fillPath.rect(x * scale, y * scale, scale, scale);
-        if (cellRoom(x - 1, y) !== roomIndex) {
-          boundaryPath.moveTo(x * scale, y * scale);
-          boundaryPath.lineTo(x * scale, (y + 1) * scale);
-        }
-        if (cellRoom(x + 1, y) !== roomIndex) {
-          boundaryPath.moveTo((x + 1) * scale, y * scale);
-          boundaryPath.lineTo((x + 1) * scale, (y + 1) * scale);
-        }
-        if (cellRoom(x, y - 1) !== roomIndex) {
-          boundaryPath.moveTo(x * scale, y * scale);
-          boundaryPath.lineTo((x + 1) * scale, y * scale);
-        }
-        if (cellRoom(x, y + 1) !== roomIndex) {
-          boundaryPath.moveTo(x * scale, (y + 1) * scale);
-          boundaryPath.lineTo((x + 1) * scale, (y + 1) * scale);
-        }
       }
+    }
+    const boundaryPath = new Path2D();
+    for (const seg of room.boundary) {
+      boundaryPath.moveTo(seg.x1 * scale, seg.y1 * scale);
+      boundaryPath.lineTo(seg.x2 * scale, seg.y2 * scale);
     }
     const fillAlpha = hovered ? 0.32 : isCirculation(room.type) ? 0.12 : 0.22;
     context.fillStyle = withAlpha(room.color, fillAlpha);
@@ -316,32 +279,14 @@ export function renderPlanToCanvas(canvas: HTMLCanvasElement, plan: Plan, option
     context.restore();
   });
 
-  // 5. Walls — traced from every region transition on the cell grid.
+  // 5. Walls — merged region-transition segments carried by the scene.
   const align = (v: number): number => Math.round(v) + 0.5;
   const interiorPath = new Path2D();
   const exteriorPath = new Path2D();
-  const addEdge = (exterior: boolean, x0: number, y0: number, x1: number, y1: number): void => {
-    const path = exterior ? exteriorPath : interiorPath;
-    path.moveTo(align(x0), align(y0));
-    path.lineTo(align(x1), align(y1));
-  };
-  // Vertical edges: boundary between (x-1,y) and (x,y).
-  for (let y = 0; y < H; y += 1) {
-    for (let x = 0; x <= W; x += 1) {
-      const a = regionAt(x - 1, y);
-      const b = regionAt(x, y);
-      if (a === b) continue;
-      addEdge(a === OUTSIDE || b === OUTSIDE, x * scale, y * scale, x * scale, (y + 1) * scale);
-    }
-  }
-  // Horizontal edges: boundary between (x,y-1) and (x,y).
-  for (let y = 0; y <= H; y += 1) {
-    for (let x = 0; x < W; x += 1) {
-      const a = regionAt(x, y - 1);
-      const b = regionAt(x, y);
-      if (a === b) continue;
-      addEdge(a === OUTSIDE || b === OUTSIDE, x * scale, y * scale, (x + 1) * scale, y * scale);
-    }
+  for (const wall of scene.walls) {
+    const path = wall.kind === "exterior" ? exteriorPath : interiorPath;
+    path.moveTo(align(wall.x1 * scale), align(wall.y1 * scale));
+    path.lineTo(align(wall.x2 * scale), align(wall.y2 * scale));
   }
   context.lineCap = "butt";
   context.lineJoin = "miter";
@@ -353,25 +298,19 @@ export function renderPlanToCanvas(canvas: HTMLCanvasElement, plan: Plan, option
   context.stroke(exteriorPath);
 
   // 6. Doors — carve an opening, then draw the swing arc + leaf.
-  plan.doors.forEach((door) => drawDoor(context, door, scale));
+  scene.doors.forEach((door) => drawDoor(context, door, scale));
 
   // 7. Labels — two-line lockup in each room's largest inscribed rectangle.
   const { sans, mono } = fontFamilies();
   context.textAlign = "center";
   context.textBaseline = "middle";
-  plan.rooms.forEach((room, roomIndex) => {
-    const rect = largestInnerRect(plan.cells, W, roomIndex, room.bounds) ?? {
-      x: room.bounds.x,
-      y: room.bounds.y,
-      w: room.bounds.width,
-      h: room.bounds.height,
-    };
+  scene.rooms.forEach((room) => {
+    const rect = room.largestRect;
     if (rect.w * scale < 64 || rect.h * scale < 28) return;
     // Snap the label anchor to whole CSS pixels so the two-line lockup lands on
     // a device-pixel-consistent baseline (crisp at dpr ≥ 1).
-    const cx = Math.round((rect.x + rect.w / 2) * scale);
-    const cy = Math.round((rect.y + rect.h / 2) * scale);
-    const areaFt2 = Math.round(room.pixel_count * plan.meters_per_cell * plan.meters_per_cell * 10.7639);
+    const cx = Math.round(room.labelAnchor.x * scale);
+    const cy = Math.round(room.labelAnchor.y * scale);
 
     context.font = `500 11px ${sans}`;
     context.fillStyle = LABEL_NAME;
@@ -379,17 +318,17 @@ export function renderPlanToCanvas(canvas: HTMLCanvasElement, plan: Plan, option
 
     context.font = `500 9.5px ${mono}`;
     context.fillStyle = LABEL_AREA;
-    context.fillText(`${areaFt2} ft²`, cx, cy + 6);
+    context.fillText(`${room.areaFt2} ft²`, cx, cy + 6);
   });
 
   context.restore();
 }
 
-function drawDoor(context: CanvasRenderingContext2D, door: Door, scale: number): void {
-  const span = door.width_cells * scale;
-  const x0 = door.x * scale;
-  const y0 = door.y * scale;
-  const horizontal = door.orientation === "horizontal";
+function drawDoor(context: CanvasRenderingContext2D, sceneDoor: SceneDoor, scale: number): void {
+  const span = sceneDoor.span * scale;
+  const x0 = sceneDoor.hinge.x * scale;
+  const y0 = sceneDoor.hinge.y * scale;
+  const horizontal = sceneDoor.horizontal;
   const base = context.globalAlpha;
 
   context.save();
@@ -405,17 +344,10 @@ function drawDoor(context: CanvasRenderingContext2D, door: Door, scale: number):
   context.stroke();
 
   // Closed leaf points along the wall; open leaf swings perpendicular.
-  let closedAngle: number;
-  let openAngle: number;
-  if (horizontal) {
-    closedAngle = 0;
-    openAngle = door.swing_side === "south" ? Math.PI / 2 : -Math.PI / 2;
-  } else {
-    closedAngle = Math.PI / 2;
-    openAngle = door.swing_side === "west" ? Math.PI : 0;
-  }
+  const closedAngle = sceneDoor.closedAngle;
+  const openAngle = sceneDoor.openAngle;
 
-  const entrance = door.to_room === null;
+  const entrance = sceneDoor.isEntrance;
   context.strokeStyle = entrance ? DOOR_GREEN : DOOR_BLUE;
   context.globalAlpha = base * 0.9;
   context.lineWidth = 1.25;

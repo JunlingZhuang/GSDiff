@@ -3,6 +3,7 @@
 import * as React from "react";
 
 import { cellScale, planCellScale, renderEmptyGrid, renderPlanToCanvas } from "@/lib/render";
+import { buildScene } from "@/lib/scene";
 import type { CandidateImage, Plan, PlanRoom } from "@/lib/types";
 import { candidateDataUrl, prettyType } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -91,6 +92,10 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
     return { cols, rows, scale };
   }, [plan]);
 
+  // Retained scene graph — the single geometry source of truth for both the
+  // renderer and hit testing. Computed once per plan, reused across zoom/pan.
+  const scene = React.useMemo(() => (plan ? buildScene(plan) : null), [plan]);
+
   // Effective px/cell and the plan's display box at the current zoom. Derived in
   // render so the wrapper and the canvas backing store size stay in lock-step.
   const cellPx = view.base * view.zoom;
@@ -108,12 +113,12 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
     // Backing-store guard: shrink dpr (not the CSS size) past the area cap.
     const capScale = Math.min(1, MAX_BACKING_PX / (contentW * dpr), MAX_BACKING_PX / (contentH * dpr));
     const effectiveDpr = dpr * capScale;
-    if (plan) {
-      renderPlanToCanvas(canvas, plan, { cellPx: effectiveCellPx, dpr: effectiveDpr, hoveredRoomIndex, preview });
+    if (plan && scene) {
+      renderPlanToCanvas(canvas, plan, scene, { cellPx: effectiveCellPx, dpr: effectiveDpr, hoveredRoomIndex, preview });
     } else {
       renderEmptyGrid(canvas, dims.cols, dims.rows, { cellPx: effectiveCellPx, dpr: effectiveDpr });
     }
-  }, [plan, dims.cols, dims.rows, hoveredRoomIndex, preview, dpr]);
+  }, [plan, scene, dims.cols, dims.rows, hoveredRoomIndex, preview, dpr]);
 
   const fit = React.useCallback(() => {
     const container = containerRef.current;
