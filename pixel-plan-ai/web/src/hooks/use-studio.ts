@@ -85,6 +85,10 @@ export function useStudio() {
   const [showReference, setShowReference] = React.useState(false);
   const [referenceOpacity, setReferenceOpacity] = React.useState(55);
 
+  // 2D viewport selection (room id), surfaced to the inspector. Cleared whenever
+  // the active plan is replaced so a stale id never highlights a different room.
+  const [selectedRoomId, setSelectedRoomId] = React.useState<string | null>(null);
+
   const abortRef = React.useRef<AbortController | null>(null);
   const requestIdRef = React.useRef<string | null>(null);
 
@@ -169,6 +173,15 @@ export function useStudio() {
   const activeValidation = liveValidation ?? result?.validation ?? null;
   // Raw trace preview is on screen only while nothing validated has replaced it.
   const showingTracePreview = !livePlan && !result && !!tracePreviewPlan;
+
+  // Drop any selection when the plan on the canvas is swapped out. Reset during
+  // render (React's "adjust state on prop change" pattern) rather than in an
+  // effect, so a stale highlight never paints for a frame.
+  const prevPlanRef = React.useRef<Plan | null>(null);
+  if (prevPlanRef.current !== activePlan) {
+    prevPlanRef.current = activePlan;
+    if (selectedRoomId !== null) setSelectedRoomId(null);
+  }
 
   const seed = React.useMemo<SeedPlan | null>(() => {
     if (!seedText.trim()) return null;
@@ -514,6 +527,8 @@ export function useStudio() {
     setShowReference,
     referenceOpacity,
     setReferenceOpacity,
+    selectedRoomId,
+    setSelectedRoomId,
   };
 }
 

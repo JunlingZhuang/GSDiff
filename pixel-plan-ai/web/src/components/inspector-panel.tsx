@@ -9,6 +9,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import type { Studio } from "@/hooks/use-studio";
+import { roomDisplayName } from "@/lib/render";
 import type { GenerationIteration } from "@/lib/types";
 import { prettyType } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -78,6 +79,16 @@ export function InspectorPanel({ studio }: { studio: Studio }) {
   const passedChecks = validation?.checks.filter((check) => check.pass) ?? [];
   const needsRevision = studio.result?.accepted === false;
 
+  const selectedRoom = React.useMemo(() => {
+    if (!plan || !studio.selectedRoomId) return null;
+    const room = plan.rooms.find((item) => item.id === studio.selectedRoomId);
+    if (!room) return null;
+    return {
+      room,
+      areaFt2: Math.round(room.pixel_count * plan.meters_per_cell * plan.meters_per_cell * 10.7639),
+    };
+  }, [plan, studio.selectedRoomId]);
+
   return (
     <Tabs defaultValue="inspect" className="flex h-full min-h-0 flex-col gap-0">
       <div className="border-b border-border p-2">
@@ -100,6 +111,27 @@ export function InspectorPanel({ studio }: { studio: Studio }) {
       <TabsContent value="inspect" className="mt-0 min-h-0 flex-1">
         <ScrollArea className="h-full">
           <div className="flex flex-col gap-4 p-3">
+            {selectedRoom ? (
+              <div className="flex items-center gap-2 rounded-lg border border-primary/40 bg-primary/5 px-2.5 py-2">
+                <span
+                  className="size-3 shrink-0 rounded-[3px] border border-black/20"
+                  style={{ background: selectedRoom.room.color }}
+                  aria-hidden
+                />
+                <div className="flex min-w-0 flex-1 flex-col">
+                  <span className="truncate text-[12px] font-medium text-foreground">
+                    {roomDisplayName(selectedRoom.room.id)}
+                  </span>
+                  <span className="truncate text-[11px] capitalize text-muted-foreground">
+                    {prettyType(selectedRoom.room.type)}
+                  </span>
+                </div>
+                <span className="shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground">
+                  {selectedRoom.areaFt2} ft²
+                </span>
+              </div>
+            ) : null}
+
             {validation ? (
               <div className="flex flex-col gap-2 rounded-lg border border-border bg-secondary/30 p-3">
                 <div className="flex items-center justify-between">

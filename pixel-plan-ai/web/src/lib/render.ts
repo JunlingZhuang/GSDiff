@@ -112,6 +112,12 @@ function titleCase(id: string): string {
     .join(" ");
 }
 
+// Human-readable room label (e.g. "exam_room_1" → "Exam Room 1"), shared by the
+// canvas labels and the interaction read-outs.
+export function roomDisplayName(id: string): string {
+  return titleCase(id);
+}
+
 function prepareCanvas(
   canvas: HTMLCanvasElement,
   cssWidth: number,

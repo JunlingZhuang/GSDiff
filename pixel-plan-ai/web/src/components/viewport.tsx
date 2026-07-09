@@ -26,6 +26,7 @@ export function Viewport({ studio }: { studio: Studio }) {
   const viewportRef = React.useRef<Viewport2DHandle>(null);
   const [zoomPercent, setZoomPercent] = React.useState(100);
   const [hoverCell, setHoverCell] = React.useState<{ x: number; y: number } | null>(null);
+  const [hoverEntity, setHoverEntity] = React.useState<string | null>(null);
   const plan = studio.activePlan;
   const busy = !!studio.busyAction;
   const is2d = studio.viewport === "2d";
@@ -45,6 +46,7 @@ export function Viewport({ studio }: { studio: Studio }) {
 
   const handleViewChange = React.useCallback((zoom: number) => setZoomPercent(Math.round(zoom * 100)), []);
   const handleHoverCell = React.useCallback((cell: { x: number; y: number } | null) => setHoverCell(cell), []);
+  const handleHoverEntity = React.useCallback((label: string | null) => setHoverEntity(label), []);
 
   const ftPerCell = plan ? (plan.meters_per_cell * 3.28084).toFixed(2) : null;
 
@@ -64,8 +66,11 @@ export function Viewport({ studio }: { studio: Studio }) {
           referenceOpacity={studio.referenceOpacity}
           preview={busy}
           rightPanelOpen={!!plan}
+          selectedRoomId={studio.selectedRoomId}
           onViewChange={handleViewChange}
           onHoverCell={handleHoverCell}
+          onHoverEntity={handleHoverEntity}
+          onSelectRoom={studio.setSelectedRoomId}
         />
       )}
 
@@ -140,7 +145,7 @@ export function Viewport({ studio }: { studio: Studio }) {
       {is2d && plan ? (
         <div className={cn("absolute bottom-3 z-30 rounded-lg border border-border bg-card/90 px-2.5 py-1.5 font-mono text-[11px] tabular-nums text-muted-foreground shadow-lg backdrop-blur-md", CLEAR_LEFT)}>
           {plan.width}×{plan.height} · {ftPerCell} ft/cell
-          {hoverCell ? ` · ${hoverCell.x},${hoverCell.y}` : ""}
+          {hoverEntity ? <span className="text-foreground"> · {hoverEntity}</span> : hoverCell ? ` · ${hoverCell.x},${hoverCell.y}` : ""}
         </div>
       ) : null}
 

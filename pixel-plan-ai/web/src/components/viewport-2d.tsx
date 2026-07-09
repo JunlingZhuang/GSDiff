@@ -2,8 +2,8 @@
 
 import * as React from "react";
 
-import { cellScale, clearLayer, planCellScale, renderEmptyGrid, renderOverlay, renderPlanLayer } from "@/lib/render";
-import { buildScene } from "@/lib/scene";
+import { cellScale, clearLayer, planCellScale, renderEmptyGrid, renderOverlay, renderPlanLayer, roomDisplayName } from "@/lib/render";
+import { buildScene, segmentLengthCells } from "@/lib/scene";
 import type { Hit } from "@/lib/scene";
 import type { CandidateImage, Plan, PlanRoom } from "@/lib/types";
 import { candidateDataUrl, prettyType } from "@/lib/types";
@@ -25,10 +25,16 @@ const FIT_PADDING = 48;
 const MAX_BACKING_PX = 8192;
 // devicePixelRatio is capped here so a 3×/4× display never quadruples fill cost.
 const MAX_DPR = 2.5;
+// Pick radius (screen px) for hovering walls / doors — converted to cell space.
+const HIT_TOLERANCE_PX = 6;
 
 function resolveDpr(): number {
   if (typeof window === "undefined") return 1;
   return Math.min(MAX_DPR, window.devicePixelRatio || 1);
+}
+
+function prefersReducedMotion(): boolean {
+  return typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
 interface Viewport2DProps {
@@ -38,8 +44,11 @@ interface Viewport2DProps {
   referenceOpacity: number;
   preview?: boolean;
   rightPanelOpen?: boolean;
+  selectedRoomId?: string | null;
   onViewChange?: (zoom: number) => void;
   onHoverCell?: (cell: { x: number; y: number } | null) => void;
+  onHoverEntity?: (label: string | null) => void;
+  onSelectRoom?: (roomId: string | null) => void;
 }
 
 export interface Viewport2DHandle {
@@ -48,13 +57,18 @@ export interface Viewport2DHandle {
   exportPng: () => string | null;
 }
 
+// Which entity is under the cursor. Kept separate from the raw cursor position
+// so the overlay only repaints when the entity changes, not on every move.
 interface HoverState {
-  cx: number;
-  cy: number;
-  px: number;
-  py: number;
-  roomIndex: number;
+  hit: Hit;
+  // Present only when the hovered entity is a room (drives the tooltip).
   room: PlanRoom | null;
+}
+
+function hitKey(hit: Hit): string {
+  if (hit.kind === "room") return `r${hit.roomIndex}`;
+  if (hit.kind === "wall") return `w${hit.wall.x1},${hit.wall.y1},${hit.wall.x2},${hit.wall.y2}`;
+  return `d${hit.door.id}`;
 }
 
 // zoom is the factor relative to the fitted baseline (1 = fitted). base is the
@@ -69,7 +83,19 @@ interface View {
 }
 
 export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(function Viewport2D(
-  { plan, reference, showReference, referenceOpacity, preview = false, rightPanelOpen = false, onViewChange, onHoverCell },
+  {
+    plan,
+    reference,
+    showReference,
+    referenceOpacity,
+    preview = false,
+    rightPanelOpen = false,
+    selectedRoomId = null,
+    onViewChange,
+    onHoverCell,
+    onHoverEntity,
+    onSelectRoom,
+  },
   handleRef,
 ) {
   const containerRef = React.useRef<HTMLDivElement>(null);
@@ -85,9 +111,36 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
   const planSizeRef = React.useRef<string>("");
   const rightPanelOpenRef = React.useRef(rightPanelOpen);
   rightPanelOpenRef.current = rightPanelOpen;
-  const dragRef = React.useRef<{ pointerId: number; startX: number; startY: number; originX: number; originY: number } | null>(null);
+  // Active pan gesture. `panning` distinguishes a pan (middle-drag / space-drag)
+  // from a potential click-select on the left button. vx/vy accumulate the last
+  // pointer velocity (px/frame) so release can spin up inertia.
+  const dragRef = React.useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    originX: number;
+    originY: number;
+    panning: boolean;
+    moved: boolean;
+    lastX: number;
+    lastY: number;
+    lastT: number;
+    vx: number;
+    vy: number;
+  } | null>(null);
+  const inertiaRef = React.useRef<number | null>(null);
+  const spaceHeldRef = React.useRef(false);
+  const [spaceHeld, setSpaceHeld] = React.useState(false);
+  const [panningActive, setPanningActive] = React.useState(false);
+  // Last entity label pushed to the read-out, so we only re-notify on change.
+  const entityLabelRef = React.useRef<string | null>(null);
+  // Which entity is hovered (drives the overlay) vs. where the cursor is (drives
+  // only the floating tooltip). Splitting them keeps the overlay from repainting
+  // on every pointer move within one entity.
   const [hover, setHover] = React.useState<HoverState | null>(null);
-  const hoveredRoomIndex = hover?.roomIndex ?? -1;
+  const hoverKeyRef = React.useRef<string>("");
+  const [pointer, setPointer] = React.useState<{ x: number; y: number } | null>(null);
+  const hoveredRoomIndex = hover && hover.hit.kind === "room" ? hover.hit.roomIndex : -1;
   const [dpr, setDpr] = React.useState(resolveDpr);
 
   const dims = React.useMemo(() => {
@@ -101,6 +154,11 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
   // Retained scene graph — the single geometry source of truth for both the
   // renderer and hit testing. Computed once per plan, reused across zoom/pan.
   const scene = React.useMemo(() => (plan ? buildScene(plan) : null), [plan]);
+
+  const selectedRoomIndex = React.useMemo(() => {
+    if (!plan || !selectedRoomId) return -1;
+    return plan.rooms.findIndex((room) => room.id === selectedRoomId);
+  }, [plan, selectedRoomId]);
 
   // Effective px/cell and the plan's display box at the current zoom. Derived in
   // render so the wrapper and the canvas backing store size stay in lock-step.
@@ -143,18 +201,17 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
     const { effectiveCellPx, contentW, contentH, effectiveDpr } = backingFor();
     if (!(effectiveCellPx > 0)) return;
     if (plan && scene) {
-      const hover: Hit | null = hoveredRoomIndex >= 0 ? { kind: "room", roomIndex: hoveredRoomIndex } : null;
       renderOverlay(overlay, plan, scene, {
         cellPx: effectiveCellPx,
         dpr: effectiveDpr,
-        hover,
-        selectedRoomIndex: -1,
+        hover: hover?.hit ?? null,
+        selectedRoomIndex,
         metersPerCell: plan.meters_per_cell,
       });
     } else {
       clearLayer(overlay, contentW, contentH, effectiveDpr);
     }
-  }, [plan, scene, hoveredRoomIndex, backingFor]);
+  }, [plan, scene, hover, selectedRoomIndex, backingFor]);
 
   const fit = React.useCallback(() => {
     const container = containerRef.current;
@@ -182,10 +239,41 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
     onViewChange?.(1);
   }, [dims.cols, dims.rows, dims.scale, onViewChange]);
 
+  const stopInertia = React.useCallback(() => {
+    if (inertiaRef.current !== null) {
+      cancelAnimationFrame(inertiaRef.current);
+      inertiaRef.current = null;
+    }
+  }, []);
+
+  // Fling the pan on release: carry the last pointer velocity, decaying 0.92 per
+  // frame until it drops below 0.5px/frame. Disabled under reduced motion.
+  const startInertia = React.useCallback(
+    (vx: number, vy: number) => {
+      stopInertia();
+      if (prefersReducedMotion()) return;
+      let velX = vx;
+      let velY = vy;
+      const step = (): void => {
+        velX *= 0.92;
+        velY *= 0.92;
+        if (Math.hypot(velX, velY) < 0.5) {
+          inertiaRef.current = null;
+          return;
+        }
+        setView((current) => ({ ...current, x: current.x + velX, y: current.y + velY }));
+        inertiaRef.current = requestAnimationFrame(step);
+      };
+      inertiaRef.current = requestAnimationFrame(step);
+    },
+    [stopInertia],
+  );
+
   const zoomAt = React.useCallback(
     (factor: number, clientX?: number, clientY?: number) => {
       const container = containerRef.current;
       if (!container) return;
+      stopInertia();
       const bounds = container.getBoundingClientRect();
       const pivotX = clientX === undefined ? bounds.width / 2 : clientX - bounds.left;
       const pivotY = clientY === undefined ? bounds.height / 2 : clientY - bounds.top;
@@ -202,7 +290,7 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
         return next;
       });
     },
-    [onViewChange],
+    [onViewChange, stopInertia],
   );
 
   React.useImperativeHandle(
@@ -258,7 +346,9 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
     if (!container) return;
     const onWheel = (event: WheelEvent) => {
       event.preventDefault();
-      zoomAt(Math.exp(-event.deltaY * 0.0016), event.clientX, event.clientY);
+      // 1.1× per notch (deltaY ≈ ±100), smooth for fractional trackpad deltas,
+      // anchored on the cursor so the point under it stays put.
+      zoomAt(Math.pow(1.1, -event.deltaY / 100), event.clientX, event.clientY);
     };
     container.addEventListener("wheel", onWheel, { passive: false });
     return () => container.removeEventListener("wheel", onWheel);
@@ -294,6 +384,94 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
     return () => query.removeEventListener("change", onChange);
   }, [dpr]);
 
+  // Window keyboard shortcuts (ignored while typing in a field). Space toggles
+  // pan-drag; F fits; +/− zoom about centre; 0 resets to 100%; Esc clears.
+  React.useEffect(() => {
+    const isTyping = (): boolean => {
+      const el = document.activeElement as HTMLElement | null;
+      if (!el) return false;
+      return el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable;
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (isTyping()) return;
+      if (event.code === "Space") {
+        spaceHeldRef.current = true;
+        setSpaceHeld(true);
+        event.preventDefault();
+        return;
+      }
+      switch (event.key) {
+        case "f":
+        case "F":
+          event.preventDefault();
+          fit();
+          break;
+        case "+":
+        case "=":
+          event.preventDefault();
+          zoomAt(1.1);
+          break;
+        case "-":
+        case "_":
+          event.preventDefault();
+          zoomAt(1 / 1.1);
+          break;
+        case "0":
+          event.preventDefault();
+          zoomAt(1 / viewRef.current.zoom);
+          break;
+        case "Escape":
+          onSelectRoom?.(null);
+          break;
+        default:
+          break;
+      }
+    };
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (event.code === "Space") {
+        spaceHeldRef.current = false;
+        setSpaceHeld(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+    };
+  }, [fit, zoomAt, onSelectRoom]);
+
+  // Stop any in-flight inertia on unmount.
+  React.useEffect(() => stopInertia, [stopInertia]);
+
+  // Push an entity label to the read-out only when it changes, to avoid
+  // re-rendering the parent HUD on every pointer move within one entity.
+  const emitEntity = React.useCallback(
+    (label: string | null) => {
+      if (entityLabelRef.current === label) return;
+      entityLabelRef.current = label;
+      onHoverEntity?.(label);
+    },
+    [onHoverEntity],
+  );
+
+  // A short human label for a hit, for the read-out pill.
+  const entityLabel = React.useCallback(
+    (hit: Hit): string | null => {
+      if (!plan || !scene) return null;
+      if (hit.kind === "room") {
+        const room = scene.rooms[hit.roomIndex];
+        return room ? `${roomDisplayName(room.id)} · ${room.areaFt2} ft²` : null;
+      }
+      const ftPerCell = plan.meters_per_cell * 3.28084;
+      if (hit.kind === "wall") {
+        return `wall ${Math.round(segmentLengthCells(hit.wall) * ftPerCell)} ft`;
+      }
+      return `door ${(hit.door.span * plan.meters_per_cell).toFixed(1)} m`;
+    },
+    [plan, scene],
+  );
+
   const updateHover = React.useCallback(
     (clientX: number, clientY: number) => {
       const container = containerRef.current;
@@ -304,54 +482,126 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
       if (!(effectiveCellPx > 0)) return;
       const localX = clientX - bounds.left;
       const localY = clientY - bounds.top;
-      const cx = Math.floor((localX - v.x) / effectiveCellPx);
-      const cy = Math.floor((localY - v.y) / effectiveCellPx);
-      if (cx < 0 || cy < 0 || cx >= dims.cols || cy >= dims.rows) {
-        setHover(null);
-        onHoverCell?.(null);
+      const cellX = (localX - v.x) / effectiveCellPx;
+      const cellY = (localY - v.y) / effectiveCellPx;
+      const cx = Math.floor(cellX);
+      const cy = Math.floor(cellY);
+      const inGrid = cx >= 0 && cy >= 0 && cx < dims.cols && cy < dims.rows;
+      onHoverCell?.(inGrid ? { x: cx, y: cy } : null);
+      setPointer({ x: localX, y: localY });
+
+      const hit = plan && scene ? scene.hitTest({ x: cellX, y: cellY }, HIT_TOLERANCE_PX, effectiveCellPx) : null;
+      if (!hit) {
+        if (hoverKeyRef.current !== "") {
+          hoverKeyRef.current = "";
+          setHover(null);
+        }
+        emitEntity(null);
         return;
       }
-      const rawIndex = plan ? plan.cells[cy * dims.cols + cx] : -1;
-      const roomIndex = rawIndex !== undefined && rawIndex >= 0 ? rawIndex : -1;
-      const room = plan && roomIndex >= 0 ? plan.rooms[roomIndex] ?? null : null;
-      setHover({ cx, cy, px: localX, py: localY, roomIndex: room ? roomIndex : -1, room });
-      onHoverCell?.({ x: cx, y: cy });
+      // Only touch the overlay-driving state when the entity actually changes.
+      const key = hitKey(hit);
+      if (key !== hoverKeyRef.current) {
+        hoverKeyRef.current = key;
+        const room = hit.kind === "room" && plan ? plan.rooms[hit.roomIndex] ?? null : null;
+        setHover({ hit, room });
+      }
+      emitEntity(entityLabel(hit));
     },
-    [dims.cols, dims.rows, plan, onHoverCell],
+    [dims.cols, dims.rows, plan, scene, onHoverCell, emitEntity, entityLabel],
   );
 
   const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0 && event.button !== 1) return;
+    stopInertia();
+    // Middle-drag always pans; left-drag pans only while Space is held, else it
+    // is a candidate click-select.
+    const panning = event.button === 1 || (event.button === 0 && spaceHeldRef.current);
     const current = viewRef.current;
+    const now = performance.now();
     dragRef.current = {
       pointerId: event.pointerId,
       startX: event.clientX,
       startY: event.clientY,
       originX: current.x,
       originY: current.y,
+      panning,
+      moved: false,
+      lastX: event.clientX,
+      lastY: event.clientY,
+      lastT: now,
+      vx: 0,
+      vy: 0,
     };
+    if (panning) setPanningActive(true);
     event.currentTarget.setPointerCapture(event.pointerId);
   };
 
   const onPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current;
     if (drag && drag.pointerId === event.pointerId) {
-      setView((current) => ({
-        ...current,
-        x: drag.originX + event.clientX - drag.startX,
-        y: drag.originY + event.clientY - drag.startY,
-      }));
+      const dx = event.clientX - drag.startX;
+      const dy = event.clientY - drag.startY;
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) drag.moved = true;
+      if (drag.panning) {
+        const now = performance.now();
+        const dt = Math.max(1, now - drag.lastT);
+        // px per ~frame (16ms), for the release fling.
+        drag.vx = ((event.clientX - drag.lastX) / dt) * 16;
+        drag.vy = ((event.clientY - drag.lastY) / dt) * 16;
+        drag.lastX = event.clientX;
+        drag.lastY = event.clientY;
+        drag.lastT = now;
+        setView((current) => ({ ...current, x: drag.originX + dx, y: drag.originY + dy }));
+        return;
+      }
     }
     updateHover(event.clientX, event.clientY);
   };
 
+  const selectAt = React.useCallback(
+    (clientX: number, clientY: number) => {
+      if (!plan || !onSelectRoom) return;
+      const container = containerRef.current;
+      if (!container) return;
+      const bounds = container.getBoundingClientRect();
+      const v = viewRef.current;
+      const effectiveCellPx = v.base * v.zoom;
+      if (!(effectiveCellPx > 0)) return;
+      // Selection is room-only: resolve the cell directly (ignoring wall/door
+      // pick priority) so clicking anywhere inside a room selects it.
+      const cx = Math.floor((clientX - bounds.left - v.x) / effectiveCellPx);
+      const cy = Math.floor((clientY - bounds.top - v.y) / effectiveCellPx);
+      let roomId: string | null = null;
+      if (cx >= 0 && cy >= 0 && cx < plan.width && cy < plan.height) {
+        const idx = plan.cells[cy * plan.width + cx];
+        if (idx !== undefined && idx >= 0) roomId = plan.rooms[idx]?.id ?? null;
+      }
+      onSelectRoom(roomId);
+    },
+    [plan, onSelectRoom],
+  );
+
   const onPointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (dragRef.current?.pointerId === event.pointerId) dragRef.current = null;
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    dragRef.current = null;
+    if (drag.panning) {
+      setPanningActive(false);
+      // Ignore stale velocity: if the pointer paused before release, don't fling.
+      const fresh = performance.now() - drag.lastT < 60;
+      startInertia(fresh ? drag.vx : 0, fresh ? drag.vy : 0);
+    } else if (!drag.moved && event.button === 0) {
+      selectAt(event.clientX, event.clientY);
+    }
   };
 
   const onPointerLeave = () => {
+    hoverKeyRef.current = "";
     setHover(null);
+    setPointer(null);
     onHoverCell?.(null);
+    emitEntity(null);
   };
 
   return (
@@ -359,7 +609,13 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
       ref={containerRef}
       className={cn(
         "relative h-full w-full touch-none overflow-hidden bg-canvas",
-        hover?.room ? "cursor-pointer" : "cursor-grab active:cursor-grabbing",
+        panningActive
+          ? "cursor-grabbing"
+          : spaceHeld
+            ? "cursor-grab"
+            : hoveredRoomIndex >= 0
+              ? "cursor-pointer"
+              : "cursor-default",
       )}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
@@ -396,10 +652,10 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
         <canvas ref={overlayCanvasRef} className="pointer-events-none absolute left-0 top-0 block" />
       </div>
 
-      {hover?.room ? (
+      {hover?.room && pointer ? (
         <div
           className="pointer-events-none absolute z-20 flex items-center gap-2 rounded-md border border-border bg-card/90 px-2 py-1 text-[11px] text-foreground shadow-lg backdrop-blur-md"
-          style={{ left: hover.px + 14, top: hover.py + 14 }}
+          style={{ left: pointer.x + 14, top: pointer.y + 14 }}
         >
           <span
             className="size-2.5 shrink-0 rounded-[3px] border border-black/30"
