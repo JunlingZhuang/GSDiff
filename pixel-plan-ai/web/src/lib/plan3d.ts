@@ -10,9 +10,22 @@ export interface Box3D {
   color: string;
 }
 
+// A door leaf is a box hinged at one jamb and swung open into a room, so it
+// carries a Y rotation on top of the box fields.
+export interface DoorLeaf3D extends Box3D {
+  rotationY: number;
+}
+
+export interface Door3D {
+  leaf: DoorLeaf3D;
+  // The two slim jamb posts framing the opening ends.
+  posts: Box3D[];
+}
+
 export interface PlanModel {
   floors: Box3D[];
   walls: Box3D[];
+  doors: Door3D[];
   base: Box3D | null;
   extentMeters: number;
 }
@@ -24,6 +37,15 @@ const WALL_THICKNESS = 0.14;
 const FLOOR_THICKNESS = 0.1;
 const BASE_THICKNESS = 0.18;
 const WALL_COLOR = "#f1efe9";
+
+// Door components (Finch-scale, no textures). The leaf is a thin panel hinged at
+// a jamb and swung 30° into the swing room; jamb posts frame the opening ends.
+const DOOR_LEAF_HEIGHT = WALL_HEIGHT * 0.8;
+const DOOR_LEAF_THICKNESS = WALL_THICKNESS / 3;
+const DOOR_OPEN_RAD = (30 * Math.PI) / 180;
+const DOOR_LEAF_COLOR = "#F7F5F1"; // white-ish interior leaf
+const DOOR_ENTRANCE_COLOR = "#8FBAF0"; // accent-tinted entry leaf (to_room null)
+const DOOR_FRAME_COLOR = "#d8d3c9"; // jamb posts, slightly darker than walls
 
 export function buildPlanModel(plan: Plan): PlanModel {
   const m = plan.meters_per_cell || 0.3;
@@ -97,6 +119,63 @@ export function buildPlanModel(plan: Plan): PlanModel {
     }
   }
 
+  // Door components sit in the wall gaps carved above: a swung leaf plus two jamb
+  // posts. All in world meters, centered on origin like the rest of the model.
+  const doors: Door3D[] = [];
+  for (const door of plan.doors) {
+    const horizontal = door.orientation === "horizontal";
+    const cells = Math.max(1, door.width_cells);
+    const len = cells * m;
+    // Jamb A is the hinge; jamb B is the far opening end.
+    const aX = door.x;
+    const aY = door.y;
+    const bX = horizontal ? door.x + cells : door.x;
+    const bY = horizontal ? door.y : door.y + cells;
+    const worldX = (cx: number): number => cx * m - offsetX;
+    const worldZ = (cy: number): number => cy * m - offsetZ;
+    const hingeX = worldX(aX);
+    const hingeZ = worldZ(aY);
+
+    // Closed leaf runs hinge → far jamb; the swing normal points into the room.
+    // Rotating the (orthonormal) closed direction 30° toward the normal opens it.
+    const dir: [number, number] = horizontal ? [1, 0] : [0, 1];
+    const normal: [number, number] = horizontal
+      ? door.swing_side === "north"
+        ? [0, -1]
+        : [0, 1]
+      : door.swing_side === "west"
+        ? [-1, 0]
+        : [1, 0];
+    const c = Math.cos(DOOR_OPEN_RAD);
+    const s = Math.sin(DOOR_OPEN_RAD);
+    const openX = dir[0] * c + normal[0] * s;
+    const openZ = dir[1] * c + normal[1] * s;
+
+    const entrance = door.to_room === null;
+    doors.push({
+      leaf: {
+        // Hinge + half-length along the open direction places the leaf centre; a
+        // Y rotation aligns the box's long (local +X) axis with that direction.
+        center: [hingeX + openX * (len / 2), DOOR_LEAF_HEIGHT / 2, hingeZ + openZ * (len / 2)],
+        size: [len, DOOR_LEAF_HEIGHT, DOOR_LEAF_THICKNESS],
+        rotationY: Math.atan2(-openZ, openX),
+        color: entrance ? DOOR_ENTRANCE_COLOR : DOOR_LEAF_COLOR,
+      },
+      posts: [
+        {
+          center: [hingeX, WALL_HEIGHT / 2, hingeZ],
+          size: [WALL_THICKNESS, WALL_HEIGHT, WALL_THICKNESS],
+          color: DOOR_FRAME_COLOR,
+        },
+        {
+          center: [worldX(bX), WALL_HEIGHT / 2, worldZ(bY)],
+          size: [WALL_THICKNESS, WALL_HEIGHT, WALL_THICKNESS],
+          color: DOOR_FRAME_COLOR,
+        },
+      ],
+    });
+  }
+
   const footprintRect = footprintBounds(plan);
   const base = footprintRect
     ? {
@@ -117,6 +196,7 @@ export function buildPlanModel(plan: Plan): PlanModel {
   return {
     floors,
     walls,
+    doors,
     base,
     extentMeters: Math.max(plan.width, plan.height) * m,
   };

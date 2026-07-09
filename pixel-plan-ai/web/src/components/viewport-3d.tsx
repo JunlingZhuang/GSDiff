@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { Canvas } from "@react-three/fiber";
-import { Grid, OrbitControls } from "@react-three/drei";
+import { Edges, Grid, OrbitControls } from "@react-three/drei";
 
 import { buildPlanModel } from "@/lib/plan3d";
 import type { Plan } from "@/lib/types";
@@ -45,6 +45,24 @@ export function Viewport3D({ plan }: Viewport3DProps) {
           <boxGeometry args={box.size} />
           <meshStandardMaterial color={box.color} roughness={0.85} />
         </mesh>
+      ))}
+
+      {model.doors.map((door, index) => (
+        <React.Fragment key={`door-${index}`}>
+          {/* Leaf: a thin panel swung 30° open, with a subtle edge outline. */}
+          <mesh position={door.leaf.center} rotation={[0, door.leaf.rotationY, 0]}>
+            <boxGeometry args={door.leaf.size} />
+            <meshStandardMaterial color={door.leaf.color} roughness={0.6} />
+            <Edges color="#b9b4a8" />
+          </mesh>
+          {/* Jamb posts framing the opening ends. */}
+          {door.posts.map((post, postIndex) => (
+            <mesh key={postIndex} position={post.center}>
+              <boxGeometry args={post.size} />
+              <meshStandardMaterial color={post.color} roughness={0.8} />
+            </mesh>
+          ))}
+        </React.Fragment>
       ))}
 
       <Grid
