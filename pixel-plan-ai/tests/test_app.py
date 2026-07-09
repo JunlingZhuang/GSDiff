@@ -619,10 +619,12 @@ class AgentGenerationTests(unittest.TestCase):
         self.assertIn("best executable", third_context)
         self.assertEqual(result["source"], "gemini-repaired")
 
-    def test_tower_architecture_failure_blocks_high_scoring_candidate(self) -> None:
+    def test_tower_architecture_failure_blocks_sub_override_candidate(self) -> None:
+        # 88 sits above the 72 floor but below the 90 score override, so a hard massing
+        # failure still blocks acceptance here.
         result = {
             "validation": {
-                "score": 95,
+                "score": 88,
                 "checks": [
                     {"category": "massing", "label": "Explicit non-rectangular tower footprint", "pass": False},
                     {"category": "doors", "label": "All occupiable rooms have doors", "pass": True},
@@ -633,10 +635,70 @@ class AgentGenerationTests(unittest.TestCase):
         reason = service.candidate_rejection_reason(result)
         self.assertIn("Explicit non-rectangular tower footprint", reason)
 
-    def test_small_number_of_area_outliers_is_advisory(self) -> None:
+    def test_score_override_accepts_hard_failure_at_or_above_ninety(self) -> None:
         result = {
             "validation": {
-                "score": 90,
+                "score": 93,
+                "checks": [
+                    {"category": "count", "label": "waiting: 0/1", "pass": False},
+                ],
+                "issues": ["waiting count is off."],
+                "areas": [],
+            }
+        }
+        # Env default override (90): a 93 accepts even with a hard count blocker.
+        self.assertEqual(service.candidate_rejection_reason(result), "")
+        # Disabling the override restores blocking on the same input.
+        with patch.dict(os.environ, {"ACCEPT_SCORE_OVERRIDE": "0"}):
+            reason = service.candidate_rejection_reason(result)
+        self.assertTrue(reason)
+        self.assertIn("waiting: 0/1", reason)
+
+    def test_accepted_result_flags_score_override_only_with_hard_failures(self) -> None:
+        model_output = {"code": "ok", "strategy": "s", "assumptions": [], "model": "quality-model"}
+        override_execution = {
+            "code": "ok",
+            "plan": {"rooms": []},
+            "validation": {
+                "score": 93,
+                "checks": [{"category": "count", "label": "waiting: 0/1", "pass": False}],
+                "issues": [],
+                "areas": [],
+            },
+        }
+        clean_execution = {
+            "code": "ok",
+            "plan": {"rooms": []},
+            "validation": {"score": 95, "checks": [], "issues": [], "areas": []},
+        }
+        payload = {
+            "program": self.samples["clinic-small"],
+            "mode": "auto",
+            "options": {"width": 64, "height": 40},
+        }
+        with (
+            patch.dict(os.environ, {"GEMINI_API_KEY": "test-key", "GEMINI_MODEL": "quality-model"}),
+            patch.object(service, "generate_gemini_code", return_value=model_output),
+            patch.object(service, "execute_and_validate", return_value=override_execution),
+        ):
+            override_result = service.generate_plan(payload)
+        self.assertTrue(override_result["accepted"])
+        self.assertEqual(override_result["accepted_via"], "score_override")
+
+        with (
+            patch.dict(os.environ, {"GEMINI_API_KEY": "test-key", "GEMINI_MODEL": "quality-model"}),
+            patch.object(service, "generate_gemini_code", return_value=model_output),
+            patch.object(service, "execute_and_validate", return_value=clean_execution),
+        ):
+            clean_result = service.generate_plan(payload)
+        self.assertTrue(clean_result["accepted"])
+        self.assertNotIn("accepted_via", clean_result)
+
+    def test_small_number_of_area_outliers_is_advisory(self) -> None:
+        # 88 keeps this below the 90 score override, so the area-ratio path decides acceptance.
+        result = {
+            "validation": {
+                "score": 88,
                 "checks": [
                     {"category": "area", "label": "U.S. room-area range: 8/10", "pass": False},
                 ],
@@ -650,9 +712,10 @@ class AgentGenerationTests(unittest.TestCase):
         self.assertEqual(service.candidate_rejection_reason(result), "")
 
     def test_widespread_area_failure_still_blocks_acceptance(self) -> None:
+        # 88 keeps this below the 90 score override, so the area-ratio path decides acceptance.
         result = {
             "validation": {
-                "score": 90,
+                "score": 88,
                 "checks": [
                     {"category": "area", "label": "U.S. room-area range: 7/10", "pass": False},
                 ],
@@ -666,10 +729,11 @@ class AgentGenerationTests(unittest.TestCase):
         self.assertIn("U.S. room-area range", service.candidate_rejection_reason(result))
 
     def test_ninety_percent_proportion_compliance_is_advisory(self) -> None:
+        # 88 keeps this below the 90 score override, so the proportion-ratio path decides acceptance.
         result = {
             "plan": {"rooms": [{"type": "exam_room"} for _ in range(10)]},
             "validation": {
-                "score": 90,
+                "score": 88,
                 "checks": [
                     {"category": "proportion", "label": "Reasonable room proportion: 9/10", "pass": False},
                 ],
@@ -682,10 +746,11 @@ class AgentGenerationTests(unittest.TestCase):
             self.assertEqual(service.candidate_rejection_reason(result), "")
 
     def test_proportion_compliance_below_ninety_percent_blocks_acceptance(self) -> None:
+        # 88 keeps this below the 90 score override, so the proportion-ratio path decides acceptance.
         result = {
             "plan": {"rooms": [{"type": "exam_room"} for _ in range(10)]},
             "validation": {
-                "score": 90,
+                "score": 88,
                 "checks": [
                     {"category": "proportion", "label": "Reasonable room proportion: 8/10", "pass": False},
                 ],

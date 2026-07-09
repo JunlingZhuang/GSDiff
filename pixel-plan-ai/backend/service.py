@@ -154,6 +154,28 @@ def execute_and_validate(
     return {"code": sanitized, "plan": plan, "validation": validate_plan(plan, program)}
 
 
+# Blocker categories that must pass before a sub-override candidate is accepted. Area and
+# proportion are gated separately on a compliance ratio, so they are deliberately not listed.
+HARD_CATEGORIES = {
+    "access",
+    "adjacency",
+    "count",
+    "doors",
+    "massing",
+    "circulation",
+    "perimeter",
+    "zoning",
+}
+
+
+def has_hard_failures(validation: dict[str, Any]) -> bool:
+    """True when any hard-category acceptance check failed."""
+    return any(
+        check["category"] in HARD_CATEGORIES and not check["pass"]
+        for check in validation.get("checks", [])
+    )
+
+
 def candidate_rejection_reason(result: dict[str, Any]) -> str:
     validation = result["validation"]
     area_rows = validation.get("areas", [])
@@ -179,30 +201,20 @@ def candidate_rejection_reason(result: dict[str, Any]) -> str:
         0.0,
         min(1.0, float(os.environ.get("PROPORTION_MIN_ACCEPTANCE_RATIO", "0.90"))),
     )
-    hard_categories = {
-        "access",
-        "adjacency",
-        "count",
-        "doors",
-        "massing",
-        "circulation",
-        "perimeter",
-        "zoning",
-    }
-    failed_blockers = [
-        check["label"]
-        for check in validation["checks"]
-        if (
-            check["category"] in hard_categories
-            or (check["category"] == "area" and area_compliance_ratio < minimum_area_compliance)
-            or (
-                check["category"] == "proportion"
-                and proportion_compliance_ratio < minimum_proportion_compliance
-            )
-        )
-        and not check["pass"]
-    ]
-    if validation["score"] >= 72 and not failed_blockers:
+    area_blocks = area_compliance_ratio < minimum_area_compliance and any(
+        check["category"] == "area" and not check["pass"] for check in validation["checks"]
+    )
+    proportion_blocks = proportion_compliance_ratio < minimum_proportion_compliance and any(
+        check["category"] == "proportion" and not check["pass"] for check in validation["checks"]
+    )
+    blocked = has_hard_failures(validation) or area_blocks or proportion_blocks
+    # User decision 2026-07-09 — high-score drafts accept with failures still listed;
+    # transparency comes from the validation panel, not from blocking. A draft at or above
+    # ACCEPT_SCORE_OVERRIDE is a usable draft even with hard blockers (0 disables the override).
+    override = float(os.environ.get("ACCEPT_SCORE_OVERRIDE", "90"))
+    if override > 0 and validation["score"] >= override:
+        return ""
+    if validation["score"] >= 72 and not blocked:
         return ""
 
     return compact_validation_feedback(validation)
@@ -532,6 +544,8 @@ def generate_plan(
                     "prompt": design_request,
                     "repair_note": first_error if attempt_number > 1 else None,
                     "iterations": iterations,
+                    # Accepted despite hard-category failures => the score override let it through.
+                    **({"accepted_via": "score_override"} if has_hard_failures(result["validation"]) else {}),
                 }
             if best_result is not result and best_result is not None and best_candidate is not None:
                 regressed_error = latest_error
@@ -693,6 +707,8 @@ def refine_plan(payload: dict[str, Any]) -> dict[str, Any]:
             "program": program,
             "prompt": str(payload.get("prompt", "")),
             "iterations": [seed_iteration],
+            # Accepted despite hard-category failures => the score override let it through.
+            **({"accepted_via": "score_override"} if has_hard_failures(result["validation"]) else {}),
         }
 
     repair_payload = {
