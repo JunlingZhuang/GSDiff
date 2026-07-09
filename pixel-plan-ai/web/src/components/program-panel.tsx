@@ -32,7 +32,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import type { Studio } from "@/hooks/use-studio";
-import type { StudioMode } from "@/lib/types";
+import type { CandidateImage, StudioMode } from "@/lib/types";
 import { candidateDataUrl } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -213,10 +213,29 @@ export function ProgramPanel({ studio }: { studio: Studio }) {
   const [canvasOpen, setCanvasOpen] = React.useState(false);
   const [advancedOpen, setAdvancedOpen] = React.useState(false);
   const [openStep, setOpenStep] = React.useState(1);
+  // Which image the trace gallery seeds the lightbox on (0 = drawing, 1 = trace).
+  const [traceStart, setTraceStart] = React.useState(0);
 
   const trace = studio.traceResult;
   const drawingPicked = studio.selectedCandidate >= 0;
   const traced = !!trace;
+
+  // The trace step presents the picked drawing and the traced linework as a
+  // flippable image set. Only include images that actually exist.
+  const traceDrawing = drawingPicked ? studio.candidates[studio.selectedCandidate] ?? null : null;
+  const traceLinework = trace?.artifacts.linework ?? null;
+  const traceImages = React.useMemo(() => {
+    const list: { image: CandidateImage; title: string; caption: string }[] = [];
+    if (traceDrawing) {
+      list.push({
+        image: traceDrawing,
+        title: `Drawing — candidate ${studio.selectedCandidate + 1}`,
+        caption: "drawing",
+      });
+    }
+    if (traceLinework) list.push({ image: traceLinework, title: "Traced linework", caption: "trace" });
+    return list;
+  }, [traceDrawing, traceLinework, studio.selectedCandidate]);
 
   // Advance the stepper as each stage completes; headers still let the user jump back.
   React.useEffect(() => {
@@ -407,17 +426,33 @@ export function ProgramPanel({ studio }: { studio: Studio }) {
                           typed <Num>{trace.diagnostics.typed}</Num>/<Num>{trace.diagnostics.rooms}</Num>
                         </Chip>
                       </div>
-                      <div className="flex items-center gap-2">
-                        {trace.artifacts.linework ? (
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            className="h-7 gap-1.5 text-[11px]"
-                            onClick={() => studio.setTraceLightboxOpen(true)}
-                          >
-                            <Layers className="size-3" /> View linework
-                          </Button>
-                        ) : null}
+                      {/* drawing + linework as a flippable image set — click either
+                          thumbnail to open the lightbox seeded on that image */}
+                      {traceImages.length ? (
+                        <div className="grid grid-cols-2 gap-1.5">
+                          {traceImages.map((item, i) => (
+                            <button
+                              key={item.caption}
+                              type="button"
+                              className="group relative overflow-hidden rounded-md border-2 border-border bg-white transition-shadow hover:border-foreground/40"
+                              onClick={() => {
+                                setTraceStart(i);
+                                studio.setTraceLightboxOpen(true);
+                              }}
+                            >
+                              <img
+                                src={candidateDataUrl(item.image)}
+                                alt={item.title}
+                                className="aspect-video w-full object-contain"
+                              />
+                              <span className="absolute bottom-0.5 left-0.5 inline-flex items-center gap-1 rounded bg-background/85 px-1 py-0.5 text-[9px] font-medium text-muted-foreground backdrop-blur-sm">
+                                <Layers className="size-2.5" /> {item.caption}
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                      <div className="flex items-center">
                         <Button
                           size="sm"
                           variant="ghost"
@@ -647,12 +682,12 @@ export function ProgramPanel({ studio }: { studio: Studio }) {
         }}
       />
 
-      {/* traced linework artifact — same zoomable viewer, single image */}
+      {/* trace artifacts — same zoomable viewer, drawing + linework as a set */}
       <LightboxViewer
         open={studio.traceLightboxOpen}
         onOpenChange={(open) => studio.setTraceLightboxOpen(open)}
-        title="Trace linework"
-        image={trace?.artifacts.linework ?? null}
+        images={traceImages}
+        startIndex={traceStart}
       />
     </div>
   );
