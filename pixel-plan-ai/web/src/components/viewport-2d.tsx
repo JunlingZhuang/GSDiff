@@ -2,8 +2,9 @@
 
 import * as React from "react";
 
-import { cellScale, planCellScale, renderEmptyGrid, renderPlanToCanvas } from "@/lib/render";
+import { cellScale, clearLayer, planCellScale, renderEmptyGrid, renderOverlay, renderPlanLayer } from "@/lib/render";
 import { buildScene } from "@/lib/scene";
+import type { Hit } from "@/lib/scene";
 import type { CandidateImage, Plan, PlanRoom } from "@/lib/types";
 import { candidateDataUrl, prettyType } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -72,7 +73,12 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
   handleRef,
 ) {
   const containerRef = React.useRef<HTMLDivElement>(null);
-  const canvasRef = React.useRef<HTMLCanvasElement>(null);
+  // Three stacked layers sharing one display box: the blueprint grid, the plan
+  // linework, and the interaction overlay. Splitting them lets a hover / select
+  // repaint just the (cheap) overlay without re-rasterizing the plan or grid.
+  const gridCanvasRef = React.useRef<HTMLCanvasElement>(null);
+  const planCanvasRef = React.useRef<HTMLCanvasElement>(null);
+  const overlayCanvasRef = React.useRef<HTMLCanvasElement>(null);
   const [view, setView] = React.useState<View>({ zoom: 1, x: 0, y: 0, base: cellScale(DEFAULT_COLS) });
   const viewRef = React.useRef(view);
   viewRef.current = view;
@@ -101,24 +107,54 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
   const cellPx = view.base * view.zoom;
   const contentSize = { width: dims.cols * cellPx, height: dims.rows * cellPx };
 
-  // Rasterize the plan at the current effective scale and device pixel ratio.
-  const draw = React.useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+  // Effective px/cell + capped dpr for the current view. Backing-store guard:
+  // shrink dpr (never the CSS size) past the browser's max canvas area.
+  const backingFor = React.useCallback(() => {
     const v = viewRef.current;
     const effectiveCellPx = v.base * v.zoom;
-    if (!(effectiveCellPx > 0)) return;
     const contentW = dims.cols * effectiveCellPx;
     const contentH = dims.rows * effectiveCellPx;
-    // Backing-store guard: shrink dpr (not the CSS size) past the area cap.
     const capScale = Math.min(1, MAX_BACKING_PX / (contentW * dpr), MAX_BACKING_PX / (contentH * dpr));
-    const effectiveDpr = dpr * capScale;
+    return { effectiveCellPx, contentW, contentH, effectiveDpr: dpr * capScale };
+  }, [dims.cols, dims.rows, dpr]);
+
+  // Grid + plan layers: re-rasterized on plan / zoom / scale / preview / dpr.
+  // Panning does NOT trigger this — the layers are CSS-translated. Hover does
+  // NOT trigger this either — that only repaints the overlay.
+  const drawScene = React.useCallback(() => {
+    const { effectiveCellPx, contentW, contentH, effectiveDpr } = backingFor();
+    if (!(effectiveCellPx > 0)) return;
+    const grid = gridCanvasRef.current;
+    if (grid) renderEmptyGrid(grid, dims.cols, dims.rows, { cellPx: effectiveCellPx, dpr: effectiveDpr });
+    const planCanvas = planCanvasRef.current;
+    if (!planCanvas) return;
     if (plan && scene) {
-      renderPlanToCanvas(canvas, plan, scene, { cellPx: effectiveCellPx, dpr: effectiveDpr, hoveredRoomIndex, preview });
+      renderPlanLayer(planCanvas, plan, scene, { cellPx: effectiveCellPx, dpr: effectiveDpr, preview });
     } else {
-      renderEmptyGrid(canvas, dims.cols, dims.rows, { cellPx: effectiveCellPx, dpr: effectiveDpr });
+      clearLayer(planCanvas, contentW, contentH, effectiveDpr);
     }
-  }, [plan, scene, dims.cols, dims.rows, hoveredRoomIndex, preview, dpr]);
+  }, [plan, scene, dims.cols, dims.rows, preview, dpr, backingFor]);
+
+  // Overlay layer: hover highlight + selection. Cheap, repaints on pointer /
+  // selection changes (and re-rasterizes with the scene on zoom/dpr).
+  const drawOverlay = React.useCallback(() => {
+    const overlay = overlayCanvasRef.current;
+    if (!overlay) return;
+    const { effectiveCellPx, contentW, contentH, effectiveDpr } = backingFor();
+    if (!(effectiveCellPx > 0)) return;
+    if (plan && scene) {
+      const hover: Hit | null = hoveredRoomIndex >= 0 ? { kind: "room", roomIndex: hoveredRoomIndex } : null;
+      renderOverlay(overlay, plan, scene, {
+        cellPx: effectiveCellPx,
+        dpr: effectiveDpr,
+        hover,
+        selectedRoomIndex: -1,
+        metersPerCell: plan.meters_per_cell,
+      });
+    } else {
+      clearLayer(overlay, contentW, contentH, effectiveDpr);
+    }
+  }, [plan, scene, hoveredRoomIndex, backingFor]);
 
   const fit = React.useCallback(() => {
     const container = containerRef.current;
@@ -174,9 +210,23 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
     () => ({
       zoomBy: (factor: number) => zoomAt(factor),
       fit,
-      exportPng: () => canvasRef.current?.toDataURL("image/png") ?? null,
+      // Composite the grid + plan layers (never the interaction overlay) into an
+      // offscreen canvas so the exported PNG matches the printed drawing exactly.
+      exportPng: () => {
+        const grid = gridCanvasRef.current;
+        const planCanvas = planCanvasRef.current;
+        if (!grid) return null;
+        const out = document.createElement("canvas");
+        out.width = grid.width;
+        out.height = grid.height;
+        const ctx = out.getContext("2d");
+        if (!ctx) return null;
+        ctx.drawImage(grid, 0, 0);
+        if (planCanvas && plan) ctx.drawImage(planCanvas, 0, 0);
+        return out.toDataURL("image/png");
+      },
     }),
-    [zoomAt, fit],
+    [zoomAt, fit, plan],
   );
 
   // Re-fit when the plan's footprint changes (also fits the default empty grid
@@ -189,11 +239,18 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
     }
   }, [plan, fit]);
 
-  // Re-raster on plan / zoom / scale / hover / preview / dpr change. Panning
-  // (view.x / view.y) intentionally does not appear here — it is a CSS translate.
+  // Re-raster the grid + plan layers on plan / zoom / scale / preview / dpr
+  // change. Panning (view.x / view.y) intentionally does not appear here — it is
+  // a CSS translate — and neither does hover, which only repaints the overlay.
   React.useEffect(() => {
-    draw();
-  }, [draw, view.base, view.zoom]);
+    drawScene();
+  }, [drawScene, view.base, view.zoom]);
+
+  // Repaint the overlay on hover / selection change, and re-rasterize it when
+  // the scene box changes (zoom / dpr).
+  React.useEffect(() => {
+    drawOverlay();
+  }, [drawOverlay, view.base, view.zoom]);
 
   // Native listener: React wheel events are passive and cannot preventDefault.
   React.useEffect(() => {
@@ -216,7 +273,8 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
       if (raf) return;
       raf = requestAnimationFrame(() => {
         raf = 0;
-        draw();
+        drawScene();
+        drawOverlay();
       });
     });
     observer.observe(container);
@@ -224,7 +282,7 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
       observer.disconnect();
       if (raf) cancelAnimationFrame(raf);
     };
-  }, [draw]);
+  }, [drawScene, drawOverlay]);
 
   // devicePixelRatio can change (moving the window across displays / OS zoom).
   // The media query is pinned to the current dppx, so re-subscribe when it flips.
@@ -319,7 +377,12 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
           transform: `translate(${view.x}px, ${view.y}px)`,
         }}
       >
-        <canvas ref={canvasRef} className={plan ? "block shadow-[0_4px_24px_rgba(16,24,40,0.10)]" : "block"} />
+        {/* Three stacked layers; pointer events are handled on the container. */}
+        <canvas
+          ref={gridCanvasRef}
+          className={cn("absolute left-0 top-0 block", plan && "shadow-[0_4px_24px_rgba(16,24,40,0.10)]")}
+        />
+        <canvas ref={planCanvasRef} className="pointer-events-none absolute left-0 top-0 block" />
         {plan && reference && showReference ? (
           /* Stretched to the grid box on purpose: this is the same mapping
              the transcription uses, so rooms should land on themselves. */
@@ -330,6 +393,7 @@ export const Viewport2D = React.forwardRef<Viewport2DHandle, Viewport2DProps>(fu
             style={{ opacity: referenceOpacity / 100 }}
           />
         ) : null}
+        <canvas ref={overlayCanvasRef} className="pointer-events-none absolute left-0 top-0 block" />
       </div>
 
       {hover?.room ? (

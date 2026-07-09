@@ -1,5 +1,5 @@
-import type { Plan } from "./types";
-import type { Scene, SceneDoor } from "./scene";
+import type { Plan, RoomBounds } from "./types";
+import type { Scene, SceneDoor, SceneRoom, SceneWall } from "./scene";
 
 // CAD-grade 2D plan renderer. The plan reads as an architectural linework
 // drawing inked on cool drafting paper: a merged footprint silhouette,
@@ -27,14 +27,29 @@ const LABEL_NAME = `rgba(${INK},0.88)`;
 const LABEL_AREA = "rgba(102,112,133,0.9)";
 
 const UNASSIGNED = -1;
+const PRIMARY = "#2E7CEE";
 
-interface RenderOptions {
+interface LayerBox {
   // Effective px/cell at draw time (fitBaseCellPx × zoom); may be fractional.
   cellPx: number;
   // Capped devicePixelRatio for the backing store (viewport clamps to ≤ 2.5).
   dpr: number;
-  hoveredRoomIndex?: number;
+}
+
+interface PlanLayerOptions extends LayerBox {
   preview?: boolean;
+}
+
+export interface OverlayState {
+  // Entity currently under the cursor (room / wall / door), or null.
+  hover: import("./scene").Hit | null;
+  // Persistent room selection (index into scene.rooms), or -1 for none.
+  selectedRoomIndex: number;
+}
+
+interface OverlayLayerOptions extends LayerBox, OverlayState {
+  // meters per cell, for the selection's CAD dimension labels.
+  metersPerCell: number;
 }
 
 export function cellScale(width: number): number {
@@ -167,33 +182,43 @@ export function renderEmptyGrid(
   drawBlueprint(context, cols, rows, cellPx);
 }
 
-export function renderPlanToCanvas(
+// Reset a layer's backing store (transparent) at the current display box + dpr.
+// Used to blank the plan / overlay layers when there is nothing to draw.
+export function clearLayer(canvas: HTMLCanvasElement, cssWidth: number, cssHeight: number, dpr: number): void {
+  prepareCanvas(canvas, cssWidth, cssHeight, dpr);
+}
+
+// The plan layer: footprint silhouette + hatch, room fills with inner accents,
+// walls, doors, and labels — everything EXCEPT the blueprint grid, which is its
+// own layer beneath this one. The layer is transparent wherever nothing is
+// drawn, so the grid shows through. Rooms always render at base alpha; the hover
+// lift lives on the overlay layer above. NOT redrawn on hover — only on plan /
+// zoom / preview changes.
+export function renderPlanLayer(
   canvas: HTMLCanvasElement,
   plan: Plan,
   scene: Scene,
-  options: RenderOptions,
+  options: PlanLayerOptions,
 ): void {
-  const { cellPx, dpr, hoveredRoomIndex = -1, preview = false } = options;
+  const { cellPx, dpr, preview = false } = options;
   // `cellPx` is the effective px/cell (fitBaseCellPx × zoom); every coordinate
   // below derives from it at draw time, so zooming re-rasterizes rather than
   // CSS-scaling. The label hide threshold now reads against this effective size.
   const scale = cellPx;
   const context = prepareCanvas(canvas, plan.width * cellPx, plan.height * cellPx, dpr);
-  drawBlueprint(context, plan.width, plan.height, scale);
-  drawPlanBody(context, plan, scene, scale, { hoveredRoomIndex, preview });
+  drawPlanBody(context, plan, scene, scale, { preview });
 }
 
 // Everything above the blueprint grid: footprint silhouette + hatch, room fills
 // with inner accents, walls, doors, and labels. All geometry is read from the
 // retained scene; only per-cell fills (footprint + room bodies) are rebuilt at
-// draw time because they depend on the effective scale. Kept as a standalone
-// pass so it can be composited onto its own layer without redrawing the grid.
+// draw time because they depend on the effective scale.
 function drawPlanBody(
   context: CanvasRenderingContext2D,
   plan: Plan,
   scene: Scene,
   scale: number,
-  { hoveredRoomIndex = -1, preview = false }: { hoveredRoomIndex?: number; preview?: boolean },
+  { preview = false }: { preview?: boolean },
 ): void {
   const W = plan.width;
   const H = plan.height;
@@ -249,22 +274,9 @@ function drawPlanBody(
   //    Fill bodies are rebuilt from the cell grid; the accent outline comes from
   //    the scene's per-room boundary edge scan.
   scene.rooms.forEach((room) => {
-    const bounds = room.bounds;
-    const roomIndex = room.index;
-    const hovered = roomIndex === hoveredRoomIndex;
-    const fillPath = new Path2D();
-    for (let y = bounds.y; y < bounds.y + bounds.height; y += 1) {
-      for (let x = bounds.x; x < bounds.x + bounds.width; x += 1) {
-        if (cellRoom(x, y) !== roomIndex) continue;
-        fillPath.rect(x * scale, y * scale, scale, scale);
-      }
-    }
-    const boundaryPath = new Path2D();
-    for (const seg of room.boundary) {
-      boundaryPath.moveTo(seg.x1 * scale, seg.y1 * scale);
-      boundaryPath.lineTo(seg.x2 * scale, seg.y2 * scale);
-    }
-    const fillAlpha = hovered ? 0.32 : isCirculation(room.type) ? 0.12 : 0.22;
+    const fillPath = roomFillPath(plan, room.index, room.bounds, scale);
+    const boundaryPath = roomBoundaryPath(room, scale);
+    const fillAlpha = isCirculation(room.type) ? 0.12 : 0.22;
     context.fillStyle = withAlpha(room.color, fillAlpha);
     context.fill(fillPath);
 
@@ -272,7 +284,7 @@ function drawPlanBody(
     // so the visible band lands ~3px inside the wall line.
     context.save();
     context.clip(fillPath);
-    context.strokeStyle = withAlpha(room.color, hovered ? 0.85 : 0.5);
+    context.strokeStyle = withAlpha(room.color, 0.5);
     context.lineWidth = 6;
     context.lineJoin = "round";
     context.stroke(boundaryPath);
@@ -381,6 +393,210 @@ function drawDoor(context: CanvasRenderingContext2D, sceneDoor: SceneDoor, scale
     context.lineTo(baseX - perpX * 5, baseY - perpY * 5);
     context.stroke();
   }
+
+  context.restore();
+}
+
+// Solid fill path (one rect per cell) for a room, in CSS pixels. Rebuilt at draw
+// time because it scales with the effective px/cell.
+function roomFillPath(plan: Plan, roomIndex: number, bounds: RoomBounds, scale: number): Path2D {
+  const W = plan.width;
+  const path = new Path2D();
+  for (let y = bounds.y; y < bounds.y + bounds.height; y += 1) {
+    for (let x = bounds.x; x < bounds.x + bounds.width; x += 1) {
+      if (plan.cells[y * W + x] !== roomIndex) continue;
+      path.rect(x * scale, y * scale, scale, scale);
+    }
+  }
+  return path;
+}
+
+// Room outline (unit edges from the scene's edge scan), in CSS pixels.
+function roomBoundaryPath(room: SceneRoom, scale: number): Path2D {
+  const path = new Path2D();
+  for (const seg of room.boundary) {
+    path.moveTo(seg.x1 * scale, seg.y1 * scale);
+    path.lineTo(seg.x2 * scale, seg.y2 * scale);
+  }
+  return path;
+}
+
+// The overlay layer: transient hover highlight + persistent selection + CAD
+// dimension hints. Everything here is cheap to re-stroke from scene geometry, so
+// this layer alone repaints on pointer / selection changes — the plan and grid
+// layers beneath it are untouched.
+export function renderOverlay(
+  canvas: HTMLCanvasElement,
+  plan: Plan,
+  scene: Scene,
+  options: OverlayLayerOptions,
+): void {
+  const { cellPx, dpr, hover, selectedRoomIndex, metersPerCell } = options;
+  const scale = cellPx;
+  const context = prepareCanvas(canvas, plan.width * cellPx, plan.height * cellPx, dpr);
+
+  // Persistent selection first, so a hovered entity draws on top of it.
+  if (selectedRoomIndex >= 0 && selectedRoomIndex < scene.rooms.length) {
+    drawSelection(context, plan, scene.rooms[selectedRoomIndex], scale, metersPerCell);
+  }
+
+  if (!hover) return;
+  if (hover.kind === "room") {
+    const room = scene.rooms[hover.roomIndex];
+    if (room) drawRoomHover(context, plan, room, scale);
+  } else if (hover.kind === "wall") {
+    drawWallHover(context, hover.wall, scale);
+  } else if (hover.kind === "door") {
+    drawDoorHover(context, hover.door, scale);
+  }
+}
+
+// Hovered room: the fill-lift previously baked into the plan pass — an extra
+// translucent fill plus a brighter inner accent, composited over the base fill.
+function drawRoomHover(context: CanvasRenderingContext2D, plan: Plan, room: SceneRoom, scale: number): void {
+  const fillPath = roomFillPath(plan, room.index, room.bounds, scale);
+  context.save();
+  context.fillStyle = withAlpha(room.color, 0.12);
+  context.fill(fillPath);
+  context.clip(fillPath);
+  context.strokeStyle = withAlpha(room.color, 0.85);
+  context.lineWidth = 6;
+  context.lineJoin = "round";
+  context.stroke(roomBoundaryPath(room, scale));
+  context.restore();
+}
+
+// Hovered wall: re-stroke the segment 2px in primary.
+function drawWallHover(context: CanvasRenderingContext2D, wall: SceneWall, scale: number): void {
+  context.save();
+  context.strokeStyle = withAlpha(PRIMARY, 0.9);
+  context.lineWidth = 2;
+  context.lineCap = "round";
+  context.lineJoin = "round";
+  context.beginPath();
+  context.moveTo(wall.x1 * scale, wall.y1 * scale);
+  context.lineTo(wall.x2 * scale, wall.y2 * scale);
+  context.stroke();
+  context.restore();
+}
+
+// Hovered door: re-stroke the swing arc + leaf 2px in primary.
+function drawDoorHover(context: CanvasRenderingContext2D, d: SceneDoor, scale: number): void {
+  const span = d.span * scale;
+  const x0 = d.hinge.x * scale;
+  const y0 = d.hinge.y * scale;
+  context.save();
+  context.strokeStyle = withAlpha(PRIMARY, 0.9);
+  context.lineWidth = 2;
+  context.lineCap = "round";
+  context.lineJoin = "round";
+  context.beginPath();
+  context.moveTo(x0, y0);
+  context.lineTo(x0 + Math.cos(d.openAngle) * span, y0 + Math.sin(d.openAngle) * span);
+  context.moveTo(x0 + Math.cos(d.closedAngle) * span, y0 + Math.sin(d.closedAngle) * span);
+  context.arc(x0, y0, span, d.closedAngle, d.openAngle, d.openAngle < d.closedAngle);
+  context.stroke();
+  context.restore();
+}
+
+// Selected room: a persistent 2px primary boundary (clipped inside the room so
+// it hugs the wall line) plus classic CAD dimension hints along the top and
+// left edges of the room's bounding box.
+function drawSelection(
+  context: CanvasRenderingContext2D,
+  plan: Plan,
+  room: SceneRoom,
+  scale: number,
+  metersPerCell: number,
+): void {
+  const fillPath = roomFillPath(plan, room.index, room.bounds, scale);
+  context.save();
+  context.clip(fillPath);
+  context.strokeStyle = withAlpha(PRIMARY, 0.9);
+  // 4px stroke, clipped to the fill → ~2px visible band just inside the wall.
+  context.lineWidth = 4;
+  context.lineJoin = "round";
+  context.stroke(roomBoundaryPath(room, scale));
+  context.restore();
+
+  drawDimensions(context, room, scale, metersPerCell);
+}
+
+// A small opaque paper chip behind dimension text so it reads over any linework.
+function labelChip(context: CanvasRenderingContext2D, text: string, cx: number, cy: number): void {
+  const width = context.measureText(text).width;
+  const padX = 3;
+  const height = 12;
+  context.save();
+  context.fillStyle = BACKDROP;
+  context.fillRect(cx - width / 2 - padX, cy - height / 2, width + padX * 2, height);
+  context.fillStyle = withAlpha(PRIMARY, 0.8);
+  context.fillText(text, cx, cy);
+  context.restore();
+}
+
+// Classic architectural dimension lines: extension lines from the bounds, a
+// parallel dimension line with end ticks, and a mono measurement label.
+function drawDimensions(
+  context: CanvasRenderingContext2D,
+  room: SceneRoom,
+  scale: number,
+  metersPerCell: number,
+): void {
+  const ftPerCell = metersPerCell * 3.28084;
+  const b = room.bounds;
+  const bx = b.x * scale;
+  const by = b.y * scale;
+  const bw = b.width * scale;
+  const bh = b.height * scale;
+  const { mono } = fontFamilies();
+  const stroke = withAlpha(PRIMARY, 0.8);
+  const off = 12;
+  const tick = 3;
+
+  context.save();
+  context.strokeStyle = stroke;
+  context.lineWidth = 1;
+  context.lineCap = "butt";
+  context.font = `500 10px ${mono}`;
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+
+  // Top edge → width.
+  const topY = by - off;
+  context.beginPath();
+  context.moveTo(bx, topY);
+  context.lineTo(bx + bw, topY);
+  context.moveTo(bx, topY - tick);
+  context.lineTo(bx, topY + tick);
+  context.moveTo(bx + bw, topY - tick);
+  context.lineTo(bx + bw, topY + tick);
+  context.moveTo(bx, by);
+  context.lineTo(bx, topY);
+  context.moveTo(bx + bw, by);
+  context.lineTo(bx + bw, topY);
+  context.stroke();
+  labelChip(context, `${Math.round(b.width * ftPerCell)} ft`, bx + bw / 2, topY);
+
+  // Left edge → height.
+  const leftX = bx - off;
+  context.beginPath();
+  context.moveTo(leftX, by);
+  context.lineTo(leftX, by + bh);
+  context.moveTo(leftX - tick, by);
+  context.lineTo(leftX + tick, by);
+  context.moveTo(leftX - tick, by + bh);
+  context.lineTo(leftX + tick, by + bh);
+  context.moveTo(bx, by);
+  context.lineTo(leftX, by);
+  context.moveTo(bx, by + bh);
+  context.lineTo(leftX, by + bh);
+  context.stroke();
+  context.save();
+  context.translate(leftX, by + bh / 2);
+  context.rotate(-Math.PI / 2);
+  labelChip(context, `${Math.round(b.height * ftPerCell)} ft`, 0, 0);
+  context.restore();
 
   context.restore();
 }
