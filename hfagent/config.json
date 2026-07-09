@@ -1,7 +1,7 @@
 {
   "structure_mode": "colorblock",
   "_structure_mode_doc": "Active mode — one of the keys under \"modes\". Override at runtime with --structure-mode.",
-  "max_correction_rounds": 3,
+  "max_correction_rounds": 1,
   "_max_correction_rounds_doc": "hard cap on VLM correction rounds; on cap the least-violating round is kept",
   "image_size": "2K",
   "_image_size_doc": "Gemini image output tier: 1K|2K|4K. 2K (2752x1536 @16:9) is ~2x linear resolution of 1K, so small rooms/doors/walls land above the CV trace/parse thresholds. Env HFAGENT_IMAGE_SIZE overrides. NOTE: for boundary (image-to-image) the model may ignore this and return ~1K.",

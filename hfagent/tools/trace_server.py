@@ -12,12 +12,15 @@ Endpoints (bind 127.0.0.1, port env ``HFAGENT_TRACE_PORT`` default 8801):
                 "diagnostics": {"rooms", "doors", "typed", "meters_per_pixel"},
                 "artifacts": {"linework": {"mime": "image/png", "data": "<base64>"}}}
     POST /draw    {"program": "<name>" | <program object>, "count": 1..4 (default 3)}
-        -> 200 {"images": [{"mime", "data", "rooms_expected", "rooms_found",
-                            "retried"}], "count": N, "source": "hfagent-linework"}
+        -> 200 {"images": [{"mime", "data", "rooms_expected", "rooms_found"}],
+                "count": N, "source": "hfagent-linework"}
         Draws each candidate with hfagent's OWN authoritative linework pipeline
-        (the user-optimized prompt rules, one image-model call), then VERIFIES it
-        deterministically by tracing the drawing back and counting enclosed rooms;
-        redraws once (hard cap) when the count misses.
+        (the user-optimized prompt rules, EXACTLY one image-model call per
+        candidate — no correction or redraw rounds: asking an image model to fix
+        a drawing makes it lazily patch in filler rooms; discrepancy repair
+        belongs to the downstream code agent), then VERIFIES deterministically by
+        tracing the drawing back and counting enclosed rooms. The count is
+        reported, never "fixed" here.
     GET  /health  -> 200 {"ok": true, "draw": true, "programs": [names]}
 
 This service imports NO pixel-plan-ai code. The only coupling is that the seed
@@ -190,18 +193,12 @@ def _rooms_found(png: bytes) -> int:
 
 
 def _draw_verified_candidate(program: dict, expected: int) -> dict:
-    """Draw one candidate, verify its room count, redraw ONCE (hard cap) on a
-    mismatch, and keep whichever drawing is closer to ``expected`` (a tie keeps
-    the redraw)."""
+    """Draw one candidate with exactly ONE image-model call and report its traced
+    room count. No redraw/correction round (user decision 2026-07-09: image-model
+    correction lazily patches in filler rooms; count mismatches are surfaced to
+    the picker and repaired by the downstream code agent)."""
     png = _draw_one(program)
     found = _rooms_found(png)
-    retried = False
-    if found != expected:
-        retried = True
-        redraw = _draw_one(program)
-        redraw_found = _rooms_found(redraw)
-        if abs(redraw_found - expected) <= abs(found - expected):
-            png, found = redraw, redraw_found
     # The image model's bytes may be PNG or JPEG (auto-resolved model); sniff the
     # real mime instead of assuming PNG (hfagent convention: never hardcode it).
     return {
@@ -209,7 +206,6 @@ def _draw_verified_candidate(program: dict, expected: int) -> dict:
         "data": base64.b64encode(png).decode("ascii"),
         "rooms_expected": expected,
         "rooms_found": found,
-        "retried": retried,
     }
 
 
