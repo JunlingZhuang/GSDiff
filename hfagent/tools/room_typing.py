@@ -73,6 +73,15 @@ class RoomTyping:
     def __len__(self) -> int:
         return len(self.guesses)
 
+    def __contains__(self, room_id: object) -> bool:
+        return room_id in self.guesses
+
+    def __iter__(self):
+        return iter(self.guesses)
+
+    def __getitem__(self, room_id: str) -> RoomTypeGuess:
+        return self.guesses[room_id]
+
     def items(self):
         return self.guesses.items()
 
