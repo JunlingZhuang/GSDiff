@@ -105,12 +105,38 @@ export interface GenerationIteration {
   usage?: TokenUsage | null;
 }
 
+// Typed JSONL timeline emitted alongside the progress snapshot (backend
+// job_progress.append_job_event). The discriminant is `e`; `t` is a unix
+// timestamp in seconds. Extra fields vary by event type, so they stay optional.
+export interface GenerationEvent {
+  e:
+    | "attempt_start"
+    | "model_returned"
+    | "validator_verdict"
+    | "exec_result"
+    | "tool_check"
+    | "attempt_end"
+    | "run_end"
+    | string;
+  t: number;
+  attempt?: number;
+  phase?: string;
+  model?: string | null;
+  score?: number | null;
+  rejected?: boolean;
+  status?: string;
+  stop_reason?: string;
+  accepted?: boolean;
+  tokens?: number | null;
+}
+
 export interface GenerationProgress {
   status: "starting" | "running" | "complete" | "missing";
   phase: string;
   message: string;
   active: boolean;
   iterations: GenerationIteration[];
+  events?: GenerationEvent[];
   preview: {
     code: string | null;
     source: string | null;

@@ -16,6 +16,7 @@ import {
 import type {
   AgentAction,
   CandidateImage,
+  GenerationEvent,
   GenerationIteration,
   GenerationResult,
   HealthResponse,
@@ -75,6 +76,10 @@ export function useStudio() {
   // Per-attempt checkpoints polled during a run, surfaced live in the run-log
   // drawer. Kept after completion (the LOG tab still reads result.iterations).
   const [liveIterations, setLiveIterations] = React.useState<GenerationIteration[]>([]);
+  // The typed event timeline from the same progress poll, used to derive the
+  // in-flight sub-phase and per-attempt elapsed in the drawer. Cleared at run
+  // start; grows cumulatively (backend returns the last 200 events per poll).
+  const [liveEvents, setLiveEvents] = React.useState<GenerationEvent[]>([]);
   const [runLogOpen, setRunLogOpen] = React.useState(false);
   const [code, setCode] = React.useState("");
   const [codeSource, setCodeSource] = React.useState("—");
@@ -239,6 +244,7 @@ export function useStudio() {
             setIterations(progress.iterations);
             setLiveIterations(progress.iterations);
           }
+          if (progress.events) setLiveEvents(progress.events);
           const latest = progress.iterations[progress.iterations.length - 1];
           if (latest) {
             const score =
@@ -304,6 +310,7 @@ export function useStudio() {
       setShowReference(false);
       // A fresh run clears the live log and collapses the drawer to its default.
       setLiveIterations([]);
+      setLiveEvents([]);
       setRunLogOpen(false);
       setPhaseText(
         isRefinement
@@ -526,6 +533,7 @@ export function useStudio() {
     activeValidation,
     iterations,
     liveIterations,
+    liveEvents,
     runLogOpen,
     setRunLogOpen,
     code,
