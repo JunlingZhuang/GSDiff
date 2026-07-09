@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import {
+  ArrowLeftRight,
   Braces,
   Check,
   ChevronDown,
@@ -11,8 +12,10 @@ import {
   ImagePlus,
   Layers,
   Loader2,
+  Plus,
   Route,
   Sparkles,
+  X,
 } from "lucide-react";
 
 import { LightboxViewer } from "@/components/lightbox-viewer";
@@ -32,9 +35,14 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import type { Studio } from "@/hooks/use-studio";
-import type { CandidateImage, StudioMode } from "@/lib/types";
-import { candidateDataUrl } from "@/lib/types";
+import type { CandidateImage, Program, StudioMode } from "@/lib/types";
+import { candidateDataUrl, prettyType } from "@/lib/types";
 import { cn } from "@/lib/utils";
+
+// Shared grid template for the rooms table (header + rows stay column-aligned):
+// Type takes the remaining width, Count / ft² are fixed mono columns, and the
+// trailing 1.25rem cell holds the hover-only remove button.
+const ROOM_GRID = "grid grid-cols-[minmax(0,1fr)_3rem_4rem_1.25rem] items-center gap-1.5";
 
 function Chip({
   children,
@@ -206,10 +214,254 @@ function Step({
   );
 }
 
+// The human-facing program editor: a small scrollable rooms table (type / count
+// / ft²) plus an adjacency chip editor and a building-type field. `programText`
+// (the JSON string on the studio hook) stays the single source of truth — every
+// edit here clones it, applies one immutable mutation, and writes it back. When
+// the JSON has been hand-edited into an invalid state the editor disables itself
+// and points at the Advanced disclosure.
+function ProgramEditor({ studio }: { studio: Studio }) {
+  const program = studio.program;
+  const [adjA, setAdjA] = React.useState("");
+  const [adjB, setAdjB] = React.useState("");
+
+  const editProgram = (mutate: (draft: Program) => Program): void => {
+    if (!program) return;
+    const next = mutate(JSON.parse(JSON.stringify(program)) as Program);
+    studio.setProgramText(JSON.stringify(next, null, 2));
+  };
+
+  const rooms = program?.rooms ?? [];
+  const adjacency = program?.adjacency ?? [];
+
+  // Distinct room types drive the adjacency add-row Selects; cheap to derive on
+  // each render (a program has a handful of rooms), so no memo is warranted.
+  const roomTypes: string[] = [];
+  for (const room of rooms) {
+    const type = (room.type ?? "").trim();
+    if (type && !roomTypes.includes(type)) roomTypes.push(type);
+  }
+
+  const programmedSpaces = rooms.reduce((total, room) => total + (Number(room.count) || 0), 0);
+  const programmedFt2 = rooms.reduce(
+    (total, room) => total + (Number(room.count) || 0) * (Number(room.approx_area_ft2) || 0),
+    0,
+  );
+
+  const pairExists = (a: string, b: string): boolean =>
+    adjacency.some(([x, y]) => (x === a && y === b) || (x === b && y === a));
+  const canAddAdjacency = !!adjA && !!adjB && adjA !== adjB && !pairExists(adjA, adjB);
+
+  const updateRoomType = (index: number, value: string) =>
+    editProgram((draft) => ({
+      ...draft,
+      rooms: draft.rooms.map((room, i) => (i === index ? { ...room, type: value } : room)),
+    }));
+
+  const updateRoomCount = (index: number, raw: string) => {
+    const digits = raw.replace(/[^\d]/g, "");
+    editProgram((draft) => ({
+      ...draft,
+      rooms: draft.rooms.map((room, i) =>
+        i === index ? { ...room, count: digits === "" ? 0 : Number(digits) } : room,
+      ),
+    }));
+  };
+
+  const updateRoomArea = (index: number, raw: string) => {
+    const digits = raw.replace(/[^\d]/g, "");
+    editProgram((draft) => ({
+      ...draft,
+      rooms: draft.rooms.map((room, i) => {
+        if (i !== index) return room;
+        if (digits === "") {
+          // Blank ft² drops the field entirely — a preset row with no target area
+          // must round-trip through the JSON without gaining a 0.
+          const rest = { ...room };
+          delete rest.approx_area_ft2;
+          return rest;
+        }
+        return { ...room, approx_area_ft2: Number(digits) };
+      }),
+    }));
+  };
+
+  const removeRoom = (index: number) =>
+    editProgram((draft) => ({ ...draft, rooms: draft.rooms.filter((_, i) => i !== index) }));
+
+  const addRoom = () =>
+    editProgram((draft) => ({ ...draft, rooms: [...(draft.rooms ?? []), { type: "room", count: 1 }] }));
+
+  const removeAdjacency = (index: number) =>
+    editProgram((draft) => ({ ...draft, adjacency: (draft.adjacency ?? []).filter((_, i) => i !== index) }));
+
+  const addAdjacency = () => {
+    if (!canAddAdjacency) return;
+    editProgram((draft) => ({
+      ...draft,
+      adjacency: [...(draft.adjacency ?? []), [adjA, adjB] as [string, string]],
+    }));
+    setAdjA("");
+    setAdjB("");
+  };
+
+  if (!program) {
+    return (
+      <p className="flex items-center gap-1.5 rounded-lg border border-dashed border-border bg-secondary/20 px-2.5 py-2 text-[11px] text-muted-foreground">
+        <CircleAlert className="size-3 shrink-0 text-destructive" />
+        JSON has errors — fix it under Advanced.
+      </p>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      {/* Building type */}
+      <div className="flex flex-col gap-1.5">
+        <span className="label-xs">Building</span>
+        <Input
+          value={program.building_type ?? ""}
+          onChange={(event) => editProgram((draft) => ({ ...draft, building_type: event.target.value }))}
+          placeholder="e.g. outpatient clinic"
+          className="h-8 text-[13px]"
+        />
+      </div>
+
+      {/* Rooms table — inline-editable, scrolls past a handful of rows */}
+      <div className="flex flex-col gap-1.5">
+        <div className="overflow-hidden rounded-lg border border-border">
+          <div className={cn(ROOM_GRID, "border-b border-border bg-secondary/30 px-2 py-1.5")}>
+            <span className="label-xs">Type</span>
+            <span className="label-xs text-right">Count</span>
+            <span className="label-xs text-right">ft²</span>
+            <span />
+          </div>
+          <ScrollArea className="max-h-44">
+            <div className="flex flex-col">
+              {rooms.length === 0 ? (
+                <p className="px-2 py-3 text-center text-[11px] text-muted-foreground">No rooms yet.</p>
+              ) : (
+                rooms.map((room, index) => (
+                  <div key={index} className={cn(ROOM_GRID, "group px-2 py-1 hover:bg-secondary/30")}>
+                    <Input
+                      value={room.type ?? ""}
+                      onChange={(event) => updateRoomType(index, event.target.value)}
+                      className="h-7 px-2 text-[13px]"
+                    />
+                    <Input
+                      inputMode="numeric"
+                      value={room.count == null ? "" : String(room.count)}
+                      onChange={(event) => updateRoomCount(index, event.target.value)}
+                      className="h-7 px-1.5 text-right font-mono text-[12px] tabular-nums"
+                    />
+                    <Input
+                      inputMode="numeric"
+                      value={room.approx_area_ft2 == null ? "" : String(room.approx_area_ft2)}
+                      onChange={(event) => updateRoomArea(index, event.target.value)}
+                      placeholder="—"
+                      className="h-7 px-1.5 text-right font-mono text-[12px] tabular-nums"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => removeRoom(index)}
+                      aria-label="Remove room"
+                      className="flex size-5 items-center justify-center rounded-sm text-muted-foreground opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100"
+                    >
+                      <X className="size-3" />
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+          </ScrollArea>
+          <div className="border-t border-border px-2 py-1">
+            <button
+              type="button"
+              onClick={addRoom}
+              className="flex items-center gap-1 rounded-sm py-0.5 text-[12px] text-muted-foreground hover:text-foreground"
+            >
+              <Plus className="size-3" /> Add room
+            </button>
+          </div>
+        </div>
+        <p className="font-mono text-[11px] tabular-nums text-muted-foreground">
+          <span className="text-foreground">{programmedSpaces}</span> spaces ·{" "}
+          <span className="text-foreground">{programmedFt2.toLocaleString("en-US")}</span> ft² programmed
+        </p>
+      </div>
+
+      {/* Adjacency — chips with a remove ×, plus a two-Select add row */}
+      <div className="flex flex-col gap-1.5">
+        <span className="label-xs">Adjacency</span>
+        <div className="flex flex-wrap gap-1.5">
+          {adjacency.length === 0 ? (
+            <span className="text-[11px] text-muted-foreground">No adjacencies yet.</span>
+          ) : (
+            adjacency.map((pair, index) => (
+              <span
+                key={`${pair[0]}-${pair[1]}-${index}`}
+                className="inline-flex items-center gap-1 rounded-md border border-border bg-secondary/40 py-0.5 pr-1 pl-1.5 text-[11px] text-muted-foreground"
+              >
+                <span>{prettyType(pair[0] ?? "")}</span>
+                <ArrowLeftRight className="size-2.5 shrink-0 opacity-70" />
+                <span>{prettyType(pair[1] ?? "")}</span>
+                <button
+                  type="button"
+                  onClick={() => removeAdjacency(index)}
+                  aria-label="Remove adjacency"
+                  className="ml-0.5 flex size-3.5 items-center justify-center rounded-sm hover:text-destructive"
+                >
+                  <X className="size-2.5" />
+                </button>
+              </span>
+            ))
+          )}
+        </div>
+        <div className="flex items-center gap-1.5">
+          <Select value={adjA} onValueChange={(value) => setAdjA(value as string)}>
+            <SelectTrigger size="sm" className="h-7 flex-1 text-[12px]">
+              <SelectValue placeholder="Room" />
+            </SelectTrigger>
+            <SelectContent>
+              {roomTypes.map((type) => (
+                <SelectItem key={type} value={type} className="text-[12px]">
+                  {prettyType(type)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <ArrowLeftRight className="size-3 shrink-0 text-muted-foreground" />
+          <Select value={adjB} onValueChange={(value) => setAdjB(value as string)}>
+            <SelectTrigger size="sm" className="h-7 flex-1 text-[12px]">
+              <SelectValue placeholder="Room" />
+            </SelectTrigger>
+            <SelectContent>
+              {roomTypes.map((type) => (
+                <SelectItem key={type} value={type} className="text-[12px]">
+                  {prettyType(type)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Button
+            size="icon-sm"
+            variant="outline"
+            className="size-7 shrink-0"
+            disabled={!canAddAdjacency}
+            onClick={addAdjacency}
+            aria-label="Add adjacency"
+          >
+            <Plus className="size-3.5" />
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function ProgramPanel({ studio }: { studio: Studio }) {
   const imageMode = studio.mode === "image";
   const traceMode = studio.mode === "trace";
-  const [jsonOpen, setJsonOpen] = React.useState(false);
   const [canvasOpen, setCanvasOpen] = React.useState(false);
   const [advancedOpen, setAdvancedOpen] = React.useState(false);
   const [openStep, setOpenStep] = React.useState(1);
@@ -245,15 +497,6 @@ export function ProgramPanel({ studio }: { studio: Studio }) {
     if (traced) setOpenStep((step) => (step === 2 ? 3 : step));
   }, [traced]);
 
-  const corridors = React.useMemo(
-    () =>
-      studio.program?.rooms?.reduce(
-        (total, room) => total + (room.type.toLowerCase().includes("corridor") ? Number(room.count || 1) : 0),
-        0,
-      ) ?? 0,
-    [studio.program],
-  );
-
   const ftPerCell = studio.activePlan
     ? (studio.activePlan.meters_per_cell * 3.28084).toFixed(2)
     : null;
@@ -263,6 +506,13 @@ export function ProgramPanel({ studio }: { studio: Studio }) {
   const step2State = traced ? "done" : drawingPicked ? "active" : "pending";
   const step3State = studio.result && !studio.showingTracePreview ? "done" : studio.effectiveSeed ? "active" : "pending";
   const toggleStep = (index: number) => setOpenStep((step) => (step === index ? 0 : index));
+
+  // The Advanced disclosure (JSON escape hatch + trace seed paste) is shared by
+  // every mode and force-opens whenever an input is in an invalid, hand-editable
+  // state so the fix is always one glance away.
+  const advancedForced =
+    !!studio.programError || (traceMode && (studio.tracerOnline === false || !!studio.seedError));
+  const advancedOpenEffective = advancedOpen || advancedForced;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -284,67 +534,10 @@ export function ProgramPanel({ studio }: { studio: Studio }) {
 
       <ScrollArea className="min-h-0 flex-1">
         <div className="flex flex-col gap-4 p-3">
-          {/* summary chips + JSON disclosure */}
-          <section className="flex flex-col gap-2">
-            {studio.program ? (
-              <div className="flex flex-wrap gap-1.5">
-                <Chip>
-                  <Num>{studio.requestedSpaces}</Num> spaces
-                </Chip>
-                {corridors > 0 ? (
-                  <Chip>
-                    <Num>{corridors}</Num> corridor
-                  </Chip>
-                ) : null}
-                {studio.program.building_type ? (
-                  <Chip tone="accent">
-                    <span className="capitalize">{studio.program.building_type.replaceAll("_", " ")}</span>
-                  </Chip>
-                ) : null}
-              </div>
-            ) : null}
-
-            <Disclosure
-              open={jsonOpen || !!studio.programError}
-              onOpenChange={setJsonOpen}
-              label={<span className="label-xs">JSON</span>}
-              meta={
-                studio.programError ? (
-                  <span className="flex items-center gap-1 text-[10px] text-destructive">
-                    <CircleAlert className="size-3" /> invalid
-                  </span>
-                ) : (
-                  <span className="flex items-center gap-1 text-[10px] text-success">
-                    <CircleCheck className="size-3" /> valid
-                  </span>
-                )
-              }
-            >
-              <div className="flex flex-col gap-1.5 pt-2">
-                <div className="flex justify-end">
-                  <button
-                    type="button"
-                    className="text-[11px] text-muted-foreground hover:text-foreground"
-                    onClick={() => {
-                      if (studio.program) studio.setProgramText(JSON.stringify(studio.program, null, 2));
-                    }}
-                  >
-                    Format
-                  </button>
-                </div>
-                <Textarea
-                  value={studio.programText}
-                  onChange={(event) => studio.setProgramText(event.target.value)}
-                  spellCheck={false}
-                  className="h-44 resize-y font-mono text-[11px] leading-relaxed"
-                />
-                {studio.programError ? (
-                  <p className="text-[11px] text-destructive">
-                    <span className="font-mono">{studio.programError}</span>
-                  </p>
-                ) : null}
-              </div>
-            </Disclosure>
+          {/* Human-facing program editor — rooms table + adjacency chips. The raw
+              JSON escape hatch lives in Advanced at the bottom of the panel. */}
+          <section>
+            <ProgramEditor studio={studio} />
           </section>
 
           {/* mode */}
@@ -509,64 +702,10 @@ export function ProgramPanel({ studio }: { studio: Studio }) {
                 </Step>
 
                 {studio.tracerOnline === false ? (
-                  <p className="px-1 text-[11px] text-muted-foreground">Tracer offline — paste a seed below.</p>
+                  <p className="px-1 text-[11px] text-muted-foreground">
+                    Tracer offline — paste a seed under Advanced below.
+                  </p>
                 ) : null}
-
-                {/* Fallback: the direct seed paste/upload path stays available always */}
-                <Disclosure
-                  open={advancedOpen || studio.tracerOnline === false || !!studio.seedError}
-                  onOpenChange={setAdvancedOpen}
-                  label={<span className="label-xs">Advanced</span>}
-                  meta={
-                    studio.seedError ? (
-                      <span className="flex items-center gap-1 text-[10px] text-destructive">
-                        <CircleAlert className="size-3" /> invalid
-                      </span>
-                    ) : null
-                  }
-                >
-                  <div className="flex flex-col gap-2 rounded-lg border border-border bg-secondary/30 p-2">
-                    <div className="flex items-center justify-between">
-                      <span className="label-xs">Seed JSON</span>
-                      <label className="cursor-pointer text-[11px] font-medium text-primary hover:underline">
-                        Upload JSON
-                        <input
-                          type="file"
-                          accept=".json,application/json"
-                          className="hidden"
-                          onChange={(event) => {
-                            const file = event.target.files?.[0];
-                            if (!file) return;
-                            void file.text().then((text) => studio.setSeedText(text));
-                            event.target.value = "";
-                          }}
-                        />
-                      </label>
-                    </div>
-                    <Textarea
-                      value={studio.seedText}
-                      onChange={(event) => studio.setSeedText(event.target.value)}
-                      spellCheck={false}
-                      placeholder='Paste traced seed JSON: {"width":..,"height":..,"cells":[..],"rooms":[..],"doors":[..]}'
-                      className="h-28 resize-y font-mono text-[10px] leading-relaxed"
-                    />
-                    {studio.seedError ? (
-                      <p className="flex items-center gap-1 text-[11px] text-destructive">
-                        <CircleAlert className="size-3 shrink-0" />
-                        <span className="font-mono">{studio.seedError}</span>
-                      </p>
-                    ) : studio.seed ? (
-                      <div className="flex flex-wrap gap-1.5">
-                        <Chip>
-                          <Num>{studio.seed.width}×{studio.seed.height}</Num> cells
-                        </Chip>
-                        <Chip>
-                          <Num>{studio.seed.rooms.length}</Num> rooms
-                        </Chip>
-                      </div>
-                    ) : null}
-                  </div>
-                </Disclosure>
               </div>
             ) : null}
           </section>
@@ -625,6 +764,107 @@ export function ProgramPanel({ studio }: { studio: Studio }) {
                 <p className="text-[11px] text-muted-foreground">
                   Cells stay square; the grid ratio follows a selected drawing.
                 </p>
+              </div>
+            </Disclosure>
+          </section>
+
+          {/* Advanced — shared bottom escape hatch in every mode. The raw program
+              JSON lives here (no longer the primary input); trace mode also keeps
+              its direct seed paste/upload path here. Force-opens on any error. */}
+          <section>
+            <Disclosure
+              open={advancedOpenEffective}
+              onOpenChange={setAdvancedOpen}
+              label={<span className="label-xs">Advanced</span>}
+              meta={
+                studio.programError ? (
+                  <span className="flex items-center gap-1 text-[10px] text-destructive">
+                    <CircleAlert className="size-3" /> JSON invalid
+                  </span>
+                ) : traceMode && studio.seedError ? (
+                  <span className="flex items-center gap-1 text-[10px] text-destructive">
+                    <CircleAlert className="size-3" /> seed invalid
+                  </span>
+                ) : null
+              }
+            >
+              <div className="flex flex-col gap-3 pt-2">
+                {/* Program JSON — the escape hatch for hand-editing the program */}
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="label-xs">Program JSON</span>
+                    <button
+                      type="button"
+                      className="text-[11px] text-muted-foreground hover:text-foreground"
+                      onClick={() => {
+                        if (studio.program) studio.setProgramText(JSON.stringify(studio.program, null, 2));
+                      }}
+                    >
+                      Format
+                    </button>
+                  </div>
+                  <Textarea
+                    value={studio.programText}
+                    onChange={(event) => studio.setProgramText(event.target.value)}
+                    spellCheck={false}
+                    className="h-44 resize-y font-mono text-[11px] leading-relaxed"
+                  />
+                  {studio.programError ? (
+                    <p className="flex items-center gap-1 text-[11px] text-destructive">
+                      <CircleAlert className="size-3 shrink-0" />
+                      <span className="font-mono">{studio.programError}</span>
+                    </p>
+                  ) : (
+                    <p className="flex items-center gap-1 text-[11px] text-success">
+                      <CircleCheck className="size-3 shrink-0" /> valid
+                    </p>
+                  )}
+                </div>
+
+                {/* Trace mode keeps its direct seed paste/upload path here */}
+                {traceMode ? (
+                  <div className="flex flex-col gap-2 rounded-lg border border-border bg-secondary/30 p-2">
+                    <div className="flex items-center justify-between">
+                      <span className="label-xs">Seed JSON</span>
+                      <label className="cursor-pointer text-[11px] font-medium text-primary hover:underline">
+                        Upload JSON
+                        <input
+                          type="file"
+                          accept=".json,application/json"
+                          className="hidden"
+                          onChange={(event) => {
+                            const file = event.target.files?.[0];
+                            if (!file) return;
+                            void file.text().then((text) => studio.setSeedText(text));
+                            event.target.value = "";
+                          }}
+                        />
+                      </label>
+                    </div>
+                    <Textarea
+                      value={studio.seedText}
+                      onChange={(event) => studio.setSeedText(event.target.value)}
+                      spellCheck={false}
+                      placeholder='Paste traced seed JSON: {"width":..,"height":..,"cells":[..],"rooms":[..],"doors":[..]}'
+                      className="h-28 resize-y font-mono text-[10px] leading-relaxed"
+                    />
+                    {studio.seedError ? (
+                      <p className="flex items-center gap-1 text-[11px] text-destructive">
+                        <CircleAlert className="size-3 shrink-0" />
+                        <span className="font-mono">{studio.seedError}</span>
+                      </p>
+                    ) : studio.seed ? (
+                      <div className="flex flex-wrap gap-1.5">
+                        <Chip>
+                          <Num>{studio.seed.width}×{studio.seed.height}</Num> cells
+                        </Chip>
+                        <Chip>
+                          <Num>{studio.seed.rooms.length}</Num> rooms
+                        </Chip>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             </Disclosure>
           </section>
