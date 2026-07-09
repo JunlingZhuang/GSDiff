@@ -457,7 +457,7 @@ Precomputed pixel planning targets for this exact canvas and scale:
 
 Canvas: use exactly {options['width']} by {options['height']} pixels.
 
-Suggested scale: {options['meters_per_cell']} meters per cell.
+Suggested scale: {options['meters_per_cell'] * FEET_PER_METER:.2f} ft per cell (result.meters_per_cell = {options['meters_per_cell']}).
 
 Program:
 {json.dumps(program, indent=2)}

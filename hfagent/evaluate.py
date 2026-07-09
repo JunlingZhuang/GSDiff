@@ -9,7 +9,7 @@ Usage (from repo root, hfagent venv active):
     python -m hfagent.evaluate --repeat 4            # 4 independent runs per program
 
 Test inputs live in hfagent/programs.json. Room types must exist in
-schema/palette.py; each room entry supports an optional "approx_area_m2" hint.
+schema/palette.py; each room entry supports an optional "approx_area_ft2" hint.
 
 Outputs per run under hfagent/out/<run>/<program>/ (with --repeat N the work dirs
 are <program>-r1 .. <program>-rN, each an independent full pipeline run):

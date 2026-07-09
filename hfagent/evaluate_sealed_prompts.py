@@ -27,6 +27,7 @@ import numpy as np
 from hfagent.evaluate import DEFAULT_PROGRAMS, load_programs
 from hfagent.floor_plan_generate import load_config
 from hfagent.llm import GeminiClient
+from hfagent.tools.floor_plan_generator import area_sqft
 from hfagent.tools.linework_tracer import trace_linework
 from hfagent.tools.room_adjacency_extractor import room_instance_ids
 
@@ -41,11 +42,11 @@ DEFAULT_IMAGE_MODEL = "gemini-3.1-flash-image"
 
 
 def _room_lines(program: dict) -> str:
-    areas = {room["type"]: room.get("approx_area_m2") for room in program["rooms"]}
+    areas = {room["type"]: area_sqft(room) for room in program["rooms"]}
     lines = []
     for node in room_instance_ids(program):
         area = areas.get(node.type)
-        lines.append(f"- {node.id}" + (f" (about {area} m2)" if area else ""))
+        lines.append(f"- {node.id}" + (f" (about {area} sq ft)" if area else ""))
     return "\n".join(lines)
 
 

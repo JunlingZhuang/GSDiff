@@ -149,6 +149,17 @@ class CodePolicyTests(unittest.TestCase):
         )
         self.assertAlmostEqual(program["rooms"][0]["approx_area_m2"], 11.1483648)
 
+    def test_samples_carry_square_feet_and_normalize_to_square_meters(self) -> None:
+        samples = json.loads((ROOT / "data" / "samples.json").read_text(encoding="utf-8"))
+        waiting = samples["health-center-large"]["rooms"][0]
+        self.assertEqual(waiting["type"], "waiting")
+        # Samples now speak square feet; square metres are gone from the user-facing data.
+        self.assertEqual(waiting["approx_area_ft2"], 650)
+        self.assertNotIn("approx_area_m2", waiting)
+        # normalize_program keeps the internal contract metric.
+        program = normalize_program(samples["health-center-large"])
+        self.assertAlmostEqual(program["rooms"][0]["approx_area_m2"], 650 * 0.09290304)
+
     def test_footprint_shape_distinguishes_inset_rectangle_from_l_shape(self) -> None:
         width, height = 8, 6
         rectangle = [int(1 <= x < 7 and 1 <= y < 5) for y in range(height) for x in range(width)]

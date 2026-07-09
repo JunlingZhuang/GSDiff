@@ -24,13 +24,31 @@ from hfagent.tools.room_adjacency_extractor import extract_room_adjacency
 
 # ── prompt builders (pure, unit-testable) ────────────────────────────────────
 
+_SQUARE_FEET_PER_SQUARE_METER = 10.7639
+
+
+def area_sqft(room: dict) -> int | None:
+    """Room's approximate area in whole square feet for user-facing prompt text.
+
+    Programs carry square feet directly (programs.json) or the internal metric
+    (understand()); either way the drawing prompt speaks square feet, and the
+    drawn sublabel is what room_typing calibrates the drawing scale from.
+    """
+    if room.get("approx_area_ft2"):
+        return round(float(room["approx_area_ft2"]))
+    if room.get("approx_area_m2"):
+        return round(float(room["approx_area_m2"]) * _SQUARE_FEET_PER_SQUARE_METER)
+    return None
+
+
 def _program_blocks(program: dict) -> tuple[str, str]:
     """Render the program's room list and circulation into prompt text blocks."""
     lines = []
     for r in program["rooms"]:
         count = r.get("count", 1)
         display = r["type"].replace("_", " ")
-        area = f", each about {r['approx_area_m2']} m2" if r.get("approx_area_m2") else ""
+        sqft = area_sqft(r)
+        area = f", each about {sqft} sq ft" if sqft else ""
         if count > 1:
             # Numbered labels enable unambiguous door extraction later.
             label_note = f" — label each one {r['type']}_1, {r['type']}_2 … {r['type']}_{count}"
@@ -146,7 +164,7 @@ _LINEWORK_RULES = """
 CV LINEWORK PROFILE (hard requirements)
 - This drawing will be parsed by OCR and deterministic computer vision. Use only pure white room interiors and crisp black marks.
 - Room labels must use the EXACT underscore-and-number spelling from the program, for example office_1 and patient_room_2. Draw every label once, on one horizontal line, in a large plain sans-serif font, centred well away from walls and doors. Never omit, duplicate, rotate, wrap or abbreviate a label.
-- Area values are layout guidance only. Do not print square metres, dimensions or any text below the room label.
+- Area values are layout guidance only. Do not print square feet, dimensions or any text below the room label.
 - Do NOT draw windows, glazing lines or openings that resemble windows. Exterior walls are continuous except at a real entrance door.
 - Every door uses the same simple symbol: one clear wall gap, one thin straight door leaf and one thin quarter-circle swing arc. Use single-leaf hinged doors only. Do not draw double doors, sliding doors, pocket doors or decorative door frames.
 - A wall gap is allowed only for a door. Apart from walls, the standard door symbol and room labels, draw no other black lines.
@@ -236,7 +254,8 @@ def build_direct_colorblock_prompt(program: dict, boundary: bool = False) -> str
     for r in program["rooms"]:
         count = r.get("count", 1)
         display = r["type"].replace("_", " ")
-        area = f", each about {r['approx_area_m2']} m2" if r.get("approx_area_m2") else ""
+        sqft = area_sqft(r)
+        area = f", each about {sqft} sq ft" if sqft else ""
         legend_lines.append(f"- {count} x {display} — fill colour {rgb_hex(ROOM_RGB[r['type']])}{area}")
     rooms_block = "\n".join(legend_lines)
     adjacency = "\n".join(

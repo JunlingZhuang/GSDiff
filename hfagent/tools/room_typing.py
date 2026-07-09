@@ -36,6 +36,7 @@ RECOGNITION_MODEL_PATH = _MODELS_DIR / "text_recognition_CRNN_EN.onnx"
 _CHARSET = "0123456789abcdefghijklmnopqrstuvwxyz"
 _INPUT_SIZE = (100, 32)
 _MIN_MATCH_SCORE = 0.6
+_SQUARE_METERS_PER_SQUARE_FOOT = 0.09290304
 
 
 @dataclass
@@ -55,10 +56,12 @@ class RoomTypeGuess:
 class RoomTyping:
     """Label-reading result for a plan: per-room type guesses + drawing scale.
 
-    ``meters_per_pixel`` is calibrated from the drawn AREA sublabels ("16 m²"):
-    each area label divided by its room's polygon pixel area yields one scale
-    sample, and the median of all samples is robust to the odd mis-assigned
-    label or merged mega-room. None when no area labels were readable.
+    ``meters_per_pixel`` is calibrated from the drawn AREA sublabels ("450 sq ft",
+    or "16 m²" on legacy drawings): each area label divided by its room's polygon
+    pixel area yields one scale sample, and the median of all samples is robust to
+    the odd mis-assigned label or merged mega-room. Square-foot labels are
+    converted to square metres so the returned scale stays metric. None when no
+    area labels were readable.
     """
     guesses: dict[str, RoomTypeGuess]
     meters_per_pixel: float | None = None
@@ -192,7 +195,7 @@ def match_program_type(text: str, vocabulary: list[str]) -> tuple[str | None, in
 
     Returns ``(type, instance, score)`` — type None below the match floor.
     Trailing digits are the instance number ("patientroom12" -> patient_room, 12);
-    area sublabels like "16m2" match no vocabulary entry and fall away.
+    area sublabels like "450sqft" or "16m2" match no vocabulary entry and fall away.
     """
     clean = "".join(ch for ch in text.lower() if ch.isalnum())
     if not clean:
@@ -312,8 +315,11 @@ def type_rooms(png: bytes, plan, program: dict) -> dict[str, RoomTypeGuess]:
         if best is not None:
             guesses[rid] = best
 
-    # scale calibration from AREA sublabels: "16 m²" reads as "16m2"/"16m";
-    # each one over its room's polygon pixel area is a (m/px)² sample
+    # scale calibration from AREA sublabels. Drawings now print square feet —
+    # "450 sq ft" reads (alnum-stripped) as "450sqft"/"450sf"/"450ft2"; legacy
+    # drawings printed square metres — "16 m²" reads as "16m2"/"16m". Each label
+    # over its room's polygon pixel area is one (m/px)² sample, so square feet is
+    # converted to square metres first to keep the returned scale metric.
     scale_samples: list[float] = []
     for rid, entries in per_room.items():
         pixel_area = room_area.get(rid, 0.0)
@@ -321,11 +327,16 @@ def type_rooms(png: bytes, plan, program: dict) -> dict[str, RoomTypeGuess]:
             continue                       # merged mega-rooms poison the sample
         for _, _, text in entries:
             clean = "".join(ch for ch in text.lower() if ch.isalnum())
-            match = re.fullmatch(r"(\d{1,4})m2?", clean)
-            if match:
-                area_m2 = float(match.group(1))
-                if 1.0 <= area_m2 <= 2000.0:
-                    scale_samples.append(math.sqrt(area_m2 / pixel_area))
+            sqft_match = re.fullmatch(r"(\d{1,5})(?:sqft|sf|ft2)", clean)
+            m2_match = re.fullmatch(r"(\d{1,4})m2?", clean)
+            if sqft_match:
+                area_m2 = float(sqft_match.group(1)) * _SQUARE_METERS_PER_SQUARE_FOOT
+            elif m2_match:
+                area_m2 = float(m2_match.group(1))
+            else:
+                continue
+            if 1.0 <= area_m2 <= 2000.0:
+                scale_samples.append(math.sqrt(area_m2 / pixel_area))
     meters_per_pixel = float(np.median(scale_samples)) if scale_samples else None
     return RoomTyping(guesses=guesses, meters_per_pixel=meters_per_pixel,
                       area_samples=len(scale_samples))
