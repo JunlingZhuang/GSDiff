@@ -11,11 +11,13 @@ import {
   fetchTracerHealth,
   postAgentAction,
   postDrawCandidates,
+  postDrawViaTracer,
   postTrace,
 } from "@/lib/api";
 import type {
   AgentAction,
   CandidateImage,
+  DrawDiagnostics,
   GenerationEvent,
   GenerationIteration,
   GenerationResult,
@@ -26,6 +28,7 @@ import type {
   SeedPlan,
   StudioMode,
   TraceResponse,
+  TracerHealth,
   Validation,
 } from "@/lib/types";
 import { candidateDataUrl } from "@/lib/types";
@@ -58,13 +61,18 @@ export function useStudio() {
   const [viewport, setViewport] = React.useState<ViewportMode>("2d");
   const [seedText, setSeedText] = React.useState("");
   const [candidates, setCandidates] = React.useState<CandidateImage[]>([]);
+  // Per-candidate room-count verification from the hfagent drawer, index-aligned
+  // with `candidates`; empty when the pixel-plan fallback drawer produced them.
+  const [candidateDiagnostics, setCandidateDiagnostics] = React.useState<DrawDiagnostics[]>([]);
   const [selectedCandidate, setSelectedCandidate] = React.useState(-1);
   const [candidatesBusy, setCandidatesBusy] = React.useState(false);
   const [lightbox, setLightbox] = React.useState<number | null>(null);
 
   // Trace pipeline: hfagent tracer service (separate localhost process reached
-  // through the /trace-api rewrite) turns a picked drawing into a seed grid.
+  // through the /trace-api rewrite) turns a picked drawing into a seed grid, and
+  // (when it advertises health.draw) draws the candidates in the first place.
   const [tracerOnline, setTracerOnline] = React.useState<boolean | null>(null);
+  const [tracerHealth, setTracerHealth] = React.useState<TracerHealth | null>(null);
   const [traceBusy, setTraceBusy] = React.useState(false);
   const [traceResult, setTraceResult] = React.useState<TraceResponse | null>(null);
   const [traceLightboxOpen, setTraceLightboxOpen] = React.useState(false);
@@ -130,8 +138,10 @@ export function useStudio() {
       try {
         const tracer = await fetchTracerHealth(controller.signal);
         setTracerOnline(!!tracer.ok);
+        setTracerHealth(tracer);
       } catch {
         setTracerOnline(false); // offline — trace mode falls back to paste/upload
+        setTracerHealth(null);
       }
     })();
     return () => controller.abort();
@@ -406,11 +416,37 @@ export function useStudio() {
     if (candidatesBusy || busyAction || !program) return;
     setCandidatesBusy(true);
     setCandidates([]);
+    setCandidateDiagnostics([]);
     setSelectedCandidate(-1);
     setTraceResult(null); // new drawings invalidate any prior trace
     try {
+      // Prefer hfagent's authoritative linework drawer when the tracer is online and
+      // advertises /draw; on ANY failure fall through to the pixel-plan fallback path.
+      if (tracerOnline && tracerHealth?.draw) {
+        try {
+          const drawn = await postDrawViaTracer(program, 3);
+          setCandidates(drawn.images.map(({ mime, data }) => ({ mime, data })));
+          setCandidateDiagnostics(
+            drawn.images.map(({ rooms_expected, rooms_found, retried }) => ({
+              rooms_expected,
+              rooms_found,
+              retried,
+            })),
+          );
+          toast.success(`${drawn.images.length} drawings ready`, {
+            description: "Drawn by the hfagent pipeline. Click one to select it.",
+          });
+          return;
+        } catch (tracerError) {
+          // Muted note, then fall back to the pixel-plan drawer below.
+          toast.message("hfagent tracer unavailable — fallback drawer", {
+            description: tracerError instanceof Error ? tracerError.message : String(tracerError),
+          });
+        }
+      }
       const images = await postDrawCandidates(program, 3);
       setCandidates(images);
+      setCandidateDiagnostics([]); // fallback drawer carries no room-count verification
       toast.success(`${images.length} drawings ready`, { description: "Click one to select it." });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -419,7 +455,7 @@ export function useStudio() {
     } finally {
       setCandidatesBusy(false);
     }
-  }, [candidatesBusy, busyAction, program]);
+  }, [candidatesBusy, busyAction, program, tracerOnline, tracerHealth]);
 
   const runTrace = React.useCallback(async () => {
     if (traceBusy || busyAction) return;
@@ -514,6 +550,7 @@ export function useStudio() {
     seed,
     seedError,
     candidates,
+    candidateDiagnostics,
     selectedCandidate,
     selectCandidate,
     candidatesBusy,

@@ -35,7 +35,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import type { Studio } from "@/hooks/use-studio";
-import type { CandidateImage, Program, StudioMode } from "@/lib/types";
+import type { CandidateImage, DrawDiagnostics, Program, StudioMode } from "@/lib/types";
 import { candidateDataUrl, prettyType } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -91,6 +91,30 @@ function Disclosure({
       </CollapsibleTrigger>
       <CollapsibleContent>{children}</CollapsibleContent>
     </Collapsible>
+  );
+}
+
+// Deterministic room-count verification chip on a candidate thumbnail (only when
+// the hfagent drawer produced it): `found/expected rooms`, success-toned when they
+// match, warning-toned otherwise; a trailing dot marks a candidate redrawn once.
+function RoomCountBadge({ diagnostics }: { diagnostics?: DrawDiagnostics }) {
+  if (!diagnostics) return null;
+  const matched = diagnostics.rooms_found === diagnostics.rooms_expected;
+  return (
+    <span
+      title={
+        `${diagnostics.rooms_found}/${diagnostics.rooms_expected} rooms found` +
+        (diagnostics.retried ? " · redrawn once" : "")
+      }
+      className={cn(
+        "absolute bottom-0.5 left-0.5 inline-flex items-center gap-1 rounded bg-background/85 px-1 py-0.5 text-[9px] font-medium tabular-nums backdrop-blur-sm",
+        matched ? "text-success" : "text-warning",
+      )}
+    >
+      {matched ? <CircleCheck className="size-2.5" /> : <CircleAlert className="size-2.5" />}
+      {diagnostics.rooms_found}/{diagnostics.rooms_expected} rooms
+      {diagnostics.retried ? <span className="size-1 rounded-full bg-current opacity-70" /> : null}
+    </span>
   );
 }
 
@@ -155,6 +179,7 @@ function CandidateStrip({ studio }: { studio: Studio }) {
                     <Check className="size-2.5" />
                   </span>
                 ) : null}
+                <RoomCountBadge diagnostics={studio.candidateDiagnostics[index]} />
               </button>
             ))}
       </div>

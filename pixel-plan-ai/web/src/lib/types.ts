@@ -223,6 +223,25 @@ export interface TraceResponse {
 export interface TracerHealth {
   ok: boolean;
   programs: string[];
+  // Present when the tracer service exposes POST /draw (authoritative drawer).
+  draw?: boolean;
+}
+
+// Deterministic room-count verification returned per candidate by the hfagent
+// tracer's /draw: how many rooms the trace found vs the program's total, and
+// whether the candidate was redrawn once (the drawer's hard retry cap).
+export interface DrawDiagnostics {
+  rooms_expected: number;
+  rooms_found: number;
+  retried: boolean;
+}
+
+export interface TracerDrawImage extends CandidateImage, DrawDiagnostics {}
+
+export interface TracerDrawResponse {
+  images: TracerDrawImage[];
+  count: number;
+  source: string;
 }
 
 export function candidateDataUrl(candidate: CandidateImage): string {

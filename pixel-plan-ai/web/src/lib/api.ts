@@ -8,6 +8,7 @@ import type {
   Samples,
   SeedPlan,
   TraceResponse,
+  TracerDrawResponse,
   TracerHealth,
 } from "./types";
 
@@ -105,6 +106,21 @@ export async function postTrace(image: CandidateImage, program: string): Promise
     body: JSON.stringify({ image, program }),
   });
   return readJson(await Promise.resolve(response));
+}
+
+// Draw candidates with hfagent's authoritative linework pipeline (each candidate
+// deterministically room-count verified). The full program object goes over the
+// wire so a hand-edited program still drives the drawing; the caller falls back to
+// the pixel-plan drawer (postDrawCandidates) whenever this rejects.
+export async function postDrawViaTracer(program: Program, count: number): Promise<TracerDrawResponse> {
+  const response = await fetch("/trace-api/draw", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ program, count }),
+  });
+  const payload = await readJson<TracerDrawResponse>(await Promise.resolve(response));
+  if (!payload.images?.length) throw new Error("The hfagent tracer returned no drawings.");
+  return payload;
 }
 
 export async function postDrawCandidates(program: Program, count: number): Promise<CandidateImage[]> {
