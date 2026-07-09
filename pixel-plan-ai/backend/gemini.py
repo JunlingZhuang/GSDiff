@@ -209,6 +209,60 @@ def call_gemini(
         raise ValueError(f"Gemini network request failed: {error.reason}") from error
 
 
+def finish_reason(response_payload: dict[str, Any]) -> str | None:
+    """The first candidate's finishReason (e.g. "STOP", "MAX_TOKENS"), or None when absent."""
+    candidates = response_payload.get("candidates", [])
+    if not candidates:
+        return None
+    return candidates[0].get("finishReason")
+
+
+def call_gemini_with_truncation_retry(
+    api_key: str,
+    model_name: str,
+    contents: list[dict[str, Any]],
+    generation_config: dict[str, Any],
+    system_instruction_text: str,
+    tools: list[dict[str, Any]] | None = None,
+    tool_config: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], list[Any]]:
+    """call_gemini, but recover from an output-token cut-off at the API layer.
+
+    If the first response stops at finishReason MAX_TOKENS, retry the SAME request ONCE with
+    maxOutputTokens doubled (capped at 60000). Returns (response, [usageMetadata, ...]) so the
+    caller sums every HTTP call's usage. If the retry is ALSO truncated, raise a clear ValueError.
+
+    Incident 2026-07-09 (24-room program, GEMINI_MAX_OUTPUT_TOKENS=20000): the model's JSON hit the
+    output cap mid-string. Three consecutive repair attempts died with "'{' was never closed" and
+    that fake Python syntax error was fed back into the model's repair context — telling it to hunt
+    a bug that lived in the token budget, not the code. Truncation is detected here and must never
+    masquerade as a code error.
+    """
+    usage_metadatas: list[Any] = []
+    response = call_gemini(
+        api_key, model_name, contents, generation_config, system_instruction_text,
+        tools=tools, tool_config=tool_config,
+    )
+    usage_metadatas.append(response.get("usageMetadata"))
+    if finish_reason(response) != "MAX_TOKENS":
+        return response, usage_metadatas
+    doubled_cap = min(60000, int(generation_config.get("maxOutputTokens", 0)) * 2)
+    doubled_config = dict(generation_config)
+    doubled_config["maxOutputTokens"] = doubled_cap
+    retry_response = call_gemini(
+        api_key, model_name, contents, doubled_config, system_instruction_text,
+        tools=tools, tool_config=tool_config,
+    )
+    usage_metadatas.append(retry_response.get("usageMetadata"))
+    if finish_reason(retry_response) == "MAX_TOKENS":
+        raise ValueError(
+            f"Gemini output was truncated at the {doubled_cap} token limit twice; "
+            "the program is too large for the output budget. "
+            "Raise GEMINI_MAX_OUTPUT_TOKENS or simplify the program."
+        )
+    return retry_response, usage_metadatas
+
+
 def first_candidate_parts(response_payload: dict[str, Any]) -> list[dict[str, Any]]:
     candidates = response_payload.get("candidates", [])
     if not candidates:
@@ -474,12 +528,14 @@ def generate_gemini_code(
         })
 
     if not use_tools:
-        response_payload = call_gemini(
+        response_payload, usage_metadatas = call_gemini_with_truncation_retry(
             api_key, model_name, [{"role": "user", "parts": parts}], generation_config, SYSTEM_INSTRUCTION
         )
         structured = parse_structured_answer(response_payload)
         structured["model"] = model_name
-        structured["usage"] = normalize_usage_metadata(model_name, response_payload.get("usageMetadata"))
+        # sum_attempt_usage over one or (after a truncation retry) two calls; identical to
+        # normalize_usage_metadata for a single call.
+        structured["usage"] = sum_attempt_usage(model_name, usage_metadatas)
         return structured
 
     # In-attempt self-check loop (docs #8): the model may call execute_and_validate up to
@@ -492,11 +548,12 @@ def generate_gemini_code(
     usage_metadatas: list[Any] = []
     calls_used = 0
     while calls_used < max_tool_calls:
-        tool_response = call_gemini(
+        # Tool-phase calls also get the doubled-budget retry and raise on double-truncation.
+        tool_response, tool_usage = call_gemini_with_truncation_retry(
             api_key, model_name, contents, generation_config, SYSTEM_INSTRUCTION,
             tools=tools, tool_config=tool_config,
         )
-        usage_metadatas.append(tool_response.get("usageMetadata"))
+        usage_metadatas.extend(tool_usage)
         model_parts = first_candidate_parts(tool_response)
         function_call = find_function_call(model_parts)
         if function_call is None:
@@ -528,10 +585,11 @@ def generate_gemini_code(
                 }],
             })
 
-    final_response = call_gemini(
+    # Final phase gets the same MAX_TOKENS retry as the plain single-call path (docs #8).
+    final_response, final_usage = call_gemini_with_truncation_retry(
         api_key, model_name, contents, generation_config, SYSTEM_INSTRUCTION
     )
-    usage_metadatas.append(final_response.get("usageMetadata"))
+    usage_metadatas.extend(final_usage)
     structured = parse_structured_answer(final_response)
     structured["model"] = model_name
     structured["usage"] = sum_attempt_usage(model_name, usage_metadatas)

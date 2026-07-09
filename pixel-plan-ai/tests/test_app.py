@@ -1322,6 +1322,18 @@ def _structured_json_payload(code: str, total_tokens: int) -> dict[str, object]:
     }
 
 
+def _max_tokens_payload(total_tokens: int) -> dict[str, object]:
+    """A candidate cut off at the output-token cap: the JSON is truncated mid-string and the
+    finishReason is MAX_TOKENS (the 2026-07-09 24-room incident that read as a syntax error)."""
+    return {
+        "candidates": [{
+            "content": {"role": "model", "parts": [{"text": '{"code": "def build():\\n    plan = {'}]},
+            "finishReason": "MAX_TOKENS",
+        }],
+        "usageMetadata": {"promptTokenCount": total_tokens, "candidatesTokenCount": 0, "totalTokenCount": total_tokens},
+    }
+
+
 class AttemptToolLoopTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -1405,6 +1417,46 @@ class AttemptToolLoopTests(unittest.TestCase):
                 max_tool_calls=2,
             )
         self.assertEqual(result["usage"]["total_tokens"], 600)
+
+    def test_max_tokens_retries_once_with_doubled_budget(self) -> None:
+        # First call is cut off at the output cap; the retry with a doubled budget completes.
+        responses = [
+            _fake_urlopen_response(_max_tokens_payload(150)),
+            _fake_urlopen_response(_structured_json_payload("recovered-code", 250)),
+        ]
+        with (
+            patch.dict(os.environ, {"GEMINI_ATTEMPT_TOOLS": "0", "GEMINI_MAX_OUTPUT_TOKENS": "20000"}),
+            patch("urllib.request.urlopen", side_effect=responses) as urlopen_mock,
+        ):
+            result = gemini.generate_gemini_code(
+                "test-key", "test-model", self.program, "", self.options
+            )
+        self.assertEqual(urlopen_mock.call_count, 2)
+        self.assertEqual(result["code"], "recovered-code")
+        first_body = json.loads(urlopen_mock.call_args_list[0].args[0].data.decode("utf-8"))
+        second_body = json.loads(urlopen_mock.call_args_list[1].args[0].data.decode("utf-8"))
+        self.assertEqual(
+            second_body["generationConfig"]["maxOutputTokens"],
+            first_body["generationConfig"]["maxOutputTokens"] * 2,
+        )
+        # Usage sums both HTTP calls, not just the one that produced the answer.
+        self.assertEqual(result["usage"]["total_tokens"], 400)
+
+    def test_double_truncation_raises_a_clear_error_not_a_syntax_error(self) -> None:
+        responses = [
+            _fake_urlopen_response(_max_tokens_payload(150)),
+            _fake_urlopen_response(_max_tokens_payload(150)),
+        ]
+        with (
+            patch.dict(os.environ, {"GEMINI_ATTEMPT_TOOLS": "0", "GEMINI_MAX_OUTPUT_TOKENS": "20000"}),
+            patch("urllib.request.urlopen", side_effect=responses) as urlopen_mock,
+        ):
+            with self.assertRaises(ValueError) as caught:
+                gemini.generate_gemini_code(
+                    "test-key", "test-model", self.program, "", self.options
+                )
+        self.assertIn("truncated", str(caught.exception))
+        self.assertEqual(urlopen_mock.call_count, 2)
 
 
 if __name__ == "__main__":
