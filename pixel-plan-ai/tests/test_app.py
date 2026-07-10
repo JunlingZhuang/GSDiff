@@ -1842,6 +1842,44 @@ class IcuRoomTests(unittest.TestCase):
         casework["x_ft"] = 12.5  # 2 ft off the E wall it declares
         self.assertIn("anchor", self.failed_categories(plan))
 
+    def test_zero_booms_skip_boom_checks_and_still_pass(self) -> None:
+        # A custom program that requests zero ceiling booms drops both booms; the boom-specific
+        # equipment check must be absent (not recorded as a failure) and 0/0 satisfies count.
+        plan = known_good_icu_room()
+        plan["assets"] = [asset for asset in plan["assets"] if asset["type"] != "ceiling_boom"]
+        result = validate_room(plan, ICU_RULES, ICU_CATALOG, {"ceiling_boom": 0})
+        equipment_labels = [check["label"] for check in result["checks"] if check["category"] == "equipment"]
+        self.assertFalse(any("boom" in label.lower() for label in equipment_labels))
+        self.assertTrue(all(check["pass"] for check in result["checks"]))
+        boom_count = next(check for check in result["checks"] if check["category"] == "count" and check["label"].startswith("ceiling_boom"))
+        self.assertTrue(boom_count["pass"])
+        self.assertIn("0/0", boom_count["label"])
+
+    def test_two_visitor_chairs_must_both_sit_on_the_visitor_side(self) -> None:
+        plan = known_good_icu_room()
+        # A second chair beside the first, both on the west (visitor) side, clear of the bed zones.
+        plan["assets"].append(icu_asset("chair2", "visitor_chair", 0.0, 5.0, 2.0, 2.0, 0, None, "floor"))
+        counts = {"visitor_chair": 2}
+        good = validate_room(plan, ICU_RULES, ICU_CATALOG, counts)
+        self.assertEqual(good["score"], 100)
+        self.assertTrue(all(check["pass"] for check in good["checks"]))
+        # Move one chair to the equipment (east) side: zoning must fail because not every chair
+        # sits opposite the equipment zone.
+        plan["assets"][-1]["x_ft"], plan["assets"][-1]["y_ft"] = 12.0, 2.0
+        bad = validate_room(plan, ICU_RULES, ICU_CATALOG, counts)
+        self.assertIn("zoning", {check["category"] for check in bad["checks"] if not check["pass"]})
+
+    def test_requested_count_mismatch_fails_count_check(self) -> None:
+        # The known-good room places one monitor; requesting two makes the count check fail.
+        plan = known_good_icu_room()
+        result = validate_room(plan, ICU_RULES, ICU_CATALOG, {"patient_monitor": 2})
+        self.assertIn("count", {check["category"] for check in result["checks"] if not check["pass"]})
+        monitor_count = next(
+            check for check in result["checks"] if check["category"] == "count" and check["label"].startswith("patient_monitor")
+        )
+        self.assertFalse(monitor_count["pass"])
+        self.assertIn("1/2", monitor_count["label"])
+
     def test_sandbox_accepts_rotated_footprint_swap(self) -> None:
         code = (
             "result = {"
@@ -1940,6 +1978,35 @@ class RoomServiceTests(unittest.TestCase):
                 room_service.generate_room_plan({"room": {"width_ft": 4.0, "depth_ft": 16.0}})
             with self.assertRaisesRegex(ValueError, "at least 150 sf"):
                 room_service.generate_room_plan({"room": {"width_ft": 9.0, "depth_ft": 9.0}})
+
+    def test_requested_counts_merge_over_catalog_defaults(self) -> None:
+        catalog = room_service.load_room_catalog()
+        merged = room_service.resolve_asset_counts(catalog, {"visitor_chair": 3, "ceiling_boom": 1})
+        # Overridden types take the requested value; every other type keeps its catalog default.
+        self.assertEqual(merged["visitor_chair"], 3)
+        self.assertEqual(merged["ceiling_boom"], 1)
+        self.assertEqual(merged["icu_bed"], 1)
+        self.assertEqual(merged["patient_monitor"], 1)
+        # No request at all leaves the full default set (count_required per type).
+        defaults = room_service.resolve_asset_counts(catalog, None)
+        self.assertEqual(defaults["ceiling_boom"], 2)
+        self.assertEqual(defaults["visitor_chair"], 1)
+
+    def test_requested_counts_out_of_bounds_are_rejected(self) -> None:
+        catalog = room_service.load_room_catalog()
+        with self.assertRaisesRegex(ValueError, "range"):
+            room_service.resolve_asset_counts(catalog, {"visitor_chair": 5})  # max 3
+        with self.assertRaisesRegex(ValueError, "range"):
+            room_service.resolve_asset_counts(catalog, {"icu_bed": 2})  # min == max == 1
+        with self.assertRaisesRegex(ValueError, "Unknown asset type"):
+            room_service.resolve_asset_counts(catalog, {"teleporter": 1})
+
+    def test_generate_rejects_out_of_bounds_asset_counts_before_model_call(self) -> None:
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}):
+            with self.assertRaisesRegex(ValueError, "range"):
+                room_service.generate_room_plan(
+                    {"room": {"width_ft": 16.5, "depth_ft": 16.75}, "assets": {"visitor_chair": 9}}
+                )
 
     def test_dispatch_routes_room_job_kind(self) -> None:
         with patch.object(room_service, "generate_room_plan", return_value={"accepted": True}) as action_mock:

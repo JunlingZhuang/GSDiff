@@ -162,7 +162,12 @@ def access_path_rect(door: dict[str, Any], bed: dict[str, Any], width: float, de
     return (bx + bw, offset - half, width - (bx + bw), path_width)
 
 
-def validate_room(plan: dict[str, Any], rules: dict[str, Any], catalog: dict[str, Any]) -> dict[str, Any]:
+def validate_room(
+    plan: dict[str, Any],
+    rules: dict[str, Any],
+    catalog: dict[str, Any],
+    counts: dict[str, int] | None = None,
+) -> dict[str, Any]:
     room = plan["room"]
     assets: list[dict[str, Any]] = plan["assets"]
     width = float(room["width_ft"])
@@ -189,6 +194,12 @@ def validate_room(plan: dict[str, Any], rules: dict[str, Any], catalog: dict[str
     path_width = float(door_rules.get("path_to_bed_min_width_ft", 4.0))
 
     catalog_by_type = {str(entry["type"]): entry for entry in catalog.get("assets", [])}
+    # Requested per-type counts: the catalog default (count_required) unless the caller
+    # overrides it. Type-specific checks below gate on these so a 0-count type is skipped
+    # entirely rather than recorded as a failure, and a multi-count type checks every instance.
+    required_counts = {asset_type: int(entry.get("count_required", 1)) for asset_type, entry in catalog_by_type.items()}
+    if counts:
+        required_counts.update({str(key): int(value) for key, value in counts.items()})
     beds = [asset for asset in assets if asset["type"] == "icu_bed"]
     frame = bed_frame(beds[0], width, depth, foot_min) if beds else None
 
@@ -215,8 +226,8 @@ def validate_room(plan: dict[str, Any], rules: dict[str, Any], catalog: dict[str
 
     # --- count -----------------------------------------------------------------
     actual_counts = Counter(asset["type"] for asset in assets)
-    for asset_type, entry in catalog_by_type.items():
-        required = int(entry.get("count_required", 1))
+    for asset_type in catalog_by_type:
+        required = int(required_counts.get(asset_type, 0))
         actual = actual_counts.get(asset_type, 0)
         record(
             "count",
@@ -337,99 +348,133 @@ def validate_room(plan: dict[str, Any], rules: dict[str, Any], catalog: dict[str
         record("access", "Clear path from door to bed", False)
 
     sinks = [asset for asset in assets if asset["type"] == "handwash_sink"]
+    requested_sinks = int(required_counts.get("handwash_sink", 0))
     max_sink = float(rules.get("sink", {}).get("max_distance_from_door_ft", 8.0))
     door_center = door_center_point(door, width, depth)
-    if sinks:
-        sink_center = asset_center(sinks[0])
-        distance = hypot(sink_center[0] - door_center[0], sink_center[1] - door_center[1])
-        record(
-            "access",
-            f"Handwash sink {distance:.2f} ft from door (max {max_sink:.0f})",
-            distance <= max_sink + 0.01,
-            f"Handwash sink is {distance:.2f} ft from the door; the maximum is {max_sink:.0f} ft.",
-        )
-    else:
-        record("access", "Handwash sink near door", False, "No handwash sink placed.")
+    if requested_sinks >= 1:
+        if sinks:
+            sink_ok = True
+            for sink in sinks:
+                sink_center = asset_center(sink)
+                distance = hypot(sink_center[0] - door_center[0], sink_center[1] - door_center[1])
+                if distance > max_sink + 0.01:
+                    sink_ok = False
+                    issues.append(f"Handwash sink {sink['id']} is {distance:.2f} ft from the door; the maximum is {max_sink:.0f} ft.")
+            record("access", f"Handwash sink(s) within {max_sink:.0f} ft of the door", sink_ok)
+        else:
+            record("access", "Handwash sink near door", False, "No handwash sink placed.")
+    # requested_sinks == 0: no handwash sink in this program, so skip the sink-near-door check.
 
     # --- equipment -------------------------------------------------------------
+    # Every equipment check gates on the REQUESTED count: a 0-count type records no check
+    # (graceful skip), a 1-count boom drops the opposite-sides requirement, and multi-count
+    # monitors/iv poles require EACH placed instance to satisfy its distance check.
     boom_rules = rules.get("booms", {})
     booms = [asset for asset in assets if asset["type"] == "ceiling_boom"]
-    required_booms = int(boom_rules.get("count", 2))
+    requested_booms = int(required_counts.get("ceiling_boom", 0))
     boom_mount_max = float(boom_rules.get("mount_max_distance_from_bed_head_ft", 3.0))
     coverage_radius = float(boom_rules.get("coverage_radius_ft", 5.0))
-    if frame is not None and len(booms) == required_booms:
-        head_half = frame["head_half"]
-        centers = [asset_center(boom) for boom in booms]
-        near = all(dist_point_rect(cx, cy, head_half) <= boom_mount_max + 0.01 for cx, cy in centers)
-        covers = all(dist_point_rect(cx, cy, head_half) <= coverage_radius + 0.01 for cx, cy in centers)
-        opposite = bed_side_of_point(*centers[0], frame) * bed_side_of_point(*centers[1], frame) < 0
-        record(
-            "equipment",
-            f"{required_booms} booms flank the bed head",
-            near and covers and opposite,
-            "Booms must flank the bed head on opposite sides within reach and coverage.",
-        )
-    else:
-        record("equipment", f"{required_booms} booms flank the bed head", False, "Booms are missing or the bed is unplaced.")
+    if requested_booms >= 1:
+        if frame is not None and booms:
+            head_half = frame["head_half"]
+            centers = [asset_center(boom) for boom in booms]
+            near = all(dist_point_rect(cx, cy, head_half) <= boom_mount_max + 0.01 for cx, cy in centers)
+            covers = all(dist_point_rect(cx, cy, head_half) <= coverage_radius + 0.01 for cx, cy in centers)
+            boom_ok = near and covers
+            if requested_booms >= 2:
+                # Two-boom layouts must flank the head on opposite sides of the long axis.
+                boom_ok = boom_ok and len(centers) >= 2 and bed_side_of_point(*centers[0], frame) * bed_side_of_point(*centers[1], frame) < 0
+            side_note = " on opposite sides" if requested_booms >= 2 else ""
+            record(
+                "equipment",
+                f"{requested_booms} boom(s) flank the bed head",
+                boom_ok,
+                f"Booms must reach and cover the bed head{side_note}.",
+            )
+        else:
+            record("equipment", f"{requested_booms} boom(s) flank the bed head", False, "Booms are missing or the bed is unplaced.")
+    # requested_booms == 0: no boom checks recorded.
 
     monitors = [asset for asset in assets if asset["type"] == "patient_monitor"]
+    requested_monitors = int(required_counts.get("patient_monitor", 0))
     monitor_max = float(rules.get("monitor", {}).get("max_distance_from_bed_head_ft", 6.0))
     equipment_side = 0
-    if frame is not None and monitors:
-        monitor_center = asset_center(monitors[0])
-        equipment_side = bed_side_of_point(*monitor_center, frame)
-        distance = hypot(monitor_center[0] - frame["head_center"][0], monitor_center[1] - frame["head_center"][1])
-        record(
-            "equipment",
-            f"Monitor {distance:.2f} ft from bed head on equipment side",
-            distance <= monitor_max + 0.01 and equipment_side != 0,
-            f"Patient monitor must be within {monitor_max:.0f} ft of the bed head on a defined equipment side.",
-        )
-    else:
-        record("equipment", "Monitor near bed head on equipment side", False, "Patient monitor missing or bed unplaced.")
+    if requested_monitors >= 1:
+        if frame is not None and monitors:
+            head_center = frame["head_center"]
+            monitor_ok = True
+            for monitor in monitors:
+                center = asset_center(monitor)
+                side = bed_side_of_point(*center, frame)
+                distance = hypot(center[0] - head_center[0], center[1] - head_center[1])
+                if not (distance <= monitor_max + 0.01 and side != 0):
+                    monitor_ok = False
+            # The first monitor defines the equipment side used by the visitor-chair zoning check.
+            equipment_side = bed_side_of_point(*asset_center(monitors[0]), frame)
+            record(
+                "equipment",
+                f"Monitor(s) within {monitor_max:.0f} ft of the bed head on the equipment side",
+                monitor_ok,
+                f"Each patient monitor must be within {monitor_max:.0f} ft of the bed head on a defined equipment side.",
+            )
+        else:
+            record("equipment", "Monitor near bed head on equipment side", False, "Patient monitor missing or bed unplaced.")
+    # requested_monitors == 0: no monitor check; equipment_side stays undefined.
 
     iv_poles = [asset for asset in assets if asset["type"] == "iv_pole"]
+    requested_iv = int(required_counts.get("iv_pole", 0))
     iv_max = float(rules.get("iv_pole", {}).get("max_distance_from_bed_head_ft", 3.0))
-    if frame is not None and iv_poles:
-        iv_center = asset_center(iv_poles[0])
-        distance = dist_point_rect(iv_center[0], iv_center[1], frame["head_half"])
-        record(
-            "equipment",
-            f"IV pole {distance:.2f} ft from bed head (max {iv_max:.0f})",
-            distance <= iv_max + 0.01,
-            f"IV pole must be within {iv_max:.0f} ft of the bed head.",
-        )
-    else:
-        record("equipment", "IV pole near bed head", False, "IV pole missing or bed unplaced.")
+    if requested_iv >= 1:
+        if frame is not None and iv_poles:
+            head_half = frame["head_half"]
+            iv_ok = all(dist_point_rect(*asset_center(iv), head_half) <= iv_max + 0.01 for iv in iv_poles)
+            record(
+                "equipment",
+                f"IV pole(s) within {iv_max:.0f} ft of the bed head",
+                iv_ok,
+                f"Each IV pole must be within {iv_max:.0f} ft of the bed head.",
+            )
+        else:
+            record("equipment", "IV pole near bed head", False, "IV pole missing or bed unplaced.")
+    # requested_iv == 0: no IV pole check recorded.
 
     # --- zoning ----------------------------------------------------------------
+    # EACH placed visitor chair must sit opposite the equipment side; the check is skipped
+    # when no chair is requested or no monitor defines an equipment side to compare against.
     chairs = [asset for asset in assets if asset["type"] == "visitor_chair"]
-    if frame is not None and chairs and equipment_side != 0:
-        chair_side = bed_side_of_point(*asset_center(chairs[0]), frame)
+    requested_chairs = int(required_counts.get("visitor_chair", 0))
+    if requested_chairs >= 1 and frame is not None and equipment_side != 0:
+        chair_sides = [bed_side_of_point(*asset_center(chair), frame) for chair in chairs]
+        chair_ok = bool(chair_sides) and all(side != 0 and side == -equipment_side for side in chair_sides)
         record(
             "zoning",
-            "Visitor chair on the side opposite the equipment zone",
-            chair_side != 0 and chair_side == -equipment_side,
-            "Visitor chair must sit on the opposite side of the bed axis from the equipment side.",
+            "Visitor chair(s) on the side opposite the equipment zone",
+            chair_ok,
+            "Every visitor chair must sit on the opposite side of the bed axis from the equipment side.",
         )
-    else:
-        record("zoning", "Visitor chair on the visitor side", False, "Visitor chair missing or equipment side undefined.")
+    # requested_chairs == 0 or equipment side undefined: no visitor-side check recorded.
 
     caseworks = [asset for asset in assets if asset["type"] == "casework"]
-    if frame is not None and caseworks:
-        casework = caseworks[0]
-        rect = asset_rect(casework)
-        not_headwall = casework["wall"] != frame["headwall"]
-        hinge = door_hinge(door, width, depth)
-        clear_of_swing = dist_point_rect(hinge[0], hinge[1], rect) >= door_width - 0.01
-        record(
-            "zoning",
-            "Casework off the headwall and clear of the door swing",
-            not_headwall and clear_of_swing,
-            "Casework must not be on the headwall and must stay clear of the door swing.",
-        )
-    else:
-        record("zoning", "Casework placement", False, "Casework missing or bed unplaced.")
+    requested_casework = int(required_counts.get("casework", 0))
+    if requested_casework >= 1 and frame is not None:
+        if caseworks:
+            hinge = door_hinge(door, width, depth)
+            casework_ok = True
+            for casework in caseworks:
+                rect = asset_rect(casework)
+                not_headwall = casework["wall"] != frame["headwall"]
+                clear_of_swing = dist_point_rect(hinge[0], hinge[1], rect) >= door_width - 0.01
+                if not (not_headwall and clear_of_swing):
+                    casework_ok = False
+            record(
+                "zoning",
+                "Casework off the headwall and clear of the door swing",
+                casework_ok,
+                "Every casework run must stay off the headwall and clear of the door swing.",
+            )
+        else:
+            record("zoning", "Casework placement", False, "Casework missing.")
+    # requested_casework == 0: no casework zoning check recorded.
 
     # --- score -----------------------------------------------------------------
     per_category: dict[str, list[bool]] = {}

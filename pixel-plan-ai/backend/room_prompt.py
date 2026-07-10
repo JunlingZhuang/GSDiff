@@ -60,18 +60,26 @@ Common failures observed in real runs — avoid / do (each mirrors an exact vali
 - Never park the visitor chair, casework, or sink inside ANY dashed bed clearance zone; only the two mobile items (iv_pole, overbed_table) may enter a SIDE zone, never the foot zone."""
 
 
-def catalog_table(catalog: dict[str, Any]) -> str:
+def catalog_table(catalog: dict[str, Any], counts: dict[str, int] | None = None) -> str:
     lines = []
     for entry in catalog.get("assets", []):
         width, depth = entry["footprint_ft"]
+        # "need N" reflects the requested count for this run (custom programs), falling back to
+        # the catalog default when the caller passes no per-type override.
+        need = int(counts.get(entry["type"], entry.get("count_required", 1))) if counts else int(entry.get("count_required", 1))
         lines.append(
             f"- {entry['type']} ({entry['label']}): footprint {width} x {depth} ft, "
-            f"anchor {entry['anchor']}, need {entry.get('count_required', 1)}. {entry.get('notes', '')}".rstrip()
+            f"anchor {entry['anchor']}, need {need}. {entry.get('notes', '')}".rstrip()
         )
     return "\n".join(lines)
 
 
-def build_room_prompt(room_request: dict[str, Any], rules: dict[str, Any], catalog: dict[str, Any]) -> str:
+def build_room_prompt(
+    room_request: dict[str, Any],
+    rules: dict[str, Any],
+    catalog: dict[str, Any],
+    counts: dict[str, int] | None = None,
+) -> str:
     width = room_request.get("width_ft")
     depth = room_request.get("depth_ft")
     user_prompt = str(room_request.get("prompt", "") or "").strip()
@@ -97,8 +105,8 @@ Result contract:
 
 {COORDINATE_RULES}
 
-Asset catalog (place exactly the required count of each type):
-{catalog_table(catalog)}
+Asset catalog (place exactly the requested count of each type shown after "need"):
+{catalog_table(catalog, counts)}
 
 ICU schematic planning rules (the validator enforces these exact values):
 {json.dumps(rules, indent=2)}

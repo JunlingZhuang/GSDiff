@@ -42,6 +42,37 @@ def snap_ft(value: float) -> float:
     return round(round(value / 0.25) * 0.25, 4)
 
 
+def resolve_asset_counts(catalog: dict[str, Any], requested: Any) -> dict[str, int]:
+    """Merge caller-requested per-type counts over the catalog defaults.
+
+    The catalog's ``count_required`` is the DEFAULT count for each type; each entry also
+    carries ``min_count``/``max_count`` bounds. A request is a ``{type: count}`` mapping
+    that overrides the default for the named types. An unknown type or an out-of-range
+    count raises ValueError so the room service surfaces it as a 400-style client error.
+    """
+    by_type = {str(entry["type"]): entry for entry in catalog.get("assets", [])}
+    counts = {asset_type: int(entry.get("count_required", entry.get("min_count", 1))) for asset_type, entry in by_type.items()}
+    if requested is None:
+        return counts
+    if not isinstance(requested, dict):
+        raise ValueError("payload['assets'] must be an object mapping asset type to a requested count.")
+    for asset_type, value in requested.items():
+        key = str(asset_type)
+        entry = by_type.get(key)
+        if entry is None:
+            raise ValueError(f"Unknown asset type '{key}' in the requested counts.")
+        try:
+            count = int(value)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"Requested count for '{key}' must be an integer.") from error
+        low = int(entry.get("min_count", 0))
+        high = int(entry.get("max_count", low))
+        if not low <= count <= high:
+            raise ValueError(f"Requested {key} count {count} is outside the allowed range {low}-{high}.")
+        counts[key] = count
+    return counts
+
+
 def normalize_room_request(payload: dict[str, Any]) -> dict[str, Any]:
     room = payload.get("room")
     if not isinstance(room, dict):
@@ -88,6 +119,9 @@ def generate_room_plan(payload: dict[str, Any]) -> dict[str, Any]:
     room_request = normalize_room_request(payload)
     rules = load_room_rules()
     catalog = load_room_catalog()
+    # Requested asset counts (optional) are validated against the catalog bounds up front so
+    # an out-of-range request fails fast before any model call; absent, the defaults apply.
+    asset_counts = resolve_asset_counts(catalog, payload.get("assets"))
     api_key = os.environ.get("GEMINI_API_KEY", "")
     if not api_key:
         raise ValueError("GEMINI_API_KEY is not configured. Add the key before running the room agent.")
@@ -112,7 +146,7 @@ def generate_room_plan(payload: dict[str, Any]) -> dict[str, Any]:
             "repair_context": None if attempt_number == 1 else latest_error,
             "previous_code": None if attempt_number == 1 else previous_code,
         }
-        prompt_text = build_room_prompt(prompt_request, rules, catalog)
+        prompt_text = build_room_prompt(prompt_request, rules, catalog, asset_counts)
         append_job_event({"e": "attempt_start", "attempt": attempt_number, "phase": phase, "model": model})
         publish_job_progress(
             [*iterations, {
@@ -148,7 +182,7 @@ def generate_room_plan(payload: dict[str, Any]) -> dict[str, Any]:
             spent_usd += float(usage_row.get("estimated_cost_usd") or 0.0)
             previous_code = candidate["code"]
             sanitized_code, room = execute_room_code(previous_code)
-            validation = validate_room(room, rules, catalog)
+            validation = validate_room(room, rules, catalog, asset_counts)
             result = {"code": sanitized_code, "room": room, "validation": validation}
             latest_error = room_rejection_reason(validation)
             append_job_event({
