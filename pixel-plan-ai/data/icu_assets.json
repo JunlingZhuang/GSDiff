@@ -1,6 +1,7 @@
 {
   "profile": "icu-room-schematic-v1",
   "status": "Schematic single-patient ICU asset catalog; footprints are planning approximations, not manufacturer data.",
+  "facing_convention": "At rotation_deg 0 an asset's FRONT is its SOUTH edge (-y side). Wall-anchored assets set rotation_deg by wall so the front turns into the room: N->0, S->180, E->270, W->90. On E/W walls this rotation swaps the placed footprint (a 6x2 casework places as 2x6). The 2D symbols (web/public/assets/2d) and 3D GLBs (web/public/assets/3d) are authored front-south to match; icu_bed is exempt (its head/foot axis is set by layout logic, not this rule).",
   "assets": [
     {
       "type": "icu_bed",

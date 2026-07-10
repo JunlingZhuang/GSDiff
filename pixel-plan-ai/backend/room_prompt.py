@@ -3,9 +3,14 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from room_validator import WALL_FACING_ROTATION
+
 # Room-scale sibling of gemini.build_prompt, kept deliberately short: the domain is one ICU
 # room, not a whole floor. The validator (room_validator.validate_room) is the sole judge, so
 # this prompt teaches the coordinate contract and restates the rules the validator enforces.
+
+# Decidable facing table, sourced from the SAME map the validator enforces so the two never drift.
+_FACING_TABLE = ", ".join(f"{wall}->{deg}" for wall, deg in WALL_FACING_ROTATION.items())
 
 RESULT_CONTRACT = """result = {
     "room": {
@@ -25,12 +30,14 @@ RESULT_CONTRACT = """result = {
     ]
 }"""
 
-COORDINATE_RULES = """Coordinate system (feet, 0.25 ft grid):
+COORDINATE_RULES = f"""Coordinate system (feet, 0.25 ft grid):
 - x runs 0 at the West wall to width_ft at the East wall. y runs 0 at the South wall to depth_ft at the North wall.
 - (x_ft, y_ft) is the SOUTH-WEST (minimum) corner of an asset; its footprint covers [x_ft, x_ft + w_ft] by [y_ft, y_ft + d_ft].
 - Every asset must lie fully inside the room. Snap all coordinates and sizes to 0.25 ft.
 - w_ft and d_ft are the footprint AS PLACED. rotation_deg 90 or 270 swaps the catalog width and depth; 0 and 180 keep them.
 - A wall-anchored asset must be flush to its declared wall (within 0.25 ft): N means y_ft + d_ft = depth_ft, S means y_ft = 0, E means x_ft + w_ft = width_ft, W means x_ft = 0. Set "wall" to that wall; use None for floor, ceiling, and mobile assets.
+- FACING: at rotation_deg 0 an asset's FRONT is its SOUTH edge. A wall-anchored asset must set rotation_deg by its wall so the front faces the room: {_FACING_TABLE}. This is not free — the wall fixes the value. Ceiling, mobile, and floor assets keep rotation_deg 0.
+- FOOTPRINT CONSEQUENCE: on the E and W walls that facing rotation is 90/270, which SWAPS the placed footprint (a 6x2 casework places as 2x6, i.e. w_ft=2, d_ft=6); on the N and S walls (0/180) the footprint keeps the catalog width and depth.
 - door.offset_ft is the door CENTER measured along its wall from the origin corner (from x=0 for N/S walls, from y=0 for E/W walls)."""
 
 EXECUTION_ENVIRONMENT = """Execution environment:

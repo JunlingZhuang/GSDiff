@@ -325,7 +325,13 @@ function drawAsset(
   context.save();
   context.globalAlpha = alpha;
   context.translate(centerX, centerY);
-  context.rotate((asset.rotation_deg * Math.PI) / 180);
+  // rotation_deg is counter-clockwise in the room's y-up frame (matching the 3D
+  // viewport's documented convention). Canvas y points DOWN, so a positive room
+  // CCW turn is a NEGATIVE canvas rotation — hence the sign flip. Without it the
+  // 2D symbol spun the opposite way from the GLB, so a validator-passing facing
+  // (front-south at rot 0; wall map N:0 S:180 E:270 W:90) looked correct in 3D
+  // but backwards in 2D. See scripts/generate-3d-assets.mjs for the convention.
+  context.rotate(-(asset.rotation_deg * Math.PI) / 180);
   if (image && image.complete && image.naturalWidth > 0) {
     context.drawImage(image, -iw / 2, -ih / 2, iw, ih);
     if (asset.anchor === "ceiling") {

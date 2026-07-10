@@ -1776,6 +1776,9 @@ def known_good_icu_room() -> dict[str, object]:
     opposite sides of the long axis; the monitor/iv sit on the east (equipment) side; the
     visitor chair sits on the west (visitor) side; casework runs the E wall clear of the
     S-wall door swing; the handwash sink is beside the door on the S wall.
+
+    Wall assets carry their facing rotation (WALL_FACING_ROTATION so the front turns into the
+    room): monitor on N -> 0, casework on E -> 270, sink on S -> 180.
     """
     return {
         "room": {"width_ft": 16.5, "depth_ft": 16.75, "door": {"wall": "S", "offset_ft": 8.25, "width_ft": 5.0}},
@@ -1786,8 +1789,8 @@ def known_good_icu_room() -> dict[str, object]:
             icu_asset("monitor", "patient_monitor", 10.5, 16.0, 1.5, 0.75, 0, "N", "wall"),
             icu_asset("iv", "iv_pole", 10.0, 14.5, 1.25, 1.25, 0, None, "mobile"),
             icu_asset("chair", "visitor_chair", 0.0, 2.0, 2.0, 2.0, 0, None, "floor"),
-            icu_asset("casework", "casework", 14.5, 0.75, 2.0, 6.0, 90, "E", "wall"),
-            icu_asset("sink", "handwash_sink", 3.0, 0.0, 2.0, 1.75, 0, "S", "wall"),
+            icu_asset("casework", "casework", 14.5, 0.75, 2.0, 6.0, 270, "E", "wall"),
+            icu_asset("sink", "handwash_sink", 3.0, 0.0, 2.0, 1.75, 180, "S", "wall"),
             icu_asset("table", "overbed_table", 10.25, 11.0, 2.5, 1.25, 0, None, "mobile"),
         ],
     }
@@ -1842,6 +1845,32 @@ class IcuRoomTests(unittest.TestCase):
         casework["x_ft"] = 12.5  # 2 ft off the E wall it declares
         self.assertIn("anchor", self.failed_categories(plan))
 
+    def test_casework_facing_wrong_rotation_fails_anchor(self) -> None:
+        # Move the casework to the W wall (flush). The facing convention forces W -> 90; any
+        # other rotation turns its doors toward the wall, which the anchor category must flag.
+        plan = known_good_icu_room()
+        casework = next(asset for asset in plan["assets"] if asset["id"] == "casework")
+        casework["x_ft"], casework["y_ft"], casework["wall"] = 0.0, 0.75, "W"
+        casework["w_ft"], casework["d_ft"] = 2.0, 6.0  # E/W footprint swap (6x2 -> 2x6)
+        casework["rotation_deg"] = 270  # wrong for W (that is the E value)
+        self.assertIn("anchor", self.failed_categories(plan))
+        # The correct facing rotation clears the anchor category (flush + facing both pass).
+        casework["rotation_deg"] = 90
+        self.assertNotIn("anchor", self.failed_categories(plan))
+
+    def test_known_good_wall_assets_use_mapped_facing_rotations(self) -> None:
+        # The known-good fixture must itself obey the facing map, so the facing check is
+        # actually exercised on a passing layout (regression guard against silent drift).
+        plan = known_good_icu_room()
+        by_id = {asset["id"]: asset for asset in plan["assets"]}
+        self.assertEqual(by_id["monitor"]["rotation_deg"], 0)  # N
+        self.assertEqual(by_id["casework"]["rotation_deg"], 270)  # E
+        self.assertEqual(by_id["sink"]["rotation_deg"], 180)  # S
+        result = validate_room(plan, ICU_RULES, ICU_CATALOG)
+        facing = next(check for check in result["checks"] if check["label"].startswith("Wall assets face the room"))
+        self.assertTrue(facing["pass"])
+        self.assertEqual(facing["category"], "anchor")
+
     def test_zero_booms_skip_boom_checks_and_still_pass(self) -> None:
         # A custom program that requests zero ceiling booms drops both booms; the boom-specific
         # equipment check must be absent (not recorded as a failure) and 0/0 satisfies count.
@@ -1881,18 +1910,44 @@ class IcuRoomTests(unittest.TestCase):
         self.assertIn("1/2", monitor_count["label"])
 
     def test_sandbox_accepts_rotated_footprint_swap(self) -> None:
+        # E-wall casework at the mapped facing rotation (270) places its 6x2 catalog
+        # footprint swapped to 2x6; the sandbox must normalize that swap without complaint.
         code = (
             "result = {"
             "'room': {'width_ft': 16.5, 'depth_ft': 16.75, 'door': {'wall': 'S', 'offset_ft': 8.25, 'width_ft': 5.0}},"
             "'assets': ["
             "{'id': 'bed', 'type': 'icu_bed', 'x_ft': 6.5, 'y_ft': 8.25, 'w_ft': 3.5, 'd_ft': 7.5, 'rotation_deg': 0, 'wall': None},"
-            "{'id': 'casework', 'type': 'casework', 'x_ft': 14.5, 'y_ft': 0.75, 'w_ft': 2.0, 'd_ft': 6.0, 'rotation_deg': 90, 'wall': 'E'}"
+            "{'id': 'casework', 'type': 'casework', 'x_ft': 14.5, 'y_ft': 0.75, 'w_ft': 2.0, 'd_ft': 6.0, 'rotation_deg': 270, 'wall': 'E'}"
             "]}"
         )
         _, result = execute_room_code(code)
         casework = result["assets"][1]
         self.assertEqual((casework["w_ft"], casework["d_ft"]), (2.0, 6.0))
+        self.assertEqual(casework["rotation_deg"], 270)
         self.assertEqual(result["assets"][0]["anchor"], "floor")  # anchor is looked up from the catalog
+
+    def test_sandbox_normalizes_wall_assets_at_every_mapped_rotation(self) -> None:
+        # Forced facing rotations must pass the sandbox footprint-swap check on all four walls:
+        # N/S keep the 6x2 casework footprint, E/W (90/270) swap it to 2x6.
+        room = "'room': {'width_ft': 18.0, 'depth_ft': 18.0, 'door': {'wall': 'S', 'offset_ft': 9.0, 'width_ft': 5.0}}"
+        cases = {
+            "N": ("6.0, 2.0", "6.0, 16.0", 0),
+            "S": ("6.0, 2.0", "6.0, 0.0", 180),
+            "E": ("2.0, 6.0", "16.0, 6.0", 270),
+            "W": ("2.0, 6.0", "0.0, 6.0", 90),
+        }
+        for wall, (footprint, position, rotation) in cases.items():
+            code = (
+                "result = {" + room + ", 'assets': ["
+                f"{{'id': 'cw', 'type': 'casework', 'x_ft': {position.split(', ')[0]}, "
+                f"'y_ft': {position.split(', ')[1]}, 'w_ft': {footprint.split(', ')[0]}, "
+                f"'d_ft': {footprint.split(', ')[1]}, 'rotation_deg': {rotation}, 'wall': '{wall}'}}"
+                "]}"
+            )
+            _, result = execute_room_code(code)
+            casework = result["assets"][0]
+            self.assertEqual(casework["rotation_deg"], rotation, wall)
+            self.assertEqual((casework["w_ft"], casework["d_ft"]), tuple(float(v) for v in footprint.split(", ")), wall)
 
     def test_sandbox_rejects_unknown_asset_type(self) -> None:
         code = (
@@ -2032,6 +2087,19 @@ class RoomServiceTests(unittest.TestCase):
         self.assertIn("L-shaped routes do not count", prompt)
         self.assertIn("16.5 - 3.5 = 13.0", prompt)
         self.assertIn("observed: 7.91 ft", prompt)
+
+    def test_room_prompt_states_the_wall_facing_table(self) -> None:
+        # The prompt must teach the decidable facing table, drawn from the SAME map the
+        # validator enforces, plus the E/W footprint-swap consequence.
+        from room_validator import WALL_FACING_ROTATION
+
+        rules = room_service.load_room_rules()
+        catalog = room_service.load_room_catalog()
+        prompt = build_room_prompt({"width_ft": 16.5, "depth_ft": 16.75}, rules, catalog)
+        for wall, deg in WALL_FACING_ROTATION.items():
+            self.assertIn(f"{wall}->{deg}", prompt)
+        self.assertIn("FRONT is its SOUTH edge", prompt)
+        self.assertIn("SWAPS the placed footprint", prompt)
 
 
 if __name__ == "__main__":

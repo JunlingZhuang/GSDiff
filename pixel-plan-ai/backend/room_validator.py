@@ -26,6 +26,15 @@ CATEGORY_WEIGHTS: dict[str, int] = {
 TOL = 1e-6
 ANCHOR_TOL = 0.25  # flush-to-wall tolerance (ft)
 
+# Facing convention (shared with room_prompt.py, the 2D symbols in
+# web/public/assets/2d, and the GLB builders in scripts/generate-3d-assets.mjs):
+# at rotation_deg 0 an asset's FRONT is its SOUTH edge. A wall-anchored asset must
+# rotate so its front turns INTO the room, giving this deterministic wall->rotation
+# map. Both renderers rotate counter-clockwise in the room's y-up frame, so a
+# front-south asset at these rotations shows its front inward in 2D and 3D alike.
+# On E/W walls the rotation is 90/270, which swaps the placed footprint.
+WALL_FACING_ROTATION: dict[str, int] = {"N": 0, "S": 180, "E": 270, "W": 90}
+
 
 def asset_rect(asset: dict[str, Any]) -> tuple[float, float, float, float]:
     return (asset["x_ft"], asset["y_ft"], asset["w_ft"], asset["d_ft"])
@@ -282,6 +291,24 @@ def validate_room(
     if unflush:
         issues.append("Wall assets not flush against their wall: " + ", ".join(sorted(unflush)) + ".")
     record("anchor", f"Wall assets flush to their wall ({len(unflush)} loose)", not unflush)
+
+    # Every wall-anchored asset must SHOW ITS FRONT to the room. By the facing
+    # convention (front = south edge at rotation 0) that fixes rotation_deg to a
+    # deterministic value per wall (WALL_FACING_ROTATION); a casework/monitor/sink
+    # at any other rotation faces the wall (the observed "casework doors into the
+    # wall" defect). Ceiling, mobile, and floor assets have no wall and are exempt.
+    misfacing: list[str] = []
+    for asset in wall_assets:
+        expected = WALL_FACING_ROTATION.get(asset["wall"])
+        if expected is None or int(asset.get("rotation_deg", 0)) != expected:
+            misfacing.append(asset["id"])
+    if misfacing:
+        issues.append(
+            "Wall assets not facing the room (rotation_deg must be "
+            + ", ".join(f"{wall}->{deg}" for wall, deg in WALL_FACING_ROTATION.items())
+            + "): " + ", ".join(sorted(misfacing)) + "."
+        )
+    record("anchor", f"Wall assets face the room ({len(misfacing)} misfacing)", not misfacing)
 
     # --- clearance -------------------------------------------------------------
     if frame is not None:
