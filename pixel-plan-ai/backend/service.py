@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import time
 from typing import Any
@@ -154,90 +155,172 @@ def execute_and_validate(
     return {"code": sanitized, "plan": plan, "validation": validate_plan(plan, program)}
 
 
-def layout_fidelity(seed: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
-    """Cell-IoU similarity of an executed candidate plan to the traced seed.
+def _normalized_room_centroids(
+    container: dict[str, Any],
+) -> tuple[list[tuple[float, float] | None], list[int]]:
+    """Per-room centroids normalized into the occupied bounding box, plus cell counts.
 
-    Rooms are matched by EXACT id first (seed ids usually survive ROOM_DATA repairs);
-    each unmatched seed room then greedily takes the same-type candidate room with the
-    highest cell overlap. Per matched room the metric is the IoU of its cell-index sets.
-    The score is the seed-cell-weighted mean IoU over every seed room, as a percent.
-
-    Both seed and plan carry a flat ``cells`` list indexed row-major (``y*width + x``),
-    with each nonnegative value an index into the corresponding ``rooms`` list. In refine
-    mode the canvases match; when they differ fidelity is undefined and ``{"score": None}``
-    is returned. Added 2026-07-10 so preservation guidance has a measured consequence.
+    The occupied bbox is taken over every room cell (values ``>= 0``) on this side alone,
+    then each room's centroid (mean of its own cell coords) is mapped to ``u=(cx-bx)/bw``,
+    ``v=(cy-by)/bh`` (a 0-width/height span is guarded to 1). Removing each side's own
+    translation and scale is what makes the metric scale-invariant. A room with no cells
+    has centroid ``None``.
     """
-    if (
-        int(seed.get("width", 0)) != int(plan.get("width", 0))
-        or int(seed.get("height", 0)) != int(plan.get("height", 0))
-    ):
-        return {"score": None}
+    rooms = container.get("rooms", [])
+    width = int(container.get("width", 0)) or 1
+    sum_x = [0.0] * len(rooms)
+    sum_y = [0.0] * len(rooms)
+    counts = [0] * len(rooms)
+    min_x = min_y = max_x = max_y = None
+    for position, room_index in enumerate(container.get("cells", [])):
+        if not isinstance(room_index, int) or not 0 <= room_index < len(rooms):
+            continue
+        x, y = position % width, position // width
+        sum_x[room_index] += x
+        sum_y[room_index] += y
+        counts[room_index] += 1
+        min_x = x if min_x is None or x < min_x else min_x
+        max_x = x if max_x is None or x > max_x else max_x
+        min_y = y if min_y is None or y < min_y else min_y
+        max_y = y if max_y is None or y > max_y else max_y
+    if min_x is None:  # no room cells on this side
+        return [None] * len(rooms), counts
+    bw = (max_x - min_x) or 1
+    bh = (max_y - min_y) or 1
+    centroids: list[tuple[float, float] | None] = []
+    for index in range(len(rooms)):
+        if counts[index] == 0:
+            centroids.append(None)
+        else:
+            cx, cy = sum_x[index] / counts[index], sum_y[index] / counts[index]
+            centroids.append(((cx - min_x) / bw, (cy - min_y) / bh))
+    return centroids, counts
 
+
+def layout_fidelity(seed: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
+    """Scale-invariant relative-layout similarity of a candidate plan to the traced seed.
+
+    v2 (user decision 2026-07-10): a legitimate in-place rescale — shrinking rooms to hit
+    ft^2 targets — must not read as a layout change. Each side is normalized into its own
+    occupied bounding box, so uniform scaling and translation cost nothing; only rearranging
+    rooms does. The score blends two components, both in ``[0, 1]``:
+
+    * position (0.6) — per matched room, displacement ``d = hypot(du, dv)`` between the seed
+      and candidate normalized centroids scores ``max(0, 1 - d/0.5)`` (zero credit at
+      half-building displacement), size-weighted by seed cell count, unmatched rooms carrying
+      their weight at zero credit.
+    * arrangement (0.4) — over all matched room pairs, the fraction of relative orderings
+      preserved: for each axis a pair counts only when the seed separation exceeds 0.08, and
+      is preserved when the sign of the seed separation matches the candidate's (1.0 when no
+      pair is decisive on either axis).
+
+    Rooms are matched by EXACT id first (ids survive most ROOM_DATA repairs); each remaining
+    seed room then greedily takes the nearest unused same-type candidate by normalized centroid
+    distance (overlap matching breaks under rescale). Unmatched seed rooms earn no position
+    credit and are listed in ``unmatched``. ``movers`` reports up to five matched rooms with
+    the lowest position score as ``(seed_id, displacement percent of the building diagonal)``.
+    Both sides carry a flat ``cells`` list indexed row-major (``y*width + x``) whose nonnegative
+    values index the matching ``rooms`` list.
+    """
     seed_rooms = seed.get("rooms", [])
     plan_rooms = plan.get("rooms", [])
-    seed_sets: list[set[int]] = [set() for _ in seed_rooms]
-    for position, room_index in enumerate(seed.get("cells", [])):
-        if isinstance(room_index, int) and 0 <= room_index < len(seed_sets):
-            seed_sets[room_index].add(position)
-    plan_sets: list[set[int]] = [set() for _ in plan_rooms]
-    for position, room_index in enumerate(plan.get("cells", [])):
-        if isinstance(room_index, int) and 0 <= room_index < len(plan_sets):
-            plan_sets[room_index].add(position)
-
-    def iou(seed_cells: set[int], plan_cells: set[int]) -> float:
-        union = len(seed_cells | plan_cells)
-        return len(seed_cells & plan_cells) / union if union else 1.0
+    seed_centroids, seed_counts = _normalized_room_centroids(seed)
+    plan_centroids, _plan_counts = _normalized_room_centroids(plan)
 
     plan_index_by_id: dict[str, int] = {}
     for index, room in enumerate(plan_rooms):
         plan_index_by_id.setdefault(str(room.get("id")), index)
 
-    matches: list[tuple[str, float, int]] = []  # (seed_id, iou, seed_cell_count)
+    # (seed_id, (su, sv), (pu, pv), position_score, weight, displacement_percent)
+    matches: list[tuple[str, tuple[float, float], tuple[float, float], float, int, float]] = []
     consumed_plan: set[int] = set()
     remaining_seed: list[int] = []
+    diagonal = math.hypot(1.0, 1.0)  # building diagonal in normalized space
+
+    def record_match(seed_index: int, plan_index: int) -> None:
+        seed_uv = seed_centroids[seed_index]
+        plan_uv = plan_centroids[plan_index]
+        assert seed_uv is not None and plan_uv is not None
+        distance = math.hypot(seed_uv[0] - plan_uv[0], seed_uv[1] - plan_uv[1])
+        position_score = max(0.0, 1.0 - distance / 0.5)
+        matches.append((
+            str(seed_rooms[seed_index].get("id")),
+            seed_uv,
+            plan_uv,
+            position_score,
+            seed_counts[seed_index],
+            round(distance / diagonal * 100, 1),
+        ))
+
     # Pass 1: exact id match — the id survives most ROOM_DATA repairs.
     for seed_index, room in enumerate(seed_rooms):
-        seed_id = str(room.get("id"))
-        plan_index = plan_index_by_id.get(seed_id)
-        if plan_index is not None and plan_index not in consumed_plan:
+        if seed_centroids[seed_index] is None:
+            continue  # a seed room with no cells cannot be scored or missed
+        plan_index = plan_index_by_id.get(str(room.get("id")))
+        if plan_index is not None and plan_index not in consumed_plan and plan_centroids[plan_index] is not None:
             consumed_plan.add(plan_index)
-            matches.append((seed_id, iou(seed_sets[seed_index], plan_sets[plan_index]), len(seed_sets[seed_index])))
+            record_match(seed_index, plan_index)
         else:
             remaining_seed.append(seed_index)
 
-    # Pass 2: greedy same-type match, highest cell overlap first.
-    candidate_pairs: list[tuple[int, int, int]] = []  # (overlap, seed_index, plan_index)
+    # Pass 2: greedy same-type match, nearest normalized centroid first.
+    candidate_pairs: list[tuple[float, int, int]] = []  # (distance, seed_index, plan_index)
     for seed_index in remaining_seed:
         seed_type = str(seed_rooms[seed_index].get("type"))
+        su, sv = seed_centroids[seed_index]
         for plan_index, room in enumerate(plan_rooms):
-            if plan_index in consumed_plan or str(room.get("type")) != seed_type:
+            plan_uv = plan_centroids[plan_index]
+            if plan_index in consumed_plan or plan_uv is None or str(room.get("type")) != seed_type:
                 continue
-            overlap = len(seed_sets[seed_index] & plan_sets[plan_index])
-            if overlap > 0:
-                candidate_pairs.append((overlap, seed_index, plan_index))
-    candidate_pairs.sort(key=lambda item: (-item[0], item[1], item[2]))
+            candidate_pairs.append((math.hypot(su - plan_uv[0], sv - plan_uv[1]), seed_index, plan_index))
+    candidate_pairs.sort(key=lambda item: (item[0], item[1], item[2]))
     matched_seed: set[int] = set()
-    for _overlap, seed_index, plan_index in candidate_pairs:
+    for _distance, seed_index, plan_index in candidate_pairs:
         if seed_index in matched_seed or plan_index in consumed_plan:
             continue
         consumed_plan.add(plan_index)
         matched_seed.add(seed_index)
-        seed_id = str(seed_rooms[seed_index].get("id"))
-        matches.append((seed_id, iou(seed_sets[seed_index], plan_sets[plan_index]), len(seed_sets[seed_index])))
+        record_match(seed_index, plan_index)
 
     unmatched = [
         str(seed_rooms[seed_index].get("id"))
         for seed_index in remaining_seed
         if seed_index not in matched_seed
     ]
-    total_weight = sum(weight for _, _, weight in matches) + sum(
-        len(seed_sets[seed_index]) for seed_index in remaining_seed if seed_index not in matched_seed
+
+    # Position component: seed-cell-weighted mean of the per-room position scores, with the
+    # weight of every unmatched seed room dragging the mean down at zero credit.
+    matched_weight = sum(weight for _, _, _, _, weight, _ in matches)
+    unmatched_weight = sum(
+        seed_counts[seed_index] for seed_index in remaining_seed if seed_index not in matched_seed
     )
-    weighted_iou = sum(value * weight for _, value, weight in matches)
-    score = round(weighted_iou / total_weight * 100, 1) if total_weight else 100.0
+    total_weight = matched_weight + unmatched_weight
+    if total_weight:
+        position = sum(score * weight for _, _, _, score, weight, _ in matches) / total_weight
+    else:
+        position = 1.0
+
+    # Arrangement component: fraction of decisive relative orderings preserved per axis.
+    considered = 0
+    preserved = 0
+    for a in range(len(matches)):
+        (_, (sua, sva), (pua, pva), _, _, _) = matches[a]
+        for b in range(a + 1, len(matches)):
+            (_, (sub, svb), (pub, pvb), _, _, _) = matches[b]
+            if abs(sua - sub) > 0.08:
+                considered += 1
+                preserved += (sua - sub > 0) == (pua - pub > 0)
+            if abs(sva - svb) > 0.08:
+                considered += 1
+                preserved += (sva - svb > 0) == (pva - pvb > 0)
+    arrangement = preserved / considered if considered else 1.0
+
+    score = round(100 * (0.6 * position + 0.4 * arrangement), 1)
     movers = [
-        (seed_id, round(value * 100, 1))
-        for seed_id, value, _ in sorted(matches, key=lambda item: (item[1], item[0]))[:5]
+        (seed_id, displacement)
+        for seed_id, _, _, position_score, _, displacement in sorted(
+            matches, key=lambda item: (item[3], item[0])
+        )[:5]
     ]
     return {"score": score, "movers": movers, "unmatched": unmatched}
 
@@ -248,9 +331,11 @@ def format_fidelity_line(fidelity: dict[str, Any]) -> str | None:
     if score is None:
         return None
     line = f"layout fidelity vs traced seed: {score}%"
-    movers = [(room_id, percent) for room_id, percent in fidelity.get("movers", []) if percent < 100.0]
+    movers = [(room_id, percent) for room_id, percent in fidelity.get("movers", []) if percent > 0]
     if movers:
-        line += " — biggest moves: " + ", ".join(f"{room_id} ({percent:g}%)" for room_id, percent in movers)
+        line += " — biggest moves: " + ", ".join(
+            f"{room_id} (moved {percent:g}%)" for room_id, percent in movers
+        )
     unmatched = fidelity.get("unmatched", [])
     if unmatched:
         line += "; missing: " + ", ".join(unmatched)
@@ -604,13 +689,15 @@ def generate_plan(
             if latest_error and prior_validation is not None:
                 latest_error = validation_delta(prior_validation, result["validation"]) + "\n" + latest_error
             # Refine only: measure similarity to the traced seed so preservation is enforced,
-            # not merely suggested. A fidelity drop is a repair signal, and an optional floor
-            # (REFINE_FIDELITY_MIN) can reject an otherwise-passing but drifted candidate.
+            # not merely suggested. A fidelity drop is a repair signal, and the floor
+            # (REFINE_FIDELITY_MIN) rejects an otherwise-passing but drifted candidate.
+            # User decision 2026-07-10: relative-layout preservation is a first-class
+            # acceptance criterion in refine mode, so the floor defaults ON at 60 (0 disables).
             if fidelity_seed is not None:
                 fidelity = layout_fidelity(fidelity_seed, result["plan"])
                 last_fidelity_score = fidelity.get("score")
                 fidelity_line = format_fidelity_line(fidelity)
-                fidelity_floor = max(0.0, float(os.environ.get("REFINE_FIDELITY_MIN", "0")))
+                fidelity_floor = max(0.0, float(os.environ.get("REFINE_FIDELITY_MIN", "60")))
                 if (
                     fidelity_floor > 0
                     and last_fidelity_score is not None

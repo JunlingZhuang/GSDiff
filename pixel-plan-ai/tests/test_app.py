@@ -1288,7 +1288,10 @@ class SeedRefineTests(unittest.TestCase):
             "model": "quality-model",
         }
         with (
-            patch.dict(os.environ, {"GEMINI_API_KEY": "test-key", "GEMINI_MODEL": "quality-model"}),
+            # This test exercises repair guidance, not fidelity; keep the gate out of the way.
+            patch.dict(os.environ, {
+                "GEMINI_API_KEY": "test-key", "GEMINI_MODEL": "quality-model", "REFINE_FIDELITY_MIN": "0",
+            }),
             patch.object(service, "execute_and_validate", side_effect=[failing, passing]),
             patch.object(service, "generate_gemini_code", return_value=model_output) as generate_mock,
         ):
@@ -1344,7 +1347,10 @@ class SeedRefineTests(unittest.TestCase):
             {"code": "repair-2", "strategy": "second repair", "assumptions": [], "model": "quality-model"},
         ]
         with (
-            patch.dict(os.environ, {"GEMINI_API_KEY": "test-key", "GEMINI_MODEL": "quality-model"}),
+            # This test exercises the validator delta, not fidelity; keep the gate out of the way.
+            patch.dict(os.environ, {
+                "GEMINI_API_KEY": "test-key", "GEMINI_MODEL": "quality-model", "REFINE_FIDELITY_MIN": "0",
+            }),
             patch.object(
                 service,
                 "execute_and_validate",
@@ -1383,31 +1389,78 @@ class SeedRefineTests(unittest.TestCase):
             service.dispatch_job({"job_kind": "refine", "program": {}, "seed": {}})
         refine_mock.assert_called_once()
 
-    def test_layout_fidelity_scores_weighted_iou_and_lists_movers(self) -> None:
-        width, height = 8, 6
+    @staticmethod
+    def _painted_plan(
+        width: int,
+        height: int,
+        rooms: list[dict[str, str]],
+        rects: list[tuple[int, int, int, int, int]],
+    ) -> dict[str, object]:
+        """Paint (index, x0, y0, x1, y1) rectangles onto a row-major cells grid."""
+        cells = [-1] * (width * height)
+        for index, x0, y0, x1, y1 in rects:
+            for y in range(y0, y1):
+                for x in range(x0, x1):
+                    cells[y * width + x] = index
+        return {"width": width, "height": height, "rooms": rooms, "cells": cells}
 
-        def grid(rects: list[tuple[int, int, int, int, int]]) -> list[int]:
-            cells = [-1] * (width * height)
-            for index, x0, y0, x1, y1 in rects:
-                for y in range(y0, y1):
-                    for x in range(x0, x1):
-                        cells[y * width + x] = index
-            return cells
-
-        rooms = [{"id": "room_a", "type": "office"}, {"id": "room_b", "type": "office"}]
-        seed = {"width": width, "height": height, "rooms": rooms,
-                "cells": grid([(0, 0, 0, 4, 3), (1, 6, 0, 8, 2)])}
-        # room_a (12 cells) identical; room_b (4 cells) shifted entirely out of overlap.
-        plan = {"width": width, "height": height, "rooms": rooms,
-                "cells": grid([(0, 0, 0, 4, 3), (1, 6, 4, 8, 6)])}
-        fidelity = service.layout_fidelity(seed, plan)
-        # Size-weighted mean IoU = (1.0*12 + 0.0*4) / 16 = 0.75.
-        self.assertEqual(fidelity["score"], 75.0)
-        self.assertIn("room_b", [room_id for room_id, _ in fidelity["movers"]])
-        self.assertEqual(dict(fidelity["movers"])["room_b"], 0.0)
+    def test_layout_fidelity_identical_layout_scores_100(self) -> None:
+        rooms = [
+            {"id": "waiting_0", "type": "waiting"},
+            {"id": "exam_0", "type": "exam"},
+            {"id": "exam_1", "type": "exam"},
+        ]
+        plan = self._painted_plan(
+            32, 24, rooms, [(0, 0, 0, 24, 8), (1, 0, 8, 12, 24), (2, 12, 8, 24, 24)]
+        )
+        fidelity = service.layout_fidelity(plan, plan)
+        self.assertEqual(fidelity["score"], 100.0)
         self.assertEqual(fidelity["unmatched"], [])
-        # A different canvas makes fidelity undefined.
-        self.assertIsNone(service.layout_fidelity(seed, {**plan, "width": 10})["score"])
+
+    def test_layout_fidelity_is_scale_invariant(self) -> None:
+        # THE key property: the same relative arrangement, uniformly shrunk to half size and
+        # translated elsewhere on the canvas, still reads as the same layout (a legitimate
+        # in-place rescale to hit ft2 targets must not collapse the score).
+        rooms = [
+            {"id": "waiting_0", "type": "waiting"},
+            {"id": "exam_0", "type": "exam"},
+            {"id": "exam_1", "type": "exam"},
+        ]
+        # Seed fills a 24x24 bbox at the origin: a full-width band over two stacked rooms.
+        seed = self._painted_plan(
+            32, 24, rooms, [(0, 0, 0, 24, 8), (1, 0, 8, 12, 24), (2, 12, 8, 24, 24)]
+        )
+        # Candidate: the identical arrangement at half scale in a 12x12 bbox in the lower-right.
+        candidate = self._painted_plan(
+            32, 24, rooms, [(0, 16, 8, 28, 12), (1, 16, 12, 22, 20), (2, 22, 12, 28, 20)]
+        )
+        fidelity = service.layout_fidelity(seed, candidate)
+        self.assertGreaterEqual(fidelity["score"], 90.0)
+        self.assertEqual(fidelity["unmatched"], [])
+
+    def test_layout_fidelity_penalizes_swapped_rooms(self) -> None:
+        rooms = [
+            {"id": "room_a", "type": "office"},
+            {"id": "room_b", "type": "office"},
+            {"id": "room_c", "type": "office"},
+        ]
+        # room_a left, room_c centre, room_b right.
+        seed = self._painted_plan(
+            12, 6, rooms, [(0, 0, 0, 3, 6), (2, 4, 0, 8, 6), (1, 9, 0, 12, 6)]
+        )
+        # room_a and room_b swap ends; room_c holds the centre.
+        swapped = self._painted_plan(
+            12, 6, rooms, [(0, 9, 0, 12, 6), (2, 4, 0, 8, 6), (1, 0, 0, 3, 6)]
+        )
+        fidelity = service.layout_fidelity(seed, swapped)
+        self.assertLess(fidelity["score"], 60.0)
+        movers = dict(fidelity["movers"])
+        self.assertIn("room_a", movers)
+        self.assertIn("room_b", movers)
+        # The swapped rooms carry a nonzero displacement percent; the anchor stays at zero.
+        self.assertGreater(movers["room_a"], 0)
+        self.assertGreater(movers["room_b"], 0)
+        self.assertEqual(movers["room_c"], 0.0)
 
     def test_refine_repair_feedback_carries_layout_fidelity(self) -> None:
         seed_rejected = {
@@ -1455,7 +1508,7 @@ class SeedRefineTests(unittest.TestCase):
         self.assertTrue(outcome["accepted"])
         self.assertEqual(outcome["seed_fidelity"], 100.0)
 
-    def test_fidelity_gate_rejects_drifted_candidate_only_when_enabled(self) -> None:
+    def test_fidelity_gate_defaults_on_and_rejects_drifted_candidate(self) -> None:
         seed_rejected = {
             "code": "seed",
             "plan": {"rooms": []},
@@ -1466,28 +1519,33 @@ class SeedRefineTests(unittest.TestCase):
                 "areas": [],
             },
         }
-        # Passes the validator (score 92) but waiting drifted into the far corner -> 50% fidelity.
+        # Passes the validator (score 92) but waiting and toilet swapped ends -> 15% fidelity,
+        # far below the default REFINE_FIDELITY_MIN floor of 60.
         drifted_but_valid = {
             "code": "repair",
-            "plan": make_refine_plan([(1, 2, 10, 38, 14), (2, 2, 14, 20, 22), (0, 20, 14, 38, 22)]),
+            "plan": make_refine_plan([(0, 2, 14, 20, 22), (1, 2, 10, 38, 14), (2, 2, 2, 38, 10)]),
             "validation": {"score": 92, "checks": [], "issues": [], "areas": []},
         }
         model_output = {"code": "repaired", "strategy": "s", "assumptions": [], "model": "quality-model"}
         base_env = {"GEMINI_API_KEY": "test-key", "GEMINI_MODEL": "quality-model", "GEMINI_MAX_ATTEMPTS": "2"}
-        # Gate on: the drifted-but-valid candidate is not accepted; the loop keeps repairing.
+        # Default env (no REFINE_FIDELITY_MIN => floor 60): the drifted-but-valid candidate is
+        # rejected and the loop keeps repairing, told it drifted too far from the traced seed.
         with (
-            patch.dict(os.environ, {**base_env, "REFINE_FIDELITY_MIN": "90"}),
+            patch.dict(os.environ, base_env),
             patch.object(service, "execute_and_validate",
                          side_effect=[seed_rejected, drifted_but_valid, drifted_but_valid]),
             patch.object(service, "generate_gemini_code", return_value=model_output) as gated_mock,
         ):
+            os.environ.pop("REFINE_FIDELITY_MIN", None)  # exercise the built-in default floor
             gated = service.refine_plan(
                 {"program": self.samples["clinic-small"], "seed": make_test_seed()}
             )
         self.assertFalse(gated["accepted"])
-        self.assertIn("drifted too far", gated_mock.call_args_list[1].args[5])
-        self.assertEqual(gated["seed_fidelity"], 50.0)
-        # Gate off (default 0): the identical candidate is accepted and carries its fidelity score.
+        drift_context = gated_mock.call_args_list[1].args[5]
+        self.assertIn("drifted too far", drift_context)
+        self.assertIn("layout fidelity vs traced seed", drift_context)
+        self.assertEqual(gated["seed_fidelity"], 15.0)
+        # Gate explicitly disabled (0): the same candidate is accepted and carries its fidelity.
         with (
             patch.dict(os.environ, {**base_env, "REFINE_FIDELITY_MIN": "0"}),
             patch.object(service, "execute_and_validate",
@@ -1498,7 +1556,7 @@ class SeedRefineTests(unittest.TestCase):
                 {"program": self.samples["clinic-small"], "seed": make_test_seed()}
             )
         self.assertTrue(ungated["accepted"])
-        self.assertEqual(ungated["seed_fidelity"], 50.0)
+        self.assertEqual(ungated["seed_fidelity"], 15.0)
 
 
 def _fake_urlopen_response(payload: dict[str, object]) -> object:
