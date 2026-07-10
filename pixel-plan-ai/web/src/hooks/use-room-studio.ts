@@ -4,6 +4,7 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { cancelGeneration, fetchHealth, fetchProgress, postRoom } from "@/lib/api";
+import { ICU_CATALOG, ICU_CATALOG_BY_TYPE } from "@/lib/icu-catalog";
 import type {
   GenerationEvent,
   GenerationIteration,
@@ -19,9 +20,32 @@ export interface RoomStatus {
   error: boolean;
 }
 
-// v1 ships a single preset; the select is present so the flow reads as a
-// library that will grow, but the dimensions are the only editable input.
+// Presets are IMMUTABLE templates. v1 ships one; a user duplicates a preset into a
+// custom program (below) to edit its per-asset counts.
 export const ROOM_PRESETS = [{ key: "icu-room-v1", label: "ICU Room v1" }] as const;
+
+// A user-owned, editable clone of a preset. Only custom programs allow changing
+// asset counts; they persist client-side under this localStorage key.
+export const ROOM_PROGRAMS_STORAGE_KEY = "ppai.room.programs.v1";
+
+export interface CustomProgram {
+  id: string;
+  name: string;
+  basePreset: string; // e.g. "icu-room-v1"
+  counts: Record<string, number>;
+}
+
+// The default per-type counts for a preset: the catalog's count_required. Cloning a
+// preset seeds a custom program with these; the steppers then edit within min/max.
+export function presetCounts(): Record<string, number> {
+  return Object.fromEntries(ICU_CATALOG.map((entry) => [entry.type, entry.count_required]));
+}
+
+function clampCount(type: string, value: number): number {
+  const entry = ICU_CATALOG_BY_TYPE[type];
+  if (!entry) return Math.max(0, Math.round(value));
+  return Math.max(entry.min_count, Math.min(entry.max_count, Math.round(value)));
+}
 
 const DEFAULT_WIDTH_FT = 16.5;
 const DEFAULT_DEPTH_FT = 16.75;
@@ -29,7 +53,13 @@ const DEFAULT_ROOM_PROMPT =
   "Lay out a calm single-patient ICU room: bed head on a headwall with clear transfer and foot space, equipment on one side, and the visitor chair on the other.";
 
 export function useRoomStudio() {
-  const [preset, setPreset] = React.useState<string>(ROOM_PRESETS[0].key);
+  // activeProgramId is either a preset key ("icu-room-v1") or a custom program id.
+  const [activeProgramId, setActiveProgramId] = React.useState<string>(ROOM_PRESETS[0].key);
+  const [programs, setPrograms] = React.useState<CustomProgram[]>([]);
+  const [programsLoaded, setProgramsLoaded] = React.useState(false);
+  // Set by createProgram so the panel can auto-focus the inline rename input once.
+  const [renameFocusId, setRenameFocusId] = React.useState<string | null>(null);
+
   const [widthFt, setWidthFt] = React.useState<number>(DEFAULT_WIDTH_FT);
   const [depthFt, setDepthFt] = React.useState<number>(DEFAULT_DEPTH_FT);
   const [prompt, setPrompt] = React.useState<string>(DEFAULT_ROOM_PROMPT);
@@ -81,6 +111,103 @@ export function useRoomStudio() {
     }, 250);
     return () => window.clearInterval(timer);
   }, [busyAction]);
+
+  // Load persisted custom programs once on mount (client-only).
+  React.useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(ROOM_PROGRAMS_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as CustomProgram[];
+        if (Array.isArray(parsed)) {
+          setPrograms(
+            parsed.filter(
+              (item): item is CustomProgram =>
+                !!item && typeof item.id === "string" && typeof item.name === "string" && !!item.counts,
+            ),
+          );
+        }
+      }
+    } catch {
+      // A corrupt or unavailable store is non-fatal: the user simply starts from the preset.
+    }
+    setProgramsLoaded(true);
+  }, []);
+
+  // Persist after the initial load so we never clobber the store with the empty default.
+  React.useEffect(() => {
+    if (!programsLoaded) return;
+    try {
+      window.localStorage.setItem(ROOM_PROGRAMS_STORAGE_KEY, JSON.stringify(programs));
+    } catch {
+      // Ignore quota / privacy-mode failures; programs stay in memory for the session.
+    }
+  }, [programs, programsLoaded]);
+
+  const activeProgram = React.useMemo(
+    () => programs.find((program) => program.id === activeProgramId) ?? null,
+    [programs, activeProgramId],
+  );
+  const isCustomActive = activeProgram !== null;
+
+  // The counts driving the payload + panel: a custom program's edited counts, or the
+  // immutable preset defaults. Presets send no counts to the backend (defaults apply).
+  const activeCounts = React.useMemo<Record<string, number>>(
+    () => activeProgram?.counts ?? presetCounts(),
+    [activeProgram],
+  );
+  const totalAssetCount = React.useMemo(
+    () => ICU_CATALOG.reduce((sum, entry) => sum + (activeCounts[entry.type] ?? 0), 0),
+    [activeCounts],
+  );
+
+  // Duplicate the ACTIVE program (preset or custom) into a new editable custom entry,
+  // select it, and flag it for inline rename focus.
+  const createProgram = React.useCallback(() => {
+    const sourceName = activeProgram
+      ? activeProgram.name
+      : (ROOM_PRESETS.find((preset) => preset.key === activeProgramId)?.label ?? "ICU Room");
+    const basePreset = activeProgram?.basePreset ?? activeProgramId;
+    const id =
+      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `prog-${Date.now()}`;
+    const clone: CustomProgram = {
+      id,
+      name: `${sourceName} copy`,
+      basePreset,
+      counts: { ...activeCounts },
+    };
+    setPrograms((current) => [...current, clone]);
+    setActiveProgramId(id);
+    setRenameFocusId(id);
+    return id;
+  }, [activeProgram, activeProgramId, activeCounts]);
+
+  const renameProgram = React.useCallback((id: string, name: string) => {
+    setPrograms((current) => current.map((program) => (program.id === id ? { ...program, name } : program)));
+  }, []);
+
+  const deleteProgram = React.useCallback(
+    (id: string) => {
+      setPrograms((current) => current.filter((program) => program.id !== id));
+      setActiveProgramId((current) => (current === id ? ROOM_PRESETS[0].key : current));
+    },
+    [],
+  );
+
+  // Edit one asset count on the ACTIVE custom program, clamped to the catalog bounds.
+  // A no-op on a preset (presets are immutable).
+  const setAssetCount = React.useCallback(
+    (type: string, value: number) => {
+      const id = activeProgramId;
+      setPrograms((current) =>
+        current.map((program) =>
+          program.id === id
+            ? { ...program, counts: { ...program.counts, [type]: clampCount(type, value) } }
+            : program,
+        ),
+      );
+    },
+    [activeProgramId],
+  );
 
   const areaFt2 = React.useMemo(() => widthFt * depthFt, [widthFt, depthFt]);
 
@@ -160,6 +287,8 @@ export function useRoomStudio() {
         widthFt,
         depthFt,
         prompt,
+        // Presets send nothing (backend defaults apply); custom programs send their counts.
+        assets: isCustomActive ? activeCounts : null,
         signal: controller.signal,
       });
       setResult(payload);
@@ -194,7 +323,7 @@ export function useRoomStudio() {
         setBusyAction(null);
       }
     }
-  }, [busyAction, widthFt, depthFt, prompt, pollProgress]);
+  }, [busyAction, widthFt, depthFt, prompt, isCustomActive, activeCounts, pollProgress]);
 
   const stopGeneration = React.useCallback(async () => {
     const requestId = requestIdRef.current;
@@ -208,8 +337,19 @@ export function useRoomStudio() {
   }, []);
 
   return {
-    preset,
-    setPreset,
+    activeProgramId,
+    setActiveProgramId,
+    programs,
+    activeProgram,
+    isCustomActive,
+    activeCounts,
+    totalAssetCount,
+    createProgram,
+    renameProgram,
+    deleteProgram,
+    setAssetCount,
+    renameFocusId,
+    setRenameFocusId,
     widthFt,
     setWidthFt,
     depthFt,

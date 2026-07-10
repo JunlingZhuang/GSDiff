@@ -8,7 +8,11 @@ export type IcuAnchor = "floor" | "wall" | "ceiling" | "mobile";
 export interface IcuCatalogEntry {
   type: string;
   label: string;
+  /** Default count for a preset program (the backend's count_required). */
   count_required: number;
+  /** Inclusive bounds a custom program's per-type count must stay within. */
+  min_count: number;
+  max_count: number;
   /** [width_ft, depth_ft] catalog footprint, before rotation. */
   footprint_ft: [number, number];
   anchor: IcuAnchor;
@@ -23,6 +27,8 @@ export const ICU_CATALOG: IcuCatalogEntry[] = [
     type: "icu_bed",
     label: "ICU Bed",
     count_required: 1,
+    min_count: 1,
+    max_count: 1,
     footprint_ft: [3.5, 7.5],
     anchor: "floor",
     symbol: "/assets/2d/icu_bed.svg",
@@ -32,6 +38,8 @@ export const ICU_CATALOG: IcuCatalogEntry[] = [
     type: "ceiling_boom",
     label: "Ceiling Boom",
     count_required: 2,
+    min_count: 0,
+    max_count: 2,
     footprint_ft: [1.5, 1.5],
     anchor: "ceiling",
     symbol: "/assets/2d/ceiling_boom.svg",
@@ -41,6 +49,8 @@ export const ICU_CATALOG: IcuCatalogEntry[] = [
     type: "patient_monitor",
     label: "Patient Monitor",
     count_required: 1,
+    min_count: 0,
+    max_count: 2,
     footprint_ft: [1.5, 0.75],
     anchor: "wall",
     symbol: "/assets/2d/patient_monitor.svg",
@@ -50,6 +60,8 @@ export const ICU_CATALOG: IcuCatalogEntry[] = [
     type: "iv_pole",
     label: "IV Pole",
     count_required: 1,
+    min_count: 0,
+    max_count: 2,
     footprint_ft: [1.25, 1.25],
     anchor: "mobile",
     symbol: "/assets/2d/iv_pole.svg",
@@ -59,6 +71,8 @@ export const ICU_CATALOG: IcuCatalogEntry[] = [
     type: "visitor_chair",
     label: "Visitor Chair",
     count_required: 1,
+    min_count: 0,
+    max_count: 3,
     footprint_ft: [2.0, 2.0],
     anchor: "floor",
     symbol: "/assets/2d/visitor_chair.svg",
@@ -68,6 +82,8 @@ export const ICU_CATALOG: IcuCatalogEntry[] = [
     type: "casework",
     label: "Casework / Supply Cabinet",
     count_required: 1,
+    min_count: 0,
+    max_count: 2,
     footprint_ft: [6.0, 2.0],
     anchor: "wall",
     symbol: "/assets/2d/casework.svg",
@@ -77,6 +93,8 @@ export const ICU_CATALOG: IcuCatalogEntry[] = [
     type: "handwash_sink",
     label: "Handwash Sink",
     count_required: 1,
+    min_count: 0,
+    max_count: 1,
     footprint_ft: [2.0, 1.75],
     anchor: "wall",
     symbol: "/assets/2d/handwash_sink.svg",
@@ -86,6 +104,8 @@ export const ICU_CATALOG: IcuCatalogEntry[] = [
     type: "overbed_table",
     label: "Overbed Table",
     count_required: 1,
+    min_count: 0,
+    max_count: 1,
     footprint_ft: [2.5, 1.25],
     anchor: "mobile",
     symbol: "/assets/2d/overbed_table.svg",

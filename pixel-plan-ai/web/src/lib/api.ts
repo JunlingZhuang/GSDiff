@@ -85,6 +85,9 @@ export interface RoomRequest {
   widthFt: number;
   depthFt: number;
   prompt: string;
+  // Requested per-type asset counts (custom programs only); omitted for a preset,
+  // which lets the backend apply its catalog defaults.
+  assets?: Record<string, number> | null;
   signal: AbortSignal;
 }
 
@@ -99,6 +102,7 @@ export async function postRoom(request: RoomRequest): Promise<RoomResult> {
       request_id: request.requestId,
       room: { width_ft: request.widthFt, depth_ft: request.depthFt },
       prompt: request.prompt,
+      assets: request.assets ?? undefined,
     }),
   });
   return readJson(await Promise.resolve(response));
