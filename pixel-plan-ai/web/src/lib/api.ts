@@ -5,6 +5,7 @@ import type {
   GenerationResult,
   HealthResponse,
   Program,
+  RoomResult,
   Samples,
   SeedPlan,
   TraceResponse,
@@ -74,6 +75,30 @@ export async function postAgentAction(request: AgentRequest): Promise<Generation
       options: { width: request.width, height: request.height },
       reference_image: request.referenceImage ?? undefined,
       seed: request.seed ?? undefined,
+    }),
+  });
+  return readJson(await Promise.resolve(response));
+}
+
+export interface RoomRequest {
+  requestId: string;
+  widthFt: number;
+  depthFt: number;
+  prompt: string;
+  signal: AbortSignal;
+}
+
+// POST /api/room runs on the shared job runner, so progress + events are polled
+// through the same GET /api/generate/<request_id> as the floor flow.
+export async function postRoom(request: RoomRequest): Promise<RoomResult> {
+  const response = await fetch("/api/room", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    signal: request.signal,
+    body: JSON.stringify({
+      request_id: request.requestId,
+      room: { width_ft: request.widthFt, depth_ft: request.depthFt },
+      prompt: request.prompt,
     }),
   });
   return readJson(await Promise.resolve(response));

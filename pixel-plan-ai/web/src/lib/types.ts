@@ -244,6 +244,74 @@ export interface TracerDrawResponse {
   source: string;
 }
 
+// --- ICU room flow (parallel to the floor flow above) ----------------------
+// The room backend (POST /api/room) speaks feet: x = 0 at the West wall, y = 0
+// at the South wall, and an asset's (x_ft, y_ft) is its SOUTH-WEST corner.
+export type RoomWall = "N" | "S" | "E" | "W";
+
+export interface RoomDoor {
+  wall: RoomWall;
+  offset_ft: number;
+  width_ft: number;
+}
+
+export interface RoomDims {
+  width_ft: number;
+  depth_ft: number;
+  door: RoomDoor;
+}
+
+export interface RoomAsset {
+  id: string;
+  type: string;
+  x_ft: number;
+  y_ft: number;
+  w_ft: number;
+  d_ft: number;
+  rotation_deg: number;
+  wall: RoomWall | null;
+  anchor: string;
+}
+
+export interface RoomLayout {
+  room: RoomDims;
+  assets: RoomAsset[];
+}
+
+// The room validator mirrors the floor check shape ({category,label,pass}) but
+// carries a room-scale summary and no per-space area report.
+export interface RoomValidation {
+  score: number;
+  checks: Check[];
+  issues: string[];
+  summary: {
+    assets_placed: number;
+    checks_passed: number;
+    checks_total: number;
+    rule_profile?: string;
+  };
+}
+
+// The floor-style envelope returned by POST /api/room.
+export interface RoomResult {
+  accepted?: boolean;
+  source: string;
+  provider?: string | null;
+  model: string | null;
+  strategy?: string;
+  assumptions?: string[];
+  code: string;
+  room: RoomLayout;
+  validation: RoomValidation;
+  program?: { width_ft: number; depth_ft: number };
+  prompt?: string;
+  iterations: GenerationIteration[];
+  stop_reason?: string;
+  usage_total?: { total_tokens: number; estimated_cost_usd: number | null };
+  ai_error?: string;
+  generated_at?: string;
+}
+
 export function candidateDataUrl(candidate: CandidateImage): string {
   return `data:${candidate.mime};base64,${candidate.data}`;
 }

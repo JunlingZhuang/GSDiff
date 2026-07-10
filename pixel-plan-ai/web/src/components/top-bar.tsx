@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { ClipboardCopy, Download, FileJson, ImageDown } from "lucide-react";
+import { BedDouble, Building2, ClipboardCopy, Download, FileJson, ImageDown } from "lucide-react";
 
 import { buttonVariants } from "@/components/ui/button";
 import {
@@ -20,7 +20,56 @@ function scoreTone(score: number): string {
   return "border-destructive/40 bg-destructive/10 text-destructive";
 }
 
-export function TopBar({ studio }: { studio: Studio }) {
+// Top-level studio flow. Floor is the original pipeline (untouched); Room is the
+// parallel ICU single-room flow.
+export type StudioFlow = "floor" | "room";
+
+const FLOW_ITEMS: { value: StudioFlow; label: string; Icon: typeof Building2 }[] = [
+  { value: "floor", label: "Floor", Icon: Building2 },
+  { value: "room", label: "Room", Icon: BedDouble },
+];
+
+// Segmented FLOOR | ROOM control that lives left of the studio title in both
+// flows' top bars. Purely a router — it never touches either flow's own state.
+export function FlowSwitch({
+  flow,
+  onFlowChange,
+}: {
+  flow: StudioFlow;
+  onFlowChange: (flow: StudioFlow) => void;
+}) {
+  return (
+    <div className="flex items-center gap-0.5 rounded-lg border border-border bg-secondary/40 p-0.5">
+      {FLOW_ITEMS.map(({ value, label, Icon }) => (
+        <button
+          key={value}
+          type="button"
+          aria-pressed={flow === value}
+          onClick={() => onFlowChange(value)}
+          className={cn(
+            "flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.07em] transition-colors",
+            flow === value
+              ? "bg-card text-foreground shadow-sm"
+              : "text-muted-foreground hover:text-foreground",
+          )}
+        >
+          <Icon className="size-3.5" />
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+export function TopBar({
+  studio,
+  flow,
+  onFlowChange,
+}: {
+  studio: Studio;
+  flow: StudioFlow;
+  onFlowChange: (flow: StudioFlow) => void;
+}) {
   const busy = !!studio.busyAction;
 
   const downloadJson = React.useCallback(() => {
@@ -44,6 +93,7 @@ export function TopBar({ studio }: { studio: Studio }) {
 
   return (
     <header className="flex h-[46px] shrink-0 items-center gap-3 border-b border-border bg-background px-3">
+      <FlowSwitch flow={flow} onFlowChange={onFlowChange} />
       <div className="flex items-center gap-2">
         <span className="grid grid-cols-2 gap-px" aria-hidden>
           {[
