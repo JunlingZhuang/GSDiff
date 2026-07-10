@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 84 180" fill="none" stroke="#1A1D21" stroke-width="1.5" stroke-linejoin="round">
+<svg xmlns="http://www.w3.org/2000/svg" width="84" height="180" viewBox="0 0 84 180" fill="none" stroke="#1A1D21" stroke-width="1.5" stroke-linejoin="round">
   <!-- bed frame (head at top / -y) -->
   <rect x="3" y="3" width="78" height="174" rx="6" fill="#1A1D21" fill-opacity="0.06"/>
   <!-- mattress inset -->
