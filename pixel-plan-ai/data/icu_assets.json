@@ -1,0 +1,70 @@
+{
+  "profile": "icu-room-schematic-v1",
+  "status": "Schematic single-patient ICU asset catalog; footprints are planning approximations, not manufacturer data.",
+  "assets": [
+    {
+      "type": "icu_bed",
+      "label": "ICU Bed",
+      "count_required": 1,
+      "footprint_ft": [3.5, 7.5],
+      "anchor": "floor",
+      "notes": "Head short side faces the headwall; long axis runs head to foot."
+    },
+    {
+      "type": "ceiling_boom",
+      "label": "Ceiling Boom",
+      "count_required": 2,
+      "footprint_ft": [1.5, 1.5],
+      "anchor": "ceiling",
+      "notes": "Two booms flank the bed head on opposite sides of the bed long axis."
+    },
+    {
+      "type": "patient_monitor",
+      "label": "Patient Monitor",
+      "count_required": 1,
+      "footprint_ft": [1.5, 0.75],
+      "anchor": "wall",
+      "notes": "Wall or headwall mounted on the equipment side near the bed head."
+    },
+    {
+      "type": "iv_pole",
+      "label": "IV Pole",
+      "count_required": 1,
+      "footprint_ft": [1.25, 1.25],
+      "anchor": "mobile",
+      "notes": "Mobile; parked near the bed head, may sit inside a bed side clearance."
+    },
+    {
+      "type": "visitor_chair",
+      "label": "Visitor Chair",
+      "count_required": 1,
+      "footprint_ft": [2.0, 2.0],
+      "anchor": "floor",
+      "notes": "Sits on the visitor side, opposite the equipment side."
+    },
+    {
+      "type": "casework",
+      "label": "Casework / Supply Cabinet",
+      "count_required": 1,
+      "footprint_ft": [6.0, 2.0],
+      "anchor": "wall",
+      "notes": "Wall run; not on the headwall and clear of the door swing."
+    },
+    {
+      "type": "handwash_sink",
+      "label": "Handwash Sink",
+      "count_required": 1,
+      "footprint_ft": [2.0, 1.75],
+      "anchor": "wall",
+      "notes": "Wall mounted within reach of the room entry door."
+    },
+    {
+      "type": "overbed_table",
+      "label": "Overbed Table",
+      "count_required": 1,
+      "footprint_ft": [2.5, 1.25],
+      "anchor": "mobile",
+      "notes": "Mobile; parked beside the bed, may sit inside a bed side clearance."
+    }
+  ]
+}

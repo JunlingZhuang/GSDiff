@@ -1,0 +1,55 @@
+{
+  "profile": "icu-room-schematic-v1",
+  "jurisdiction": "United States",
+  "status": "Schematic planning defaults; not a substitute for project-specific code review",
+  "units": "imperial",
+  "disclaimer": "These are FGI-derived schematic single-patient ICU planning values used to gate an automated layout study. They are NOT a claim of code compliance and do not substitute for FGI, ADA, NFPA 101, or authority-having-jurisdiction review of an actual project.",
+  "sources": [
+    {
+      "name": "FGI Guidelines for Design and Construction of Hospitals",
+      "url": "https://fgiguidelines.org/",
+      "basis": "Single-patient critical care room clear floor area, headwall, and clearance planning defaults"
+    },
+    {
+      "name": "U.S. Access Board ADA Standards Guides",
+      "url": "https://www.access-board.gov/ada/guides/",
+      "basis": "Accessible clear floor space and doorway planning defaults"
+    }
+  ],
+  "room": {
+    "min_clear_area_sf": 200,
+    "default_area_sf": 275,
+    "min_headwall_width_ft": 13
+  },
+  "bed_clearances_ft": {
+    "head_to_wall_min": 1.0,
+    "head_to_wall_max": 1.5,
+    "foot_min": 5.0,
+    "transfer_side_min": 5.0,
+    "other_side_min": 4.0
+  },
+  "door": {
+    "min_clear_width_ft": 5.0,
+    "path_to_bed_min_width_ft": 4.0
+  },
+  "sink": {
+    "max_distance_from_door_ft": 8.0
+  },
+  "booms": {
+    "count": 2,
+    "mount_max_distance_from_bed_head_ft": 3.0,
+    "coverage_radius_ft": 5.0,
+    "opposite_sides_of_bed_axis": true
+  },
+  "monitor": {
+    "max_distance_from_bed_head_ft": 6.0,
+    "on_equipment_side": true
+  },
+  "iv_pole": {
+    "max_distance_from_bed_head_ft": 3.0
+  },
+  "zoning": {
+    "visitor_side_opposite_equipment_side": true,
+    "casework_not_on_headwall": true
+  }
+}

@@ -23,6 +23,8 @@ from seed_code import normalize_seed, seed_to_code
 from service import generate_plan
 from validator import has_non_rectangular_footprint, validate_plan
 import service
+from room_runtime import execute_room_code
+from room_validator import validate_room
 
 
 class CodePolicyTests(unittest.TestCase):
@@ -1735,6 +1737,150 @@ class AttemptToolLoopTests(unittest.TestCase):
                 )
         self.assertIn("truncated", str(caught.exception))
         self.assertEqual(urlopen_mock.call_count, 2)
+
+
+ICU_RULES = json.loads((ROOT / "data" / "icu_room_rules.json").read_text(encoding="utf-8"))
+ICU_CATALOG = json.loads((ROOT / "data" / "icu_assets.json").read_text(encoding="utf-8"))
+
+
+def icu_asset(
+    asset_id: str,
+    asset_type: str,
+    x: float,
+    y: float,
+    w: float,
+    d: float,
+    rotation: int = 0,
+    wall: str | None = None,
+    anchor: str = "floor",
+) -> dict[str, object]:
+    return {
+        "id": asset_id,
+        "type": asset_type,
+        "x_ft": x,
+        "y_ft": y,
+        "w_ft": w,
+        "d_ft": d,
+        "rotation_deg": rotation,
+        "wall": wall,
+        "anchor": anchor,
+    }
+
+
+def known_good_icu_room() -> dict[str, object]:
+    """Hand-computed 16.5 x 16.75 ICU room where every schematic check passes (score 100).
+
+    Bed head is centered on the N wall with a 1.0 ft head gap; booms flank the head on
+    opposite sides of the long axis; the monitor/iv sit on the east (equipment) side; the
+    visitor chair sits on the west (visitor) side; casework runs the E wall clear of the
+    S-wall door swing; the handwash sink is beside the door on the S wall.
+    """
+    return {
+        "room": {"width_ft": 16.5, "depth_ft": 16.75, "door": {"wall": "S", "offset_ft": 8.25, "width_ft": 5.0}},
+        "assets": [
+            icu_asset("bed", "icu_bed", 6.5, 8.25, 3.5, 7.5, 0, None, "floor"),
+            icu_asset("boom_e", "ceiling_boom", 9.0, 14.25, 1.5, 1.5, 0, None, "ceiling"),
+            icu_asset("boom_w", "ceiling_boom", 6.0, 14.25, 1.5, 1.5, 0, None, "ceiling"),
+            icu_asset("monitor", "patient_monitor", 10.5, 16.0, 1.5, 0.75, 0, "N", "wall"),
+            icu_asset("iv", "iv_pole", 10.0, 14.5, 1.25, 1.25, 0, None, "mobile"),
+            icu_asset("chair", "visitor_chair", 0.0, 2.0, 2.0, 2.0, 0, None, "floor"),
+            icu_asset("casework", "casework", 14.5, 0.75, 2.0, 6.0, 90, "E", "wall"),
+            icu_asset("sink", "handwash_sink", 3.0, 0.0, 2.0, 1.75, 0, "S", "wall"),
+            icu_asset("table", "overbed_table", 10.25, 11.0, 2.5, 1.25, 0, None, "mobile"),
+        ],
+    }
+
+
+class IcuRoomTests(unittest.TestCase):
+    def failed_categories(self, plan: dict[str, object]) -> set[str]:
+        result = validate_room(plan, ICU_RULES, ICU_CATALOG)
+        return {check["category"] for check in result["checks"] if not check["pass"]}
+
+    def test_known_good_layout_passes_every_check(self) -> None:
+        result = validate_room(known_good_icu_room(), ICU_RULES, ICU_CATALOG)
+        self.assertEqual(result["score"], 100)
+        self.assertTrue(all(check["pass"] for check in result["checks"]))
+        self.assertEqual(result["issues"], [])
+        self.assertEqual(result["summary"]["assets_placed"], 9)
+        self.assertEqual(result["summary"]["checks_passed"], result["summary"]["checks_total"])
+
+    def test_check_shape_matches_floor_validator_for_delta_reuse(self) -> None:
+        result = validate_room(known_good_icu_room(), ICU_RULES, ICU_CATALOG)
+        for check in result["checks"]:
+            self.assertEqual({"category", "label", "pass"}, set(check))
+        # service.failed_check_keys and validation_delta must operate on it unchanged.
+        self.assertEqual(service.failed_check_keys(result), {})
+
+    def test_moving_chair_to_equipment_side_fails_zoning(self) -> None:
+        plan = known_good_icu_room()
+        chair = next(asset for asset in plan["assets"] if asset["id"] == "chair")
+        chair["x_ft"], chair["y_ft"] = 12.0, 2.0  # east of the bed axis, into the equipment zone
+        self.assertIn("zoning", self.failed_categories(plan))
+
+    def test_shrinking_bed_foot_gap_fails_clearance(self) -> None:
+        plan = known_good_icu_room()
+        chair = next(asset for asset in plan["assets"] if asset["id"] == "chair")
+        chair["x_ft"], chair["y_ft"] = 6.5, 5.0  # a static asset dropped into the foot clearance
+        self.assertIn("clearance", self.failed_categories(plan))
+
+    def test_moving_sink_far_from_door_fails_access(self) -> None:
+        plan = known_good_icu_room()
+        sink = next(asset for asset in plan["assets"] if asset["id"] == "sink")
+        sink["x_ft"], sink["y_ft"], sink["wall"] = 0.0, 15.0, "N"
+        self.assertIn("access", self.failed_categories(plan))
+
+    def test_removing_a_boom_fails_count(self) -> None:
+        plan = known_good_icu_room()
+        plan["assets"] = [asset for asset in plan["assets"] if asset["id"] != "boom_w"]
+        self.assertIn("count", self.failed_categories(plan))
+
+    def test_unsnapping_casework_from_wall_fails_anchor(self) -> None:
+        plan = known_good_icu_room()
+        casework = next(asset for asset in plan["assets"] if asset["id"] == "casework")
+        casework["x_ft"] = 12.5  # 2 ft off the E wall it declares
+        self.assertIn("anchor", self.failed_categories(plan))
+
+    def test_sandbox_accepts_rotated_footprint_swap(self) -> None:
+        code = (
+            "result = {"
+            "'room': {'width_ft': 16.5, 'depth_ft': 16.75, 'door': {'wall': 'S', 'offset_ft': 8.25, 'width_ft': 5.0}},"
+            "'assets': ["
+            "{'id': 'bed', 'type': 'icu_bed', 'x_ft': 6.5, 'y_ft': 8.25, 'w_ft': 3.5, 'd_ft': 7.5, 'rotation_deg': 0, 'wall': None},"
+            "{'id': 'casework', 'type': 'casework', 'x_ft': 14.5, 'y_ft': 0.75, 'w_ft': 2.0, 'd_ft': 6.0, 'rotation_deg': 90, 'wall': 'E'}"
+            "]}"
+        )
+        _, result = execute_room_code(code)
+        casework = result["assets"][1]
+        self.assertEqual((casework["w_ft"], casework["d_ft"]), (2.0, 6.0))
+        self.assertEqual(result["assets"][0]["anchor"], "floor")  # anchor is looked up from the catalog
+
+    def test_sandbox_rejects_unknown_asset_type(self) -> None:
+        code = (
+            "result = {"
+            "'room': {'width_ft': 16.0, 'depth_ft': 16.0, 'door': {'wall': 'S', 'offset_ft': 8.0, 'width_ft': 5.0}},"
+            "'assets': [{'id': 'x', 'type': 'teleporter', 'x_ft': 1.0, 'y_ft': 1.0, 'w_ft': 1.0, 'd_ft': 1.0, 'rotation_deg': 0, 'wall': None}]}"
+        )
+        with self.assertRaisesRegex(ValueError, "unknown type"):
+            execute_room_code(code)
+
+    def test_sandbox_rejects_out_of_bounds_asset(self) -> None:
+        code = (
+            "result = {"
+            "'room': {'width_ft': 16.0, 'depth_ft': 16.0, 'door': {'wall': 'S', 'offset_ft': 8.0, 'width_ft': 5.0}},"
+            "'assets': [{'id': 'b', 'type': 'icu_bed', 'x_ft': 14.0, 'y_ft': 14.0, 'w_ft': 3.5, 'd_ft': 7.5, 'rotation_deg': 0, 'wall': None}]}"
+        )
+        with self.assertRaisesRegex(ValueError, "outside the room bounds"):
+            execute_room_code(code)
+
+    def test_sandbox_rejects_rotation_footprint_mismatch(self) -> None:
+        # icu_bed at rotation 0 must keep the catalog footprint 3.5 x 7.5, not a swapped one.
+        code = (
+            "result = {"
+            "'room': {'width_ft': 16.0, 'depth_ft': 16.0, 'door': {'wall': 'S', 'offset_ft': 8.0, 'width_ft': 5.0}},"
+            "'assets': [{'id': 'b', 'type': 'icu_bed', 'x_ft': 2.0, 'y_ft': 2.0, 'w_ft': 7.5, 'd_ft': 3.5, 'rotation_deg': 0, 'wall': None}]}"
+        )
+        with self.assertRaisesRegex(ValueError, "does not match the catalog footprint"):
+            execute_room_code(code)
 
 
 if __name__ == "__main__":
