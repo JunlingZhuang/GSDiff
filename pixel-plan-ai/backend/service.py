@@ -154,6 +154,109 @@ def execute_and_validate(
     return {"code": sanitized, "plan": plan, "validation": validate_plan(plan, program)}
 
 
+def layout_fidelity(seed: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
+    """Cell-IoU similarity of an executed candidate plan to the traced seed.
+
+    Rooms are matched by EXACT id first (seed ids usually survive ROOM_DATA repairs);
+    each unmatched seed room then greedily takes the same-type candidate room with the
+    highest cell overlap. Per matched room the metric is the IoU of its cell-index sets.
+    The score is the seed-cell-weighted mean IoU over every seed room, as a percent.
+
+    Both seed and plan carry a flat ``cells`` list indexed row-major (``y*width + x``),
+    with each nonnegative value an index into the corresponding ``rooms`` list. In refine
+    mode the canvases match; when they differ fidelity is undefined and ``{"score": None}``
+    is returned. Added 2026-07-10 so preservation guidance has a measured consequence.
+    """
+    if (
+        int(seed.get("width", 0)) != int(plan.get("width", 0))
+        or int(seed.get("height", 0)) != int(plan.get("height", 0))
+    ):
+        return {"score": None}
+
+    seed_rooms = seed.get("rooms", [])
+    plan_rooms = plan.get("rooms", [])
+    seed_sets: list[set[int]] = [set() for _ in seed_rooms]
+    for position, room_index in enumerate(seed.get("cells", [])):
+        if isinstance(room_index, int) and 0 <= room_index < len(seed_sets):
+            seed_sets[room_index].add(position)
+    plan_sets: list[set[int]] = [set() for _ in plan_rooms]
+    for position, room_index in enumerate(plan.get("cells", [])):
+        if isinstance(room_index, int) and 0 <= room_index < len(plan_sets):
+            plan_sets[room_index].add(position)
+
+    def iou(seed_cells: set[int], plan_cells: set[int]) -> float:
+        union = len(seed_cells | plan_cells)
+        return len(seed_cells & plan_cells) / union if union else 1.0
+
+    plan_index_by_id: dict[str, int] = {}
+    for index, room in enumerate(plan_rooms):
+        plan_index_by_id.setdefault(str(room.get("id")), index)
+
+    matches: list[tuple[str, float, int]] = []  # (seed_id, iou, seed_cell_count)
+    consumed_plan: set[int] = set()
+    remaining_seed: list[int] = []
+    # Pass 1: exact id match — the id survives most ROOM_DATA repairs.
+    for seed_index, room in enumerate(seed_rooms):
+        seed_id = str(room.get("id"))
+        plan_index = plan_index_by_id.get(seed_id)
+        if plan_index is not None and plan_index not in consumed_plan:
+            consumed_plan.add(plan_index)
+            matches.append((seed_id, iou(seed_sets[seed_index], plan_sets[plan_index]), len(seed_sets[seed_index])))
+        else:
+            remaining_seed.append(seed_index)
+
+    # Pass 2: greedy same-type match, highest cell overlap first.
+    candidate_pairs: list[tuple[int, int, int]] = []  # (overlap, seed_index, plan_index)
+    for seed_index in remaining_seed:
+        seed_type = str(seed_rooms[seed_index].get("type"))
+        for plan_index, room in enumerate(plan_rooms):
+            if plan_index in consumed_plan or str(room.get("type")) != seed_type:
+                continue
+            overlap = len(seed_sets[seed_index] & plan_sets[plan_index])
+            if overlap > 0:
+                candidate_pairs.append((overlap, seed_index, plan_index))
+    candidate_pairs.sort(key=lambda item: (-item[0], item[1], item[2]))
+    matched_seed: set[int] = set()
+    for _overlap, seed_index, plan_index in candidate_pairs:
+        if seed_index in matched_seed or plan_index in consumed_plan:
+            continue
+        consumed_plan.add(plan_index)
+        matched_seed.add(seed_index)
+        seed_id = str(seed_rooms[seed_index].get("id"))
+        matches.append((seed_id, iou(seed_sets[seed_index], plan_sets[plan_index]), len(seed_sets[seed_index])))
+
+    unmatched = [
+        str(seed_rooms[seed_index].get("id"))
+        for seed_index in remaining_seed
+        if seed_index not in matched_seed
+    ]
+    total_weight = sum(weight for _, _, weight in matches) + sum(
+        len(seed_sets[seed_index]) for seed_index in remaining_seed if seed_index not in matched_seed
+    )
+    weighted_iou = sum(value * weight for _, value, weight in matches)
+    score = round(weighted_iou / total_weight * 100, 1) if total_weight else 100.0
+    movers = [
+        (seed_id, round(value * 100, 1))
+        for seed_id, value, _ in sorted(matches, key=lambda item: (item[1], item[0]))[:5]
+    ]
+    return {"score": score, "movers": movers, "unmatched": unmatched}
+
+
+def format_fidelity_line(fidelity: dict[str, Any]) -> str | None:
+    """Compose the one-line seed-fidelity summary, or None when fidelity is undefined."""
+    score = fidelity.get("score")
+    if score is None:
+        return None
+    line = f"layout fidelity vs traced seed: {score}%"
+    movers = [(room_id, percent) for room_id, percent in fidelity.get("movers", []) if percent < 100.0]
+    if movers:
+        line += " — biggest moves: " + ", ".join(f"{room_id} ({percent:g}%)" for room_id, percent in movers)
+    unmatched = fidelity.get("unmatched", [])
+    if unmatched:
+        line += "; missing: " + ", ".join(unmatched)
+    return f"[{line}]"
+
+
 # Blocker categories that must pass before a sub-override candidate is accepted. Area and
 # proportion are gated separately on a compliance ratio, so they are deliberately not listed.
 HARD_CATEGORIES = {
@@ -291,6 +394,7 @@ def generate_plan(
     preseeded_iterations: list[dict[str, Any]] | None = None,
     initial_error: str | None = None,
     initial_validation: dict[str, Any] | None = None,
+    fidelity_seed: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     program = normalize_program(payload.get("program"))
     action = str(payload.get("action", "generate"))
@@ -362,6 +466,8 @@ def generate_plan(
     spent_tokens = 0
     spent_usd = 0.0
     stop_reason = "attempts_exhausted"
+    # Refine-mode layout fidelity: the last score measured against the traced seed (None off-refine).
+    last_fidelity_score: float | None = None
 
     if action == "fix":
         if initial_error is not None:
@@ -497,6 +603,27 @@ def generate_plan(
             previous_validation = result["validation"]
             if latest_error and prior_validation is not None:
                 latest_error = validation_delta(prior_validation, result["validation"]) + "\n" + latest_error
+            # Refine only: measure similarity to the traced seed so preservation is enforced,
+            # not merely suggested. A fidelity drop is a repair signal, and an optional floor
+            # (REFINE_FIDELITY_MIN) can reject an otherwise-passing but drifted candidate.
+            if fidelity_seed is not None:
+                fidelity = layout_fidelity(fidelity_seed, result["plan"])
+                last_fidelity_score = fidelity.get("score")
+                fidelity_line = format_fidelity_line(fidelity)
+                fidelity_floor = max(0.0, float(os.environ.get("REFINE_FIDELITY_MIN", "0")))
+                if (
+                    fidelity_floor > 0
+                    and last_fidelity_score is not None
+                    and last_fidelity_score < fidelity_floor
+                    and not latest_error
+                ):
+                    drift_note = (
+                        "the layout drifted too far from the traced seed; "
+                        "move rooms back toward their seed positions"
+                    )
+                    latest_error = f"{fidelity_line}\n{drift_note}" if fidelity_line else drift_note
+                elif latest_error and fidelity_line and fidelity_line not in latest_error:
+                    latest_error = f"{latest_error}\n{fidelity_line}"
             if best_result is None or result["validation"]["score"] > best_result["validation"]["score"]:
                 best_result = result
                 best_candidate = candidate
@@ -540,6 +667,7 @@ def generate_plan(
                     "usage": candidate.get("usage"),
                     "usage_total": {"total_tokens": spent_tokens, "estimated_cost_usd": round(spent_usd, 6)},
                     "stop_reason": "accepted",
+                    "seed_fidelity": last_fidelity_score,
                     "program": program,
                     "prompt": design_request,
                     "repair_note": first_error if attempt_number > 1 else None,
@@ -618,6 +746,7 @@ def generate_plan(
         "usage": best_candidate.get("usage"),
         "usage_total": {"total_tokens": spent_tokens, "estimated_cost_usd": round(spent_usd, 6)},
         "stop_reason": stop_reason,
+        "seed_fidelity": last_fidelity_score,
         "program": program,
         "prompt": design_request,
         "ai_error": exhaustion,
@@ -704,6 +833,8 @@ def refine_plan(payload: dict[str, Any]) -> dict[str, Any]:
             "assumptions": [],
             "stop_reason": "accepted",
             "usage_total": {"total_tokens": 0, "estimated_cost_usd": 0.0},
+            # The seed against itself is 100.0; computed anyway so every refine result carries the field.
+            "seed_fidelity": layout_fidelity(seed, result["plan"]).get("score"),
             "program": program,
             "prompt": str(payload.get("prompt", "")),
             "iterations": [seed_iteration],
@@ -727,6 +858,7 @@ def refine_plan(payload: dict[str, Any]) -> dict[str, Any]:
         preseeded_iterations=[seed_iteration],
         initial_error=rejection,
         initial_validation=result["validation"] if result is not None else None,
+        fidelity_seed=seed,
     )
     source_map = {"gemini-fixed": "seed-repaired", "gemini-fix-unaccepted": "seed-repair-unaccepted"}
     outcome["source"] = source_map.get(outcome["source"], outcome["source"])

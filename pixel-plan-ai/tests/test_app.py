@@ -1189,6 +1189,30 @@ def make_test_seed() -> dict[str, object]:
     }
 
 
+def make_refine_plan(
+    room_rects: list[tuple[int, int, int, int, int]],
+    width: int = 40,
+    height: int = 24,
+) -> dict[str, object]:
+    """Executed-plan stand-in for the make_test_seed rooms: paint (index, x0, y0, x1, y1)
+    rectangles onto a flat row-major cells grid so layout_fidelity can score it."""
+    cells = [-1] * (width * height)
+    for index, x0, y0, x1, y1 in room_rects:
+        for y in range(y0, y1):
+            for x in range(x0, x1):
+                cells[y * width + x] = index
+    return {
+        "width": width,
+        "height": height,
+        "cells": cells,
+        "rooms": [
+            {"id": "waiting_0", "type": "waiting"},
+            {"id": "corridor_0", "type": "corridor"},
+            {"id": "toilet_0", "type": "toilet"},
+        ],
+    }
+
+
 class SeedRefineTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -1358,6 +1382,123 @@ class SeedRefineTests(unittest.TestCase):
         with patch.object(service, "refine_plan", return_value={"accepted": True}) as refine_mock:
             service.dispatch_job({"job_kind": "refine", "program": {}, "seed": {}})
         refine_mock.assert_called_once()
+
+    def test_layout_fidelity_scores_weighted_iou_and_lists_movers(self) -> None:
+        width, height = 8, 6
+
+        def grid(rects: list[tuple[int, int, int, int, int]]) -> list[int]:
+            cells = [-1] * (width * height)
+            for index, x0, y0, x1, y1 in rects:
+                for y in range(y0, y1):
+                    for x in range(x0, x1):
+                        cells[y * width + x] = index
+            return cells
+
+        rooms = [{"id": "room_a", "type": "office"}, {"id": "room_b", "type": "office"}]
+        seed = {"width": width, "height": height, "rooms": rooms,
+                "cells": grid([(0, 0, 0, 4, 3), (1, 6, 0, 8, 2)])}
+        # room_a (12 cells) identical; room_b (4 cells) shifted entirely out of overlap.
+        plan = {"width": width, "height": height, "rooms": rooms,
+                "cells": grid([(0, 0, 0, 4, 3), (1, 6, 4, 8, 6)])}
+        fidelity = service.layout_fidelity(seed, plan)
+        # Size-weighted mean IoU = (1.0*12 + 0.0*4) / 16 = 0.75.
+        self.assertEqual(fidelity["score"], 75.0)
+        self.assertIn("room_b", [room_id for room_id, _ in fidelity["movers"]])
+        self.assertEqual(dict(fidelity["movers"])["room_b"], 0.0)
+        self.assertEqual(fidelity["unmatched"], [])
+        # A different canvas makes fidelity undefined.
+        self.assertIsNone(service.layout_fidelity(seed, {**plan, "width": 10})["score"])
+
+    def test_refine_repair_feedback_carries_layout_fidelity(self) -> None:
+        seed_rejected = {
+            "code": "seed",
+            "plan": {"rooms": []},
+            "validation": {
+                "score": 40,
+                "checks": [{"category": "doors", "label": "waiting_0 has no door", "pass": False}],
+                "issues": ["waiting_0 has no door."],
+                "areas": [],
+            },
+        }
+        # Validator-failing repair whose waiting room drifted down two rows from the seed.
+        repair_drifted = {
+            "code": "repair-1",
+            "plan": make_refine_plan([(0, 2, 4, 38, 10), (1, 2, 10, 38, 14), (2, 2, 14, 20, 22)]),
+            "validation": {
+                "score": 40,
+                "checks": [{"category": "doors", "label": "waiting_0 has no door", "pass": False}],
+                "issues": ["waiting_0 has no door."],
+                "areas": [],
+            },
+        }
+        repair_faithful = {
+            "code": "repair-2",
+            "plan": make_refine_plan([(0, 2, 2, 38, 10), (1, 2, 10, 38, 14), (2, 2, 14, 20, 22)]),
+            "validation": {"score": 92, "checks": [], "issues": [], "areas": []},
+        }
+        model_output = {"code": "repaired", "strategy": "s", "assumptions": [], "model": "quality-model"}
+        with (
+            patch.dict(os.environ, {
+                "GEMINI_API_KEY": "test-key", "GEMINI_MODEL": "quality-model", "REFINE_FIDELITY_MIN": "0",
+            }),
+            patch.object(service, "execute_and_validate",
+                         side_effect=[seed_rejected, repair_drifted, repair_faithful]),
+            patch.object(service, "generate_gemini_code",
+                         side_effect=[model_output, model_output]) as generate_mock,
+        ):
+            outcome = service.refine_plan(
+                {"program": self.samples["clinic-small"], "seed": make_test_seed()}
+            )
+        # The second repair attempt is told how far the first drifted from the traced seed.
+        second_repair_context = generate_mock.call_args_list[1].args[5]
+        self.assertIn("layout fidelity vs traced seed", second_repair_context)
+        self.assertTrue(outcome["accepted"])
+        self.assertEqual(outcome["seed_fidelity"], 100.0)
+
+    def test_fidelity_gate_rejects_drifted_candidate_only_when_enabled(self) -> None:
+        seed_rejected = {
+            "code": "seed",
+            "plan": {"rooms": []},
+            "validation": {
+                "score": 40,
+                "checks": [{"category": "doors", "label": "waiting_0 has no door", "pass": False}],
+                "issues": ["waiting_0 has no door."],
+                "areas": [],
+            },
+        }
+        # Passes the validator (score 92) but waiting drifted into the far corner -> 50% fidelity.
+        drifted_but_valid = {
+            "code": "repair",
+            "plan": make_refine_plan([(1, 2, 10, 38, 14), (2, 2, 14, 20, 22), (0, 20, 14, 38, 22)]),
+            "validation": {"score": 92, "checks": [], "issues": [], "areas": []},
+        }
+        model_output = {"code": "repaired", "strategy": "s", "assumptions": [], "model": "quality-model"}
+        base_env = {"GEMINI_API_KEY": "test-key", "GEMINI_MODEL": "quality-model", "GEMINI_MAX_ATTEMPTS": "2"}
+        # Gate on: the drifted-but-valid candidate is not accepted; the loop keeps repairing.
+        with (
+            patch.dict(os.environ, {**base_env, "REFINE_FIDELITY_MIN": "90"}),
+            patch.object(service, "execute_and_validate",
+                         side_effect=[seed_rejected, drifted_but_valid, drifted_but_valid]),
+            patch.object(service, "generate_gemini_code", return_value=model_output) as gated_mock,
+        ):
+            gated = service.refine_plan(
+                {"program": self.samples["clinic-small"], "seed": make_test_seed()}
+            )
+        self.assertFalse(gated["accepted"])
+        self.assertIn("drifted too far", gated_mock.call_args_list[1].args[5])
+        self.assertEqual(gated["seed_fidelity"], 50.0)
+        # Gate off (default 0): the identical candidate is accepted and carries its fidelity score.
+        with (
+            patch.dict(os.environ, {**base_env, "REFINE_FIDELITY_MIN": "0"}),
+            patch.object(service, "execute_and_validate",
+                         side_effect=[seed_rejected, drifted_but_valid]),
+            patch.object(service, "generate_gemini_code", return_value=model_output),
+        ):
+            ungated = service.refine_plan(
+                {"program": self.samples["clinic-small"], "seed": make_test_seed()}
+            )
+        self.assertTrue(ungated["accepted"])
+        self.assertEqual(ungated["seed_fidelity"], 50.0)
 
 
 def _fake_urlopen_response(payload: dict[str, object]) -> object:
