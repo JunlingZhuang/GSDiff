@@ -387,13 +387,19 @@ Your program must TRANSCRIBE that drawing onto the cell grid, not invent a new d
 
 
 # Escape hatch added 2026-07-08: the first trace-mode E2E hit a seed missing the waiting room entirely (docs/claude-code-lessons.md #9).
+# Preservation turned from advisory prose into ordered hard rules: user decision 2026-07-10 after an
+# 82-room tower refine reorganized the traced layout because compliance was the only feedback with teeth.
 SEED_REPAIR_GUIDANCE = """The current program encodes an EXISTING traced floor plan as data literals
 (FOOTPRINT_RECTS / ROOM_DATA / DOORS) followed by a fixed rasterizing builder.
 Repair it; do not redesign it:
 - Fix validator failures by minimally adjusting the data literals: nudge rectangle bounds, resize or split one room's rectangles, move or add door entries on real shared boundaries.
-- Preserve the traced massing, corridor topology, and relative room placement. Do not reorder rooms, do not swap the builder for a generic packing or banding algorithm, and do not regenerate the layout from scratch.
-- Keep the ROOM_DATA/DOORS + builder structure in every revision so later repairs stay local. You may extend the builder with ownership audits or shared-boundary door scanners, but geometry always stays in the data literals.
-- If a named failure cannot be fixed by a local edit (for example a required room is missing from the trace entirely), add the minimal new geometry required, placed consistently with the traced topology; this is the only case where new rooms may be introduced.
+- Keep the ROOM_DATA/DOORS + builder structure in every revision so later repairs stay local. You may extend the builder with ownership audits or shared-boundary door scanners, but geometry always stays in the data literals. Do not reorder rooms, do not swap the builder for a generic packing or banding algorithm, and do not regenerate the layout from scratch.
+Preservation is NOT advisory. Apply these rules in order and treat a violation as a hard failure, not a suggestion:
+1. Rooms present in the seed keep their position: each seed room's rectangles may shift or resize by at most ~2 cells per edge; never relocate a seed room to a different part of the plan.
+2. Corridor axes are fixed: corridors may widen or lengthen, but their centerlines must not move or reorient.
+3. New rooms (the escape hatch below) go ONLY into unassigned seed cells or by extending the footprint outward adjacent to their required neighbors; never displace an existing seed room to make space.
+4. The harness reports a layout-fidelity score against the seed after every attempt; treat a fidelity drop as a failure signal equal in weight to a validator check.
+- Escape hatch: if a named failure cannot be fixed by a local edit (for example a required room is missing from the trace entirely), add the minimal new geometry required under rule 3, placed consistently with the traced topology; this is the only case where new rooms may be introduced.
 - Example of a minimal repair: to widen exam_room_2 by one cell, change its rectangle (40, 8, 10, 12) to (40, 8, 11, 12) inside ROOM_DATA and touch nothing else."""
 
 

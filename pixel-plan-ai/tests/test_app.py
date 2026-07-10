@@ -1345,6 +1345,9 @@ class SeedRefineTests(unittest.TestCase):
         self.assertIn("cannot be fixed by a local edit", seed_prompt)
         self.assertIn("minimal new geometry", seed_prompt)
         self.assertNotIn("TRANSCRIBE that drawing", seed_prompt)
+        # Preservation is ordered hard rules now, not advice (user decision 2026-07-10).
+        self.assertIn("never relocate a seed room", seed_prompt)
+        self.assertIn("centerlines must not move", seed_prompt)
         both_prompt = build_prompt(
             program, "", options, None, with_reference_image=True, with_seed_repair=True
         )
