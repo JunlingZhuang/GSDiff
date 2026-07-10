@@ -1959,6 +1959,12 @@ class RoomServiceTests(unittest.TestCase):
         for entry in catalog["assets"]:
             self.assertIn(entry["type"], prompt)
         self.assertIn("calm room", prompt)
+        # Failure-derived guidance (2026-07-10 live runs): side-clearance arithmetic,
+        # door-first placement for the straight-corridor check, monitor distance math.
+        self.assertIn("CHOOSE THE DOOR POSITION FIRST", prompt)
+        self.assertIn("L-shaped routes do not count", prompt)
+        self.assertIn("16.5 - 3.5 = 13.0", prompt)
+        self.assertIn("observed: 7.91 ft", prompt)
 
 
 if __name__ == "__main__":

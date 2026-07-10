@@ -51,7 +51,13 @@ Layout guidance (mirrors the validator, all values in feet):
 - Place the two ceiling booms flanking the bed head on OPPOSITE sides of the bed long axis, within mount reach and coverage of the head.
 - Put the patient monitor and IV pole near the bed head on one side (the equipment side); put the visitor chair on the OPPOSITE side.
 - Keep casework off the headwall and clear of the door swing. Put the handwash sink within reach of the door.
-- Give the door at least the minimum clear width and keep a clear path of the required width from the door to the bed foot."""
+- Give the door at least the minimum clear width and keep a clear path of the required width from the door to the bed foot.
+
+Common failures observed in real runs — avoid / do (each mirrors an exact validator check):
+- SIDE CLEARANCES fail when the bed hugs a side wall. Do the arithmetic first: with bed width 3.5 in a 16.5 ft room, free width = 16.5 - 3.5 = 13.0, and 5.0 (transfer) + 4.0 (other) = 9.0 must fit inside it — so the bed's near edge must sit >= 5.0 from one side wall and >= 4.0 from the other (e.g. bed x from 6.5 to 10.0 leaves 6.5 W / 6.5 E, both sides pass). Compute this band in code, never guess.
+- DOOR-TO-BED PATH fails when the door hides in a corner or behind the sink. The validator sweeps ONE STRAIGHT corridor of the required width from the door opening to the bed FOOT clearance zone — L-shaped routes do not count. Therefore CHOOSE THE DOOR POSITION FIRST: offset the door along its wall so a straight, full-width corridor reaches the bed foot zone, THEN place the sink and casework outside that corridor. Do not place the door within 2 ft of a corner.
+- MONITOR DISTANCE fails when measured casually. The check is center-to-center from the monitor to the BED HEAD (the head short-side midpoint), limit 6.0 ft: a monitor at the far end of the headwall fails (observed: 7.91 ft). Mount it on the headwall directly beside the head — compute hypot(monitor_center - head_center) <= 6.0 in code before emitting.
+- Never park the visitor chair, casework, or sink inside ANY dashed bed clearance zone; only the two mobile items (iv_pole, overbed_table) may enter a SIDE zone, never the foot zone."""
 
 
 def catalog_table(catalog: dict[str, Any]) -> str:
