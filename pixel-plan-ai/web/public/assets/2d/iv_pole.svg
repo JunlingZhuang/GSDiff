@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 30 30" fill="none" stroke="#1A1D21" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+  <!-- base ring -->
+  <circle cx="15" cy="15" r="6" fill="#1A1D21" fill-opacity="0.06"/>
+  <circle cx="15" cy="15" r="1.6" fill="#1A1D21" stroke="none"/>
+  <!-- cross ticks (hook stems) -->
+  <line x1="15" y1="15" x2="15" y2="4" stroke-width="1.2"/>
+  <line x1="15" y1="15" x2="26" y2="15" stroke-width="1.2"/>
+  <line x1="15" y1="15" x2="15" y2="26" stroke-width="1.2"/>
+  <line x1="15" y1="15" x2="4" y2="15" stroke-width="1.2"/>
+  <!-- hook dots -->
+  <circle cx="15" cy="4" r="1.6" fill="#1A1D21" stroke="none"/>
+  <circle cx="26" cy="15" r="1.6" fill="#1A1D21" stroke="none"/>
+  <circle cx="15" cy="26" r="1.6" fill="#1A1D21" stroke="none"/>
+  <circle cx="4" cy="15" r="1.6" fill="#1A1D21" stroke="none"/>
+</svg>

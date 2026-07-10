@@ -8,6 +8,8 @@
       "count_required": 1,
       "footprint_ft": [3.5, 7.5],
       "anchor": "floor",
+      "symbol": "/assets/2d/icu_bed.svg",
+      "model": "/assets/3d/icu_bed.glb",
       "notes": "Head short side faces the headwall; long axis runs head to foot."
     },
     {
@@ -16,6 +18,8 @@
       "count_required": 2,
       "footprint_ft": [1.5, 1.5],
       "anchor": "ceiling",
+      "symbol": "/assets/2d/ceiling_boom.svg",
+      "model": "/assets/3d/ceiling_boom.glb",
       "notes": "Two booms flank the bed head on opposite sides of the bed long axis."
     },
     {
@@ -24,6 +28,8 @@
       "count_required": 1,
       "footprint_ft": [1.5, 0.75],
       "anchor": "wall",
+      "symbol": "/assets/2d/patient_monitor.svg",
+      "model": "/assets/3d/patient_monitor.glb",
       "notes": "Wall or headwall mounted on the equipment side near the bed head."
     },
     {
@@ -32,6 +38,8 @@
       "count_required": 1,
       "footprint_ft": [1.25, 1.25],
       "anchor": "mobile",
+      "symbol": "/assets/2d/iv_pole.svg",
+      "model": "/assets/3d/iv_pole.glb",
       "notes": "Mobile; parked near the bed head, may sit inside a bed side clearance."
     },
     {
@@ -40,6 +48,8 @@
       "count_required": 1,
       "footprint_ft": [2.0, 2.0],
       "anchor": "floor",
+      "symbol": "/assets/2d/visitor_chair.svg",
+      "model": "/assets/3d/visitor_chair.glb",
       "notes": "Sits on the visitor side, opposite the equipment side."
     },
     {
@@ -48,6 +58,8 @@
       "count_required": 1,
       "footprint_ft": [6.0, 2.0],
       "anchor": "wall",
+      "symbol": "/assets/2d/casework.svg",
+      "model": "/assets/3d/casework.glb",
       "notes": "Wall run; not on the headwall and clear of the door swing."
     },
     {
@@ -56,6 +68,8 @@
       "count_required": 1,
       "footprint_ft": [2.0, 1.75],
       "anchor": "wall",
+      "symbol": "/assets/2d/handwash_sink.svg",
+      "model": "/assets/3d/handwash_sink.glb",
       "notes": "Wall mounted within reach of the room entry door."
     },
     {
@@ -64,6 +78,8 @@
       "count_required": 1,
       "footprint_ft": [2.5, 1.25],
       "anchor": "mobile",
+      "symbol": "/assets/2d/overbed_table.svg",
+      "model": "/assets/3d/overbed_table.glb",
       "notes": "Mobile; parked beside the bed, may sit inside a bed side clearance."
     }
   ]

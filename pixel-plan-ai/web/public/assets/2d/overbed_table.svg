@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 60 30" fill="none" stroke="#1A1D21" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+  <!-- table top -->
+  <rect x="4" y="4" width="52" height="22" rx="5" fill="#1A1D21" fill-opacity="0.06"/>
+  <!-- top seam -->
+  <line x1="10" y1="15" x2="50" y2="15" stroke-width="0.6" opacity="0.4"/>
+  <!-- C-base -->
+  <path d="M32 26 L14 26 L14 13 L28 13" stroke-width="1.2"/>
+</svg>

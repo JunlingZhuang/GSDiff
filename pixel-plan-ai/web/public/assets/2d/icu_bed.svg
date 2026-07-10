@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 84 180" fill="none" stroke="#1A1D21" stroke-width="1.5" stroke-linejoin="round">
+  <!-- bed frame (head at top / -y) -->
+  <rect x="3" y="3" width="78" height="174" rx="6" fill="#1A1D21" fill-opacity="0.06"/>
+  <!-- mattress inset -->
+  <rect x="8" y="8" width="68" height="164" rx="4" stroke-width="1"/>
+  <!-- pillow at the HEAD end -->
+  <rect x="16" y="12" width="52" height="30" rx="13" stroke-width="1.2"/>
+  <path d="M20 31 Q42 43 64 31" stroke-width="1"/>
+  <!-- side rails -->
+  <rect x="1" y="64" width="6" height="54" rx="3" fill="#1A1D21" fill-opacity="0.06" stroke-width="1.2"/>
+  <rect x="77" y="64" width="6" height="54" rx="3" fill="#1A1D21" fill-opacity="0.06" stroke-width="1.2"/>
+  <!-- foot rail -->
+  <line x1="16" y1="164" x2="68" y2="164" stroke-width="1"/>
+</svg>

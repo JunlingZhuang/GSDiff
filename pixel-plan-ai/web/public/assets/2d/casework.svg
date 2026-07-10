@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 144 48" fill="none" stroke="#1A1D21" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+  <!-- counter carcass -->
+  <rect x="3" y="3" width="138" height="42" rx="2" fill="#1A1D21" fill-opacity="0.06"/>
+  <!-- counter / backsplash depth line -->
+  <line x1="3" y1="13" x2="141" y2="13" stroke-width="0.75" opacity="0.6"/>
+  <!-- door divisions -->
+  <line x1="26" y1="13" x2="26" y2="45" stroke-width="1"/>
+  <line x1="49" y1="13" x2="49" y2="45" stroke-width="1"/>
+  <line x1="72" y1="13" x2="72" y2="45" stroke-width="1"/>
+  <line x1="95" y1="13" x2="95" y2="45" stroke-width="1"/>
+  <line x1="118" y1="13" x2="118" y2="45" stroke-width="1"/>
+  <!-- door pulls -->
+  <line x1="21" y1="34" x2="21" y2="40" stroke-width="1.2"/>
+  <line x1="54" y1="34" x2="54" y2="40" stroke-width="1.2"/>
+  <line x1="67" y1="34" x2="67" y2="40" stroke-width="1.2"/>
+  <line x1="100" y1="34" x2="100" y2="40" stroke-width="1.2"/>
+  <line x1="113" y1="34" x2="113" y2="40" stroke-width="1.2"/>
+</svg>
