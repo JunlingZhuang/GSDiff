@@ -25,6 +25,8 @@ from validator import has_non_rectangular_footprint, validate_plan
 import service
 from room_runtime import execute_room_code
 from room_validator import validate_room
+from room_prompt import build_room_prompt
+import room_service
 
 
 class CodePolicyTests(unittest.TestCase):
@@ -1881,6 +1883,82 @@ class IcuRoomTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "does not match the catalog footprint"):
             execute_room_code(code)
+
+
+class RoomServiceTests(unittest.TestCase):
+    def _validation(self, score: int, checks: list[dict[str, object]], issues: list[str]) -> dict[str, object]:
+        return {"score": score, "checks": checks, "issues": issues, "summary": {}}
+
+    def test_room_loop_repairs_then_accepts_and_threads_validator_delta(self) -> None:
+        candidates = [
+            {"code": f"code-{index}", "strategy": "s", "assumptions": [], "model": "gemini-3.5-flash", "usage": {"total_tokens": 0}}
+            for index in range(1, 4)
+        ]
+        reject_one = self._validation(
+            55,
+            [
+                {"category": "count", "label": "icu_bed: 0/1", "pass": False},
+                {"category": "clearance", "label": "Bed foot clearance clear", "pass": False},
+            ],
+            ["Expected 1 icu_bed, found 0."],
+        )
+        reject_two = self._validation(
+            68,
+            [
+                {"category": "count", "label": "icu_bed: 1/1", "pass": True},
+                {"category": "clearance", "label": "Bed foot clearance clear", "pass": False},
+            ],
+            ["Bed foot needs 5 ft clear of walls and assets."],
+        )
+        accepted = self._validation(95, [{"category": "count", "label": "icu_bed: 1/1", "pass": True}], [])
+        with (
+            patch.dict(os.environ, {"GEMINI_API_KEY": "test-key", "GEMINI_MODEL": "gemini-3.5-flash"}),
+            patch.object(room_service, "generate_room_code", side_effect=candidates) as generate_mock,
+            patch.object(room_service, "execute_room_code", return_value=("sanitized", {"room": {}, "assets": []})),
+            patch.object(room_service, "validate_room", side_effect=[reject_one, reject_two, accepted]),
+        ):
+            result = room_service.generate_room_plan(
+                {"room": {"width_ft": 16.5, "depth_ft": 16.75}, "prompt": "quiet ICU room"}
+            )
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["source"], "gemini-room-repaired")
+        self.assertEqual([item["status"] for item in result["iterations"]], ["rejected", "rejected", "accepted"])
+        self.assertEqual(result["program"], {"width_ft": 16.5, "depth_ft": 16.75})
+        self.assertEqual(result["seed_fidelity"], None)
+        second_context = generate_mock.call_args_list[1].args[2]
+        third_context = generate_mock.call_args_list[2].args[2]
+        # First repair carries the attempt-1 failure feedback but no cross-attempt delta yet.
+        self.assertIn("icu_bed: 0/1", second_context)
+        self.assertNotIn("[validator delta", second_context)
+        # Second repair carries the harness-computed validator delta (service.validation_delta reuse).
+        self.assertIn("[validator delta vs previous candidate", third_context)
+        self.assertIn("count:icu_bed", third_context)
+
+    def test_room_dims_are_validated(self) -> None:
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}):
+            with self.assertRaisesRegex(ValueError, "between 8 and 40"):
+                room_service.generate_room_plan({"room": {"width_ft": 4.0, "depth_ft": 16.0}})
+            with self.assertRaisesRegex(ValueError, "at least 150 sf"):
+                room_service.generate_room_plan({"room": {"width_ft": 9.0, "depth_ft": 9.0}})
+
+    def test_dispatch_routes_room_job_kind(self) -> None:
+        with patch.object(room_service, "generate_room_plan", return_value={"accepted": True}) as action_mock:
+            service.dispatch_job({"job_kind": "room", "room": {"width_ft": 16.0, "depth_ft": 16.0}})
+        action_mock.assert_called_once()
+
+    def test_room_prompt_carries_contract_catalog_and_profile(self) -> None:
+        rules = room_service.load_room_rules()
+        catalog = room_service.load_room_catalog()
+        prompt = build_room_prompt({"width_ft": 16.5, "depth_ft": 16.75, "prompt": "calm room"}, rules, catalog)
+        # Result-contract keys.
+        for key in ("width_ft", "depth_ft", "door", "offset_ft", "rotation_deg", "assets"):
+            self.assertIn(key, prompt)
+        # Rule profile string surfaces verbatim from the rules JSON.
+        self.assertIn("icu-room-schematic-v1", prompt)
+        # Every catalog asset type is present so the agent knows what to place.
+        for entry in catalog["assets"]:
+            self.assertIn(entry["type"], prompt)
+        self.assertIn("calm room", prompt)
 
 
 if __name__ == "__main__":

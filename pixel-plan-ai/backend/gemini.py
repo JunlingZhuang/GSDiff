@@ -600,3 +600,54 @@ def generate_gemini_code(
     structured["model"] = model_name
     structured["usage"] = sum_attempt_usage(model_name, usage_metadatas)
     return structured
+
+
+def generate_room_code(
+    api_key: str,
+    model: str | None,
+    prompt_text: str,
+    thinking_level: str | None = None,
+) -> dict[str, Any]:
+    """Thin single-call room-scale sibling of generate_gemini_code for the isolated ICU flow.
+
+    Reuses call_gemini_with_truncation_retry (with its MAX_TOKENS doubled-budget retry),
+    parse_structured_answer, output_schema, and sum_attempt_usage so the {code, strategy,
+    assumptions} contract and usage/truncation handling stay identical to the floor path.
+    The full room prompt (built by room_prompt.build_room_prompt) is passed in as prompt_text.
+    """
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY is not configured.")
+    model_name = model or DEFAULT_MODEL
+    output_token_setting = os.environ.get(
+        "GEMINI_ROOM_MAX_OUTPUT_TOKENS", os.environ.get("GEMINI_MAX_OUTPUT_TOKENS", "20000")
+    )
+    max_output_tokens = max(8000, min(60000, int(output_token_setting)))
+    generation_config: dict[str, Any] = {
+        "temperature": 0.2,
+        "maxOutputTokens": max_output_tokens,
+        "responseMimeType": "application/json",
+        "responseJsonSchema": output_schema(),
+    }
+    if thinking_level:
+        normalized_level = thinking_level.strip().lower()
+        if normalized_level not in {"minimal", "low", "medium", "high"}:
+            raise ValueError("Gemini thinking level must be minimal, low, medium, or high.")
+        generation_config["thinkingConfig"] = {"thinkingLevel": normalized_level}
+    room_system_instruction = (
+        "You are an ICU room layout coding agent. You write one complete standalone Python program "
+        "that assigns the final room layout to a top-level variable named result, then use exact "
+        "executor and validator feedback to revise it. A deterministic validator is the sole judge "
+        "of correctness; never claim the layout passes. Return one final implementation with no "
+        "abandoned alternatives, and put reasoning in the strategy field, not in the code."
+    )
+    response_payload, usage_metadatas = call_gemini_with_truncation_retry(
+        api_key,
+        model_name,
+        [{"role": "user", "parts": [{"text": prompt_text}]}],
+        generation_config,
+        room_system_instruction,
+    )
+    structured = parse_structured_answer(response_payload)
+    structured["model"] = model_name
+    structured["usage"] = sum_attempt_usage(model_name, usage_metadatas)
+    return structured

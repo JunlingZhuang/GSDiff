@@ -962,4 +962,8 @@ def dispatch_job(payload: dict[str, Any]) -> dict[str, Any]:
         return generate_images_action(payload)
     if job_kind == "refine":
         return refine_plan(payload)
+    if job_kind == "room":
+        from room_service import generate_room_plan  # lazy import keeps the room flow isolated
+
+        return generate_room_plan(payload)
     raise ValueError("Unknown job kind.")

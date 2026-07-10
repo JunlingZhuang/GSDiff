@@ -254,6 +254,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             "/api/execute": "execute",
             "/api/images": "images",
             "/api/refine": "refine",
+            "/api/room": "room",
         }
         if path not in job_kinds:
             self.send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
