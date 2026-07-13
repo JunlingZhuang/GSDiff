@@ -39,21 +39,42 @@ The default route starts with `gemini-3.1-flash-lite` at minimal thinking. A val
 
 ## Run on Windows
 
-From PowerShell:
+One command starts the full stack (kills stale instances, builds the web app on
+first launch, opens three titled service windows, probes health, then opens the
+browser):
 
 ```powershell
-cd C:\Users\rtx3090\Documents\Codex\2026-07-02\new-chat\outputs\pixel-plan-ai
-python -m pip install -r requirements.txt
-.\start.ps1
+powershell -ExecutionPolicy Bypass -File pixel-plan-ai\start-all.ps1
 ```
 
-Open `http://127.0.0.1:8765`. If that port is unavailable, the server also tries `8787` and prints the selected URL.
-
-You can also run the backend directly:
+Or start the three services manually, one terminal each:
 
 ```powershell
+# 1) Python backend - generation / validation / repair loop (:8765, required)
+cd pixel-plan-ai
 python -B backend\server.py
+
+# 2) hfagent service - candidate drawing + tracing (:8801, optional;
+#    Image/Trace modes degrade to fallbacks without it).
+#    MUST use hfagent's own venv (google-genai + cv2 live there):
+cd <repo root>
+hfagent\.venv\Scripts\python -m hfagent.tools.trace_server
+
+# 3) Studio frontend (:3000). `next start` serves the last build;
+#    run `npm run build` after frontend changes, or use `npx next dev` while developing.
+cd pixel-plan-ai\web
+npx next start -p 3000
 ```
+
+Open `http://127.0.0.1:3000` (the Studio). Notes:
+
+- Backend Python changes do NOT need a server restart - every generation runs in
+  a fresh worker subprocess. Only `backend/server.py` route changes need one.
+- If new routes 404 after a restart, kill every stale `server.py` process first:
+  Windows lets several instances bind the same port, and a stale one keeps
+  answering with old code (`start-all.ps1` does this cleanup for you).
+- The legacy vanilla-TS UI is still served by the backend at `http://127.0.0.1:8765`
+  (falls back to `8787` when busy); `.\start.ps1` starts only that.
 
 ## Rebuild the TypeScript frontend
 
